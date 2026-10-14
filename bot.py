@@ -111,6 +111,17 @@ bot = Bot(token=BOT_TOKEN) if (BOT_TOKEN and BOT_TOKEN != "YOUR_BOT_TOKEN_HERE")
 dp = Dispatcher()
 
 
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+
+
+def get_app_url():
+    base = WEBAPP_URL
+    if RENDER_EXTERNAL_URL:
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}srv={RENDER_EXTERNAL_URL}"
+    return base
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject = None):
     user = message.from_user
@@ -120,6 +131,7 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
         first_name=user.first_name
     )
 
+    app_link = get_app_url()
     welcome_text = (
         f"Привет, {user.first_name}! 👾\n\n"
         "Добро пожаловать в **DUO** — твой сервис для совместных игр и игровых свиданий!\n\n"
@@ -132,7 +144,7 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
             [
                 InlineKeyboardButton(
                     text="🎮 Открыть DUO ✨",
-                    web_app=WebAppInfo(url=WEBAPP_URL)
+                    web_app=WebAppInfo(url=app_link)
                 )
             ]
         ]
@@ -143,7 +155,7 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
             chat_id=message.chat.id,
             menu_button=MenuButtonWebApp(
                 text="🎮 DUO",
-                web_app=WebAppInfo(url=WEBAPP_URL)
+                web_app=WebAppInfo(url=app_link)
             )
         )
     except Exception as e:

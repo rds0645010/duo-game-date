@@ -2042,6 +2042,13 @@
       tg.expand();
     }
 
+    // Автоматическое сопряжение с сервером бота (если открыто через кнопку бота)
+    const urlParams = new URLSearchParams(window.location.search);
+    const srvParam = urlParams.get('srv');
+    if (srvParam) {
+      localStorage.setItem('duo_server_url', srvParam.replace(/\/$/, ''));
+    }
+
     function haptic(type = 'light') {
       if (tg?.HapticFeedback) {
         if (type === 'light') tg.HapticFeedback.impactOccurred('light');
