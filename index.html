@@ -2670,7 +2670,7 @@
     const shareViaTelegramBtn = document.getElementById('shareViaTelegramBtn');
     const closeSuccessBtn = document.getElementById('closeSuccessBtn');
 
-    function handleSendInvite() {
+    async function handleSendInvite() {
       if (!state.selectedGame) {
         haptic('medium');
         alert('Пожалуйста, добавь и выбери игру в пункте 1!');
