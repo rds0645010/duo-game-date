@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 # ⚙️ НАСТРОЙКИ (0 БЮДЖЕТА)
 # ==========================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://your-username.github.io/telegram-game-date-bot/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://rds0645010.github.io/duo-game-date/")
 ORGANIZER_CHAT_ID = os.getenv("ORGANIZER_CHAT_ID", "")
 
 # Бесплатная локальная база данных SQLite (0 рублей)
