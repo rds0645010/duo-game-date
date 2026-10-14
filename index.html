@@ -12,13 +12,7 @@
       window.Telegram.WebApp.expand();
     }
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js" defer></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@700;800&family=Fredoka:wght@600;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@600;700;800&family=Space+Grotesk:wght@700;800&display=swap" media="print" onload="this.media='all'">
-  <noscript>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@700;800&family=Fredoka:wght@600;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@600;700;800&family=Space+Grotesk:wght@700;800&display=swap">
-  </noscript>
+
 
   <style>
     /* ==========================================================================
@@ -45,8 +39,8 @@
       --text-secondary: #c2c9db;
       --text-tertiary: #78829d;
       
-      --font-heading: 'Space Grotesk', sans-serif;
-      --font-mono: 'JetBrains Mono', monospace;
+      --font-heading: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
       
       --card-radius: 16px;
       --btn-radius: 12px;
@@ -113,14 +107,14 @@
     [data-gender="girl"] {
       --card-radius: 22px;
       --btn-radius: 16px;
-      --font-heading: 'Fredoka', 'Space Grotesk', sans-serif;
+      --font-heading: 'Comfortaa', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }
 
     /* 👦 СТИЛЬ ПАРНЯ (Tactical Mecha Arcade) */
     [data-gender="boy"] {
       --card-radius: 12px;
       --btn-radius: 8px;
-      --font-heading: 'Chakra Petch', sans-serif;
+      --font-heading: 'Trebuchet MS', 'Arial Black', Impact, system-ui, sans-serif;
     }
 
     * {
@@ -131,7 +125,7 @@
     }
 
     body {
-      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
       background-color: var(--bg);
       background-image: 
         linear-gradient(to right, var(--bg-grid) 1px, transparent 1px),
@@ -733,184 +727,147 @@
       color: var(--text-secondary);
     }
 
-    /* 2. ИЗБРАННОЕ / АДРЕСАТ (PLAYER 2) */
-    .favorites-ribbon {
-      display: flex;
-      gap: 12px;
-      overflow-x: auto;
-      padding: 8px 4px 12px 4px;
-      scrollbar-width: none;
-    }
-    .favorites-ribbon::-webkit-scrollbar {
-      display: none;
-    }
-
-    .fav-contact-item {
-      flex: 0 0 104px;
+    /* 2. АДРЕСАТ (TELEGRAM DESTINATION) */
+    .tg-send-main-card {
       background: var(--surface-2);
-      border: 2px solid var(--border-solid);
-      box-shadow: 3px 3px 0px var(--shadow-hard);
-      border-radius: calc(var(--card-radius) - 4px);
-      padding: 12px 8px;
-      text-align: center;
-      cursor: pointer;
-      transition: all 0.15s;
-      position: relative;
-    }
-
-    .fav-contact-item:hover {
-      border-color: var(--accent-primary);
-      transform: translate(-1px, -1px);
-      box-shadow: 4px 4px 0px var(--shadow-hard);
-    }
-
-    .fav-contact-item:active {
-      transform: translate(2px, 2px);
-      box-shadow: 1px 1px 0px var(--shadow-hard);
-    }
-
-    .fav-contact-item.selected {
-      background: var(--surface-interactive);
-      border-color: var(--accent-primary);
-      box-shadow: 3px 3px 0px var(--accent-primary);
-    }
-
-    .fav-avatar-shell {
-      width: 48px;
-      height: 48px;
-      margin: 0 auto 8px auto;
-      position: relative;
-    }
-
-    .fav-avatar-image {
-      width: 100%;
-      height: 100%;
-      border-radius: 50%;
-      object-fit: cover;
-      background: var(--surface-1);
-      border: 2px solid var(--border-solid);
-    }
-
-    .fav-avatar-letter {
-      width: 100%;
-      height: 100%;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: var(--font-heading);
-      font-size: 20px;
-      font-weight: 800;
-      color: #ffffff;
-      background: var(--surface-interactive);
-      border: 2px solid var(--border-solid);
-    }
-
-    .fav-avatar-tg {
-      width: 100%;
-      height: 100%;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--accent-primary);
-      background: var(--surface-1);
       border: 2px solid var(--accent-primary);
-    }
-
-    .fav-contact-item.selected .fav-avatar-letter,
-    .fav-contact-item.selected .fav-avatar-tg,
-    .fav-contact-item.selected .fav-avatar-image {
-      border-color: var(--accent-primary);
-    }
-
-    .btn-delete-fav {
-      position: absolute;
-      top: 5px;
-      right: 5px;
-      width: 18px;
-      height: 18px;
-      border-radius: 50%;
-      background: var(--surface-1);
-      color: var(--text-tertiary);
-      border: 1px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+      border-radius: var(--card-radius);
+      padding: 14px 16px;
       display: flex;
       align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: all 0.15s;
+      gap: 14px;
+      margin-bottom: 12px;
     }
 
-    .btn-delete-fav:hover {
-      background: #ff4d4d;
-      color: #ffffff;
-      border-color: #ff4d4d;
-      transform: scale(1.1);
-    }
-
-    .fav-active-dot {
-      position: absolute;
-      bottom: 0;
-      right: 0;
-      width: 12px;
-      height: 12px;
+    .tg-icon-badge {
+      width: 44px;
+      height: 44px;
+      min-width: 44px;
+      min-height: 44px;
+      flex-shrink: 0;
       border-radius: 50%;
       background: var(--accent-primary);
-      border: 2px solid var(--surface-2);
-    }
-
-    .fav-contact-name {
-      font-size: 12px;
-      font-weight: 800;
-      font-family: var(--font-heading);
-      color: var(--text-primary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-bottom: 2px;
-    }
-
-    .fav-contact-sub {
-      font-size: 10px;
-      color: var(--text-tertiary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      font-family: var(--font-mono);
-      font-weight: 700;
-    }
-
-    .add-fav-contact-btn {
-      flex: 0 0 104px;
-      border: 2px dashed var(--border-solid);
-      border-radius: calc(var(--card-radius) - 4px);
+      color: var(--btn-text);
       display: flex;
-      flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 12px 8px;
-      cursor: pointer;
-      background: transparent;
-      color: var(--text-tertiary);
-      transition: all 0.15s;
+      box-shadow: 2px 2px 0px var(--shadow-hard);
     }
 
-    .add-fav-contact-btn:hover {
-      border-color: var(--accent-primary);
-      background: var(--surface-2);
+    .tg-icon-badge svg {
+      width: 22px;
+      height: 22px;
+      flex-shrink: 0;
+      display: block;
+    }
+
+    .tg-send-info {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .tg-send-title {
+      font-family: var(--font-heading);
+      font-size: 15px;
+      font-weight: 800;
       color: var(--text-primary);
+      margin-bottom: 2px;
+      line-height: 1.25;
     }
 
-    .recipient-status-strip {
-      background: var(--surface-2);
+    .tg-send-desc {
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .tg-check-pill {
+      flex-shrink: 0;
+      background: var(--surface-1);
+      border: 1px solid var(--accent-primary);
+      color: var(--accent-primary);
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 520px) {
+      .tg-check-pill {
+        display: none;
+      }
+    }
+
+    .optional-recipient-box {
+      background: var(--surface-1);
       border: 2px solid var(--border-solid);
       border-radius: var(--btn-radius);
-      padding: 10px 14px;
-      margin-top: 12px;
+      padding: 12px 14px;
+    }
+
+    .optional-recipient-label {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 8px;
+      display: block;
+    }
+
+    .recipient-input-wrapper {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      font-size: 13px;
+      gap: 8px;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      border-radius: calc(var(--btn-radius) - 3px);
+      padding: 8px 12px;
+      transition: border-color 0.15s;
+    }
+
+    .recipient-input-wrapper:focus-within {
+      border-color: var(--accent-primary);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+    }
+
+    .recipient-input-icon {
+      color: var(--accent-primary);
+      flex-shrink: 0;
+    }
+
+    .recipient-clean-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-primary);
+      font-family: var(--font-heading);
+      font-size: 13.5px;
+      font-weight: 700;
+      min-width: 0;
+    }
+
+    .recipient-clean-input::placeholder {
+      color: var(--text-tertiary);
+      font-weight: 600;
+    }
+
+    .clear-recipient-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-tertiary);
+      font-size: 16px;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    .clear-recipient-btn:hover {
+      color: var(--accent-primary);
     }
 
     /* 3. ДАТА-СТРИП + ВРЕМЯ */
@@ -1778,34 +1735,40 @@
           <div id="gamesContainer"></div>
         </section>
 
-        <!-- 2. ИЗБРАННОЕ / АДРЕСАТ (PLAYER 2) -->
+        <!-- 2. АДРЕСАТ / КУДА ОТПРАВИТЬ -->
         <section class="arcade-card">
           <div class="section-eyebrow">
             <span class="eyebrow-title">
               <span class="eyebrow-step-badge">02</span>
-              Кому отправить? (PLAYER 2)
+              Кому отправить инвайт?
             </span>
           </div>
 
-          <div class="favorites-ribbon" id="favoritesRibbon">
-            <div class="fav-contact-item selected" id="favTelegramDirectCard" title="Отправить любому контакту из своего Telegram">
-              <div class="fav-avatar-shell fav-avatar-tg">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                <div class="fav-active-dot"></div>
-              </div>
-              <div class="fav-contact-name">Из Telegram</div>
-              <div class="fav-contact-sub">Выбор чата</div>
+          <!-- Главная карточка отправки в Telegram -->
+          <div class="tg-send-main-card" id="tgSendCard">
+            <div class="tg-icon-badge">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
             </div>
-
-            <button class="add-fav-contact-btn" id="openAddFavModalBtn" title="Сохранить частого напарника по @username">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8m-4-4h8"></path></svg>
-              <span style="font-size: 11px; font-weight: 800; margin-top: 4px; font-family: var(--font-heading);">+ Контакт</span>
-            </button>
+            <div class="tg-send-info">
+              <div class="tg-send-title">Отправить в чат Telegram</div>
+              <div class="tg-send-desc">При клике откроется Telegram со списком твоих друзей и чатов</div>
+            </div>
+            <div class="tg-check-pill">
+              <span>● Готово</span>
+            </div>
           </div>
 
-          <div class="recipient-status-strip">
-            <span style="color: var(--text-secondary);">Адресат: <strong id="curRecipientNameDisplay" style="color: var(--accent-primary);">Выбор в Telegram 🚀</strong></span>
-            <span id="curRecipientUsernameDisplay" style="color: var(--text-tertiary); font-family: var(--font-mono); font-weight: 700;">Любой контакт / чат</span>
+          <!-- Опциональное поле никнейма / имени -->
+          <div class="optional-recipient-box">
+            <label class="optional-recipient-label" for="targetRecipientInput">Подписать имя или @username напарника (необязательно):</label>
+            <div class="recipient-input-wrapper">
+              <svg class="recipient-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+              <input type="text" id="targetRecipientInput" class="recipient-clean-input" placeholder="Например: Аня, Саня или @nickname" maxlength="35">
+              <button class="clear-recipient-btn" id="clearRecipientBtn" style="display: none;" title="Очистить">×</button>
+            </div>
           </div>
         </section>
 
@@ -2050,36 +2013,20 @@
     </div>
   </div>
 
-  <!-- 3. МОДАЛКА: ДОБАВЛЕНИЕ КОНТАКТА -->
-  <div class="modal-overlay-backdrop" id="addFavModal">
-    <div class="modal-dialog-panel">
-      <div class="modal-header-icon">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-      </div>
-      <h3 class="modal-heading">Новый тиммейт (PLAYER 2)</h3>
-      <p class="modal-subtext">Добавь контакт в избранное для отправки приглашения в один клик:</p>
-
-      <input type="text" id="newFavNameInput" placeholder="Имя или никнейм напарника" style="margin-bottom: 10px;">
-      <input type="text" id="newFavUsernameInput" placeholder="Telegram @username" style="margin-bottom: 14px;">
-
-      <button class="modal-action-btn" id="saveNewFavBtn">Сохранить</button>
-      <button class="modal-cancel-btn" id="closeAddFavModalBtn">Отмена</button>
-    </div>
-  </div>
-
-  <!-- 4. МОДАЛКА: ГОТОВЫЙ ИНВАЙТ -->
+  <!-- 3. МОДАЛКА: ГОТОВЫЙ ИНВАЙТ -->
   <div class="modal-overlay-backdrop" id="successModal">
     <div class="modal-dialog-panel">
       <div class="modal-header-icon" style="background: var(--surface-2); border-color: var(--accent-primary);">
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
-      <h3 class="modal-heading">Инвайт сформирован</h3>
+      <h3 class="modal-heading">Инвайт готов! 🚀</h3>
+      <p class="modal-subtext">Выбери чат в открывшемся Telegram, чтобы отправить инвайт другу:</p>
       
       <div id="summaryCardPreview" style="background: var(--surface-2); border: 2px solid var(--border-solid); border-radius: var(--card-radius); padding: 16px; font-size: 13.5px; line-height: 1.55; color: var(--text-secondary); text-align: left; margin: 12px 0 16px 0;">
       </div>
 
-      <button class="modal-action-btn" id="shareViaTelegramBtn">Отправить в Telegram 🚀</button>
-      <button class="modal-cancel-btn" id="closeSuccessBtn">Готово</button>
+      <button class="modal-action-btn" id="shareViaTelegramBtn">Открыть выбор чата ещё раз ✈️</button>
+      <button class="modal-cancel-btn" id="closeSuccessBtn">Закрыть</button>
     </div>
   </div>
 
@@ -2101,6 +2048,67 @@
       }
     }
 
+    function launchConfetti(colors = ['#ff5c8a', '#00ff88', '#00e5ff', '#ff9f1c', '#a855f7']) {
+      let canvas = document.getElementById('confettiCanvas');
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.id = 'confettiCanvas';
+        canvas.style.position = 'fixed';
+        canvas.style.inset = '0';
+        canvas.style.width = '100vw';
+        canvas.style.height = '100vh';
+        canvas.style.pointerEvents = 'none';
+        canvas.style.zIndex = '9999';
+        document.body.appendChild(canvas);
+      }
+      const ctx = canvas.getContext('2d');
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      const particles = [];
+      for (let i = 0; i < 75; i++) {
+        particles.push({
+          x: canvas.width / 2 + (Math.random() - 0.5) * 120,
+          y: canvas.height * 0.65,
+          vx: (Math.random() - 0.5) * 14,
+          vy: -Math.random() * 12 - 5,
+          size: Math.random() * 8 + 4,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          rotation: Math.random() * 360,
+          rotSpeed: (Math.random() - 0.5) * 8,
+          alpha: 1
+        });
+      }
+
+      function update() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let active = false;
+        particles.forEach(p => {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += 0.38;
+          p.rotation += p.rotSpeed;
+          p.alpha -= 0.014;
+          if (p.alpha > 0) {
+            active = true;
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, p.alpha);
+            ctx.translate(p.x, p.y);
+            ctx.rotate((p.rotation * Math.PI) / 180);
+            ctx.fillStyle = p.color;
+            ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+            ctx.restore();
+          }
+        });
+        if (active) {
+          requestAnimationFrame(update);
+        } else {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
+      update();
+    }
+
     // Умный авто-расчёт времени устройства + 30 мин
     const nowDevice = new Date();
     let initialHour = nowDevice.getHours();
@@ -2120,7 +2128,7 @@
       myUsername: tg?.initDataUnsafe?.user?.username ? `@${tg.initDataUnsafe.user.username}` : '',
       
       selectedGame: null,
-      selectedRecipient: null,
+      customRecipient: localStorage.getItem('duo_custom_recipient') || '',
       selectedDateText: '',
       timeHours: initialHour,
       timeMinutes: initialMinute,
@@ -2130,11 +2138,6 @@
     };
 
     let gamesList = JSON.parse(localStorage.getItem('duo_custom_games')) || [];
-
-    // Очищаем старые тестовые моки ('Любимка' и 'Тиммейт') из памяти браузера
-    let rawFavorites = JSON.parse(localStorage.getItem('duo_favorites')) || [];
-    let favoritesList = rawFavorites.filter(f => f && f.id !== '1' && f.id !== '2' && f.username !== '@my_love' && f.username !== '@teammate');
-    localStorage.setItem('duo_favorites', JSON.stringify(favoritesList));
 
     // ПЕРЕКЛЮЧЕНИЕ ПАЛИТРЫ
     function applyPalette(paletteName) {
@@ -2224,7 +2227,7 @@
       const ticketNoteValue = document.getElementById('ticketNoteValue');
 
       ticketGame.innerText = formatGameDisplay(state.selectedGame);
-      ticketRecipient.innerText = state.selectedRecipient ? `${state.selectedRecipient.name}` : 'В Telegram 🚀';
+      ticketRecipient.innerText = state.customRecipient ? state.customRecipient : 'Чат в Telegram 🚀';
       ticketTiming.innerText = `${state.selectedDateText} в ${getFormattedTime()}`;
       ticketVibe.innerText = state.vibe;
       ticketDuration.innerText = state.duration;
@@ -2350,7 +2353,7 @@
       state.selectedGame = gamesList[randomIdx];
       renderGames();
       updateTicketPass();
-      confetti({ particleCount: 45, spread: 60, origin: { y: 0.3 } });
+      launchConfetti();
     };
 
     function openAddGameModal() {
@@ -2397,131 +2400,48 @@
 
     renderGames();
 
-    // 2. ИЗБРАННОЕ
-    const favoritesRibbon = document.getElementById('favoritesRibbon');
-    const openAddFavModalBtn = document.getElementById('openAddFavModalBtn');
-    const curRecipientNameDisplay = document.getElementById('curRecipientNameDisplay');
-    const curRecipientUsernameDisplay = document.getElementById('curRecipientUsernameDisplay');
-    const addFavModal = document.getElementById('addFavModal');
-    const newFavNameInput = document.getElementById('newFavNameInput');
-    const newFavUsernameInput = document.getElementById('newFavUsernameInput');
-    const saveNewFavBtn = document.getElementById('saveNewFavBtn');
-    const closeAddFavModalBtn = document.getElementById('closeAddFavModalBtn');
+    // 2. АДРЕСАТ / КУДА ОТПРАВИТЬ
+    const targetRecipientInput = document.getElementById('targetRecipientInput');
+    const clearRecipientBtn = document.getElementById('clearRecipientBtn');
+    const tgSendCard = document.getElementById('tgSendCard');
 
-    function getLetterColor(name) {
-      const colors = ['#ff5c8a', '#00ff88', '#a855f7', '#ff9f1c', '#00e5ff'];
-      let hash = 0;
-      for (let i = 0; i < (name || '').length; i++) hash += name.charCodeAt(i);
-      return colors[Math.abs(hash) % colors.length];
+    if (state.customRecipient && targetRecipientInput) {
+      targetRecipientInput.value = state.customRecipient;
+      if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
     }
 
-    function renderFavorites() {
-      // Удаляем только динамически добавленные карточки контактов
-      favoritesRibbon.querySelectorAll('.fav-saved-contact-card').forEach(el => el.remove());
-
-      const tgDirectCard = document.getElementById('favTelegramDirectCard');
-      if (tgDirectCard) {
-        tgDirectCard.classList.toggle('selected', state.selectedRecipient === null);
-        tgDirectCard.onclick = () => {
-          haptic('light');
-          state.selectedRecipient = null;
-          renderFavorites();
-        };
-      }
-
-      favoritesList.forEach((fav) => {
-        const isSelected = state.selectedRecipient?.id === fav.id;
-        const initial = (fav.name || 'U').trim().charAt(0).toUpperCase();
-        const avatarColor = getLetterColor(fav.name);
-
-        const card = document.createElement('div');
-        card.className = `fav-contact-item fav-saved-contact-card ${isSelected ? 'selected' : ''}`;
-        card.dataset.id = fav.id;
-        card.innerHTML = `
-          <button class="btn-delete-fav" data-del-id="${fav.id}" title="Удалить контакт">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-          </button>
-          <div class="fav-avatar-shell">
-            <div class="fav-avatar-letter" style="background: ${avatarColor}22; color: ${avatarColor}; border-color: ${avatarColor};">
-              ${initial}
-            </div>
-            <div class="fav-active-dot"></div>
-          </div>
-          <div class="fav-contact-name">${fav.name}</div>
-          <div class="fav-contact-sub">${fav.username}</div>
-        `;
-
-        card.onclick = (e) => {
-          if (e.target.closest('.btn-delete-fav')) return;
-          haptic('light');
-          state.selectedRecipient = fav;
-          renderFavorites();
-        };
-
-        const delBtn = card.querySelector('.btn-delete-fav');
-        delBtn.onclick = (e) => {
-          e.stopPropagation();
-          haptic('medium');
-          const delId = delBtn.dataset.delId;
-          favoritesList = favoritesList.filter(f => f.id !== delId);
-          localStorage.setItem('duo_favorites', JSON.stringify(favoritesList));
-          if (state.selectedRecipient?.id === delId) {
-            state.selectedRecipient = null;
-          }
-          renderFavorites();
-        };
-
-        favoritesRibbon.insertBefore(card, openAddFavModalBtn);
+    if (targetRecipientInput) {
+      targetRecipientInput.addEventListener('input', (e) => {
+        const val = e.target.value.trim();
+        state.customRecipient = val;
+        localStorage.setItem('duo_custom_recipient', val);
+        if (clearRecipientBtn) {
+          clearRecipientBtn.style.display = val ? 'block' : 'none';
+        }
+        updateTicketPass();
       });
-
-      updateRecipientDisplay();
-      updateTicketPass();
     }
 
-    function updateRecipientDisplay() {
-      if (state.selectedRecipient) {
-        curRecipientNameDisplay.innerText = state.selectedRecipient.name;
-        curRecipientUsernameDisplay.innerText = state.selectedRecipient.username;
-      } else {
-        curRecipientNameDisplay.innerText = 'Выбор в Telegram 🚀';
-        curRecipientUsernameDisplay.innerText = 'Любой контакт / чат';
-      }
+    if (clearRecipientBtn) {
+      clearRecipientBtn.addEventListener('click', () => {
+        haptic('light');
+        if (targetRecipientInput) {
+          targetRecipientInput.value = '';
+          targetRecipientInput.focus();
+        }
+        state.customRecipient = '';
+        localStorage.removeItem('duo_custom_recipient');
+        clearRecipientBtn.style.display = 'none';
+        updateTicketPass();
+      });
     }
 
-    renderFavorites();
-
-    openAddFavModalBtn.onclick = () => {
-      haptic('light');
-      newFavNameInput.value = '';
-      newFavUsernameInput.value = '';
-      addFavModal.classList.add('active');
-      setTimeout(() => newFavNameInput.focus(), 200);
-    };
-
-    closeAddFavModalBtn.onclick = () => addFavModal.classList.remove('active');
-
-    saveNewFavBtn.onclick = () => {
-      const name = newFavNameInput.value.trim();
-      let username = newFavUsernameInput.value.trim();
-      if (!name) {
-        alert('Пожалуйста, напиши имя тиммейта!');
-        return;
-      }
-      if (username && !username.startsWith('@')) username = '@' + username;
-
-      const newFav = {
-        id: Date.now().toString(),
-        name: name,
-        username: username || '@username'
-      };
-
-      favoritesList.push(newFav);
-      localStorage.setItem('duo_favorites', JSON.stringify(favoritesList));
-      state.selectedRecipient = newFav;
-      renderFavorites();
-      addFavModal.classList.remove('active');
-      haptic('success');
-    };
+    if (tgSendCard) {
+      tgSendCard.addEventListener('click', () => {
+        haptic('light');
+        if (targetRecipientInput) targetRecipientInput.focus();
+      });
+    }
 
     // 3. КАСТОМНЫЙ ДАТА-СТРИП + ТАЙМ-ПИКЕР
     const dayStripScroll = document.getElementById('dayStripScroll');
@@ -2760,15 +2680,10 @@
         cyan: ['#00e5ff', '#3b82f6', '#00b4d8', '#ffffff']
       };
 
-      confetti({
-        particleCount: 160,
-        spread: 95,
-        origin: { y: 0.65 },
-        colors: colorsMap[state.palette] || colorsMap.sakura
-      });
+      launchConfetti(colorsMap[state.palette] || colorsMap.sakura);
 
-      const recipientText = state.selectedRecipient 
-        ? `${state.selectedRecipient.name} (${state.selectedRecipient.username})` 
+      const recipientText = state.customRecipient 
+        ? state.customRecipient 
         : 'Любой друг в Telegram 🚀';
 
       const payload = {
@@ -2779,7 +2694,7 @@
           gender: state.gender,
           palette: state.palette
         },
-        recipient: state.selectedRecipient,
+        recipient: state.customRecipient || 'Telegram',
         place: state.selectedGame.title,
         gameTag: state.selectedGame.tag,
         day: state.selectedDateText,
@@ -2789,8 +2704,12 @@
         note: state.note || 'Без записки'
       };
 
-      if (tg && tg.sendData) {
-        tg.sendData(JSON.stringify(payload));
+      try {
+        if (tg && tg.sendData) {
+          tg.sendData(JSON.stringify(payload));
+        }
+      } catch (err) {
+        console.warn('tg.sendData not available:', err);
       }
 
       const gameText = formatGameDisplay(state.selectedGame);
@@ -2805,11 +2724,14 @@
       `;
 
       successModal.classList.add('active');
+
+      // Мгновенно открываем список чатов в Telegram без серверов!
+      shareToTelegram();
     }
 
     function shareToTelegram() {
       const gameTitle = formatGameDisplay(state.selectedGame);
-      const recipientMention = state.selectedRecipient ? `🎯 Для: ${state.selectedRecipient.name} (${state.selectedRecipient.username})\n` : '';
+      const recipientMention = state.customRecipient ? `🎯 Для: ${state.customRecipient}\n` : '';
       const textInvite = encodeURIComponent(
         `🎮 Привет! Зову тебя в совместную катку в DUO!\n\n` +
         recipientMention +
