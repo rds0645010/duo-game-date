@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>DUO — Matchmaking & Co-op Gaming</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Локальный SDK Telegram: открывается за 10 мс без зависаний на telegram.org -->
+  <script src="telegram-web-app.js"></script>
   <script>
     /* Мгновенная инициализация Telegram: убирает экран загрузки за 0 мс */
     if (window.Telegram && window.Telegram.WebApp) {
@@ -2025,8 +2026,9 @@
       <div id="summaryCardPreview" style="background: var(--surface-2); border: 2px solid var(--border-solid); border-radius: var(--card-radius); padding: 16px; font-size: 13.5px; line-height: 1.55; color: var(--text-secondary); text-align: left; margin: 12px 0 16px 0;">
       </div>
 
-      <button class="modal-action-btn" id="shareViaTelegramBtn">Открыть выбор чата ещё раз ✈️</button>
-      <button class="modal-cancel-btn" id="closeSuccessBtn">Закрыть</button>
+      <button class="modal-action-btn" id="shareViaTelegramBtn">Выбрать чат в Telegram ✈️</button>
+      <button class="modal-action-btn" id="copyTextOnlyBtn" style="background: var(--surface-interactive); color: var(--text-primary); border-color: var(--border-solid); margin-top: 8px;">📋 Скопировать текст ещё раз</button>
+      <button class="modal-cancel-btn" id="closeSuccessBtn">Закрыть окно</button>
     </div>
   </div>
 
@@ -2686,33 +2688,13 @@
         ? state.customRecipient 
         : 'Любой друг в Telegram 🚀';
 
-      const payload = {
-        app: 'DUO',
-        sender: {
-          name: state.myName,
-          username: state.myUsername,
-          gender: state.gender,
-          palette: state.palette
-        },
-        recipient: state.customRecipient || 'Telegram',
-        place: state.selectedGame.title,
-        gameTag: state.selectedGame.tag,
-        day: state.selectedDateText,
-        time: getFormattedTime(),
-        vibe: state.vibe,
-        duration: state.duration,
-        note: state.note || 'Без записки'
-      };
-
-      try {
-        if (tg && tg.sendData) {
-          tg.sendData(JSON.stringify(payload));
-        }
-      } catch (err) {
-        console.warn('tg.sendData not available:', err);
-      }
-
       const gameText = formatGameDisplay(state.selectedGame);
+
+      // Автоматически копируем текст инвайта в буфер обмена
+      const textInvite = buildInviteText();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(textInvite).catch(() => {});
+      }
 
       summaryCardPreview.innerHTML = `
         🎯 <b>Кому:</b> ${recipientText}<br>
@@ -2721,18 +2703,21 @@
         ✨ <b>Вайб:</b> ${state.vibe}<br>
         ⏳ <b>Длительность:</b> ${state.duration}
         ${state.note ? `<br>💌 <i>"${state.note}"</i>` : ''}
+        <div style="margin-top: 10px; padding: 6px 10px; background: rgba(0, 255, 136, 0.12); border: 1px solid #00ff88; border-radius: 6px; color: #00ff88; font-size: 11px; font-weight: 700;">
+          ✓ Готовый текст скопирован в буфер обмена!
+        </div>
       `;
 
       successModal.classList.add('active');
 
-      // Мгновенно открываем список чатов в Telegram без серверов!
+      // Открываем выбор чата Telegram, НЕ закрывая приложение!
       shareToTelegram();
     }
 
-    function shareToTelegram() {
+    function buildInviteText() {
       const gameTitle = formatGameDisplay(state.selectedGame);
       const recipientMention = state.customRecipient ? `🎯 Для: ${state.customRecipient}\n` : '';
-      const textInvite = encodeURIComponent(
+      return (
         `🎮 Привет! Зову тебя в совместную катку в DUO!\n\n` +
         recipientMention +
         `🕹 Игра: ${gameTitle}\n` +
@@ -2740,13 +2725,29 @@
         `✨ Вайб: ${state.vibe}\n` +
         `⏳ Длительность: ${state.duration}\n` +
         (state.note ? `💌 Записка: "${state.note}"\n` : '') +
-        `\nПогнали? Жду твоего ответа! 🚀`
+        `\nПогнали? Жду ответа! 🚀\nhttps://rds0645010.github.io/duo-game-date/`
       );
+    }
 
-      const shareUrl = `https://t.me/share/url?url=&text=${textInvite}`;
-      if (tg && tg.openTelegramLink) {
+    function shareToTelegram() {
+      const textInvite = buildInviteText();
+      
+      // Страховочное копирование в буфер
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(textInvite).catch(() => {});
+      }
+
+      const encodedText = encodeURIComponent(textInvite);
+      const appUrl = encodeURIComponent('https://rds0645010.github.io/duo-game-date/');
+      const shareUrl = `https://t.me/share/url?url=${appUrl}&text=${encodedText}`;
+
+      // Проверяем: запущен ли сайт внутри реального Telegram WebApp
+      const isInsideTelegram = Boolean(window.Telegram?.WebApp?.initData && window.Telegram.WebApp.initData.length > 0);
+
+      if (isInsideTelegram && tg && tg.openTelegramLink) {
         tg.openTelegramLink(shareUrl);
       } else {
+        // В обычном браузере (Chrome / Safari / Edge) открываем в новой вкладке, НЕ закрывая и не перезагружая текущую страницу!
         window.open(shareUrl, '_blank');
       }
     }
@@ -2756,12 +2757,26 @@
     document.getElementById('desktopShareBtn').onclick = shareToTelegram;
     shareViaTelegramBtn.onclick = shareToTelegram;
 
+    const copyBtn = document.getElementById('copyTextOnlyBtn');
+    if (copyBtn) {
+      copyBtn.onclick = () => {
+        haptic('light');
+        const textInvite = buildInviteText();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(textInvite).then(() => {
+            haptic('success');
+            alert('Текст приглашения успешно скопирован в буфер обмена!');
+          }).catch(() => {
+            prompt('Скопируй текст приглашения вручную:', textInvite);
+          });
+        } else {
+          prompt('Скопируй текст приглашения вручную:', textInvite);
+        }
+      };
+    }
+
     closeSuccessBtn.onclick = () => {
-      if (tg && tg.close) {
-        tg.close();
-      } else {
-        successModal.classList.remove('active');
-      }
+      successModal.classList.remove('active');
     };
 
     // Инициализация темы и палитры
