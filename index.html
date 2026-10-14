@@ -5,10 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>DUO — Matchmaking & Co-op Gaming</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+  <script>
+    /* Мгновенная инициализация Telegram: убирает экран загрузки за 0 мс */
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      window.Telegram.WebApp.expand();
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js" defer></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,600;0,700;0,800;1,700&family=Fredoka:wght@600;700&family=JetBrains+Mono:wght@600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&family=Space+Grotesk:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@700;800&family=Fredoka:wght@600;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@600;700;800&family=Space+Grotesk:wght@700;800&display=swap" media="print" onload="this.media='all'">
+  <noscript>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@700;800&family=Fredoka:wght@600;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@600;700;800&family=Space+Grotesk:wght@700;800&display=swap">
+  </noscript>
 
   <style>
     /* ==========================================================================
@@ -781,8 +791,61 @@
       border: 2px solid var(--border-solid);
     }
 
+    .fav-avatar-letter {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-heading);
+      font-size: 20px;
+      font-weight: 800;
+      color: #ffffff;
+      background: var(--surface-interactive);
+      border: 2px solid var(--border-solid);
+    }
+
+    .fav-avatar-tg {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-primary);
+      background: var(--surface-1);
+      border: 2px solid var(--accent-primary);
+    }
+
+    .fav-contact-item.selected .fav-avatar-letter,
+    .fav-contact-item.selected .fav-avatar-tg,
     .fav-contact-item.selected .fav-avatar-image {
       border-color: var(--accent-primary);
+    }
+
+    .btn-delete-fav {
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--surface-1);
+      color: var(--text-tertiary);
+      border: 1px solid var(--border-solid);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-delete-fav:hover {
+      background: #ff4d4d;
+      color: #ffffff;
+      border-color: #ff4d4d;
+      transform: scale(1.1);
     }
 
     .fav-active-dot {
@@ -797,7 +860,7 @@
     }
 
     .fav-contact-name {
-      font-size: 12.5px;
+      font-size: 12px;
       font-weight: 800;
       font-family: var(--font-heading);
       color: var(--text-primary);
@@ -808,7 +871,7 @@
     }
 
     .fav-contact-sub {
-      font-size: 10.5px;
+      font-size: 10px;
       color: var(--text-tertiary);
       white-space: nowrap;
       overflow: hidden;
@@ -1725,15 +1788,24 @@
           </div>
 
           <div class="favorites-ribbon" id="favoritesRibbon">
-            <button class="add-fav-contact-btn" id="openAddFavModalBtn">
+            <div class="fav-contact-item selected" id="favTelegramDirectCard" title="Отправить любому контакту из своего Telegram">
+              <div class="fav-avatar-shell fav-avatar-tg">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                <div class="fav-active-dot"></div>
+              </div>
+              <div class="fav-contact-name">Из Telegram</div>
+              <div class="fav-contact-sub">Выбор чата</div>
+            </div>
+
+            <button class="add-fav-contact-btn" id="openAddFavModalBtn" title="Сохранить частого напарника по @username">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8m-4-4h8"></path></svg>
-              <span style="font-size: 11px; font-weight: 800; margin-top: 4px; font-family: var(--font-heading);">Добавить</span>
+              <span style="font-size: 11px; font-weight: 800; margin-top: 4px; font-family: var(--font-heading);">+ Контакт</span>
             </button>
           </div>
 
           <div class="recipient-status-strip">
-            <span style="color: var(--text-secondary);">Адресат: <strong id="curRecipientNameDisplay" style="color: var(--accent-primary);">Любимка 💕</strong></span>
-            <span id="curRecipientUsernameDisplay" style="color: var(--text-tertiary); font-family: var(--font-mono); font-weight: 700;">@my_love</span>
+            <span style="color: var(--text-secondary);">Адресат: <strong id="curRecipientNameDisplay" style="color: var(--accent-primary);">Выбор в Telegram 🚀</strong></span>
+            <span id="curRecipientUsernameDisplay" style="color: var(--text-tertiary); font-family: var(--font-mono); font-weight: 700;">Любой контакт / чат</span>
           </div>
         </section>
 
@@ -1987,7 +2059,7 @@
       <h3 class="modal-heading">Новый тиммейт (PLAYER 2)</h3>
       <p class="modal-subtext">Добавь контакт в избранное для отправки приглашения в один клик:</p>
 
-      <input type="text" id="newFavNameInput" placeholder="Имя (например: Любимка 💕)" style="margin-bottom: 10px;">
+      <input type="text" id="newFavNameInput" placeholder="Имя или никнейм напарника" style="margin-bottom: 10px;">
       <input type="text" id="newFavUsernameInput" placeholder="Telegram @username" style="margin-bottom: 14px;">
 
       <button class="modal-action-btn" id="saveNewFavBtn">Сохранить</button>
@@ -2059,11 +2131,10 @@
 
     let gamesList = JSON.parse(localStorage.getItem('duo_custom_games')) || [];
 
-    let defaultFavorites = [
-      { id: '1', name: 'Любимка 💕', username: '@my_love', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=FavA' },
-      { id: '2', name: 'Тиммейт ⚡', username: '@teammate', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=FavB' }
-    ];
-    let favoritesList = JSON.parse(localStorage.getItem('duo_favorites')) || defaultFavorites;
+    // Очищаем старые тестовые моки ('Любимка' и 'Тиммейт') из памяти браузера
+    let rawFavorites = JSON.parse(localStorage.getItem('duo_favorites')) || [];
+    let favoritesList = rawFavorites.filter(f => f && f.id !== '1' && f.id !== '2' && f.username !== '@my_love' && f.username !== '@teammate');
+    localStorage.setItem('duo_favorites', JSON.stringify(favoritesList));
 
     // ПЕРЕКЛЮЧЕНИЕ ПАЛИТРЫ
     function applyPalette(paletteName) {
@@ -2153,7 +2224,7 @@
       const ticketNoteValue = document.getElementById('ticketNoteValue');
 
       ticketGame.innerText = formatGameDisplay(state.selectedGame);
-      ticketRecipient.innerText = state.selectedRecipient ? `${state.selectedRecipient.name}` : '— Не выбран —';
+      ticketRecipient.innerText = state.selectedRecipient ? `${state.selectedRecipient.name}` : 'В Telegram 🚀';
       ticketTiming.innerText = `${state.selectedDateText} в ${getFormattedTime()}`;
       ticketVibe.innerText = state.vibe;
       ticketDuration.innerText = state.duration;
@@ -2337,31 +2408,67 @@
     const saveNewFavBtn = document.getElementById('saveNewFavBtn');
     const closeAddFavModalBtn = document.getElementById('closeAddFavModalBtn');
 
-    function renderFavorites() {
-      favoritesRibbon.querySelectorAll('.fav-contact-item').forEach(el => el.remove());
+    function getLetterColor(name) {
+      const colors = ['#ff5c8a', '#00ff88', '#a855f7', '#ff9f1c', '#00e5ff'];
+      let hash = 0;
+      for (let i = 0; i < (name || '').length; i++) hash += name.charCodeAt(i);
+      return colors[Math.abs(hash) % colors.length];
+    }
 
-      favoritesList.forEach((fav, index) => {
-        const isSelected = state.selectedRecipient?.id === fav.id || (!state.selectedRecipient && index === 0);
-        if (isSelected && !state.selectedRecipient) state.selectedRecipient = fav;
+    function renderFavorites() {
+      // Удаляем только динамически добавленные карточки контактов
+      favoritesRibbon.querySelectorAll('.fav-saved-contact-card').forEach(el => el.remove());
+
+      const tgDirectCard = document.getElementById('favTelegramDirectCard');
+      if (tgDirectCard) {
+        tgDirectCard.classList.toggle('selected', state.selectedRecipient === null);
+        tgDirectCard.onclick = () => {
+          haptic('light');
+          state.selectedRecipient = null;
+          renderFavorites();
+        };
+      }
+
+      favoritesList.forEach((fav) => {
+        const isSelected = state.selectedRecipient?.id === fav.id;
+        const initial = (fav.name || 'U').trim().charAt(0).toUpperCase();
+        const avatarColor = getLetterColor(fav.name);
 
         const card = document.createElement('div');
-        card.className = `fav-contact-item ${isSelected ? 'selected' : ''}`;
+        card.className = `fav-contact-item fav-saved-contact-card ${isSelected ? 'selected' : ''}`;
+        card.dataset.id = fav.id;
         card.innerHTML = `
+          <button class="btn-delete-fav" data-del-id="${fav.id}" title="Удалить контакт">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
           <div class="fav-avatar-shell">
-            <img class="fav-avatar-image" src="${fav.avatar}" alt="${fav.name}">
+            <div class="fav-avatar-letter" style="background: ${avatarColor}22; color: ${avatarColor}; border-color: ${avatarColor};">
+              ${initial}
+            </div>
             <div class="fav-active-dot"></div>
           </div>
           <div class="fav-contact-name">${fav.name}</div>
           <div class="fav-contact-sub">${fav.username}</div>
         `;
 
-        card.onclick = () => {
+        card.onclick = (e) => {
+          if (e.target.closest('.btn-delete-fav')) return;
           haptic('light');
-          favoritesRibbon.querySelectorAll('.fav-contact-item').forEach(c => c.classList.remove('selected'));
-          card.classList.add('selected');
           state.selectedRecipient = fav;
-          updateRecipientDisplay();
-          updateTicketPass();
+          renderFavorites();
+        };
+
+        const delBtn = card.querySelector('.btn-delete-fav');
+        delBtn.onclick = (e) => {
+          e.stopPropagation();
+          haptic('medium');
+          const delId = delBtn.dataset.delId;
+          favoritesList = favoritesList.filter(f => f.id !== delId);
+          localStorage.setItem('duo_favorites', JSON.stringify(favoritesList));
+          if (state.selectedRecipient?.id === delId) {
+            state.selectedRecipient = null;
+          }
+          renderFavorites();
         };
 
         favoritesRibbon.insertBefore(card, openAddFavModalBtn);
@@ -2375,6 +2482,9 @@
       if (state.selectedRecipient) {
         curRecipientNameDisplay.innerText = state.selectedRecipient.name;
         curRecipientUsernameDisplay.innerText = state.selectedRecipient.username;
+      } else {
+        curRecipientNameDisplay.innerText = 'Выбор в Telegram 🚀';
+        curRecipientUsernameDisplay.innerText = 'Любой контакт / чат';
       }
     }
 
@@ -2385,6 +2495,7 @@
       newFavNameInput.value = '';
       newFavUsernameInput.value = '';
       addFavModal.classList.add('active');
+      setTimeout(() => newFavNameInput.focus(), 200);
     };
 
     closeAddFavModalBtn.onclick = () => addFavModal.classList.remove('active');
@@ -2393,7 +2504,7 @@
       const name = newFavNameInput.value.trim();
       let username = newFavUsernameInput.value.trim();
       if (!name) {
-        alert('Укажи имя контакта!');
+        alert('Пожалуйста, напиши имя тиммейта!');
         return;
       }
       if (username && !username.startsWith('@')) username = '@' + username;
@@ -2401,8 +2512,7 @@
       const newFav = {
         id: Date.now().toString(),
         name: name,
-        username: username || '@username',
-        avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(name)}`
+        username: username || '@username'
       };
 
       favoritesList.push(newFav);
@@ -2659,7 +2769,7 @@
 
       const recipientText = state.selectedRecipient 
         ? `${state.selectedRecipient.name} (${state.selectedRecipient.username})` 
-        : 'Всем';
+        : 'Любой друг в Telegram 🚀';
 
       const payload = {
         app: 'DUO',
@@ -2699,8 +2809,10 @@
 
     function shareToTelegram() {
       const gameTitle = formatGameDisplay(state.selectedGame);
+      const recipientMention = state.selectedRecipient ? `🎯 Для: ${state.selectedRecipient.name} (${state.selectedRecipient.username})\n` : '';
       const textInvite = encodeURIComponent(
         `🎮 Привет! Зову тебя в совместную катку в DUO!\n\n` +
+        recipientMention +
         `🕹 Игра: ${gameTitle}\n` +
         `📅 Тайминг: ${state.selectedDateText} в ${getFormattedTime()}\n` +
         `✨ Вайб: ${state.vibe}\n` +
