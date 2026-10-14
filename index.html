@@ -1,0 +1,2738 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>DUO — Matchmaking & Co-op Gaming</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,600;0,700;0,800;1,700&family=Fredoka:wght@600;700&family=JetBrains+Mono:wght@600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&family=Space+Grotesk:wght@600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    /* ==========================================================================
+       🕹️ DUO: RETRO ARCADE & NEO-BRUTALISM CO-OP SYSTEM
+       - Никакого корпоративного нейрослопа и мыльных сфер
+       - Реальные физические кнопки с прожатием вниз (translate 2px + hard shadow)
+       - Четкие контрастные границы, тактильные аркадные бейджи
+       - Выбор пола (Девушка / Парень) с авто-стилем + независимая смена палитры
+       ========================================================================== */
+
+    :root {
+      --bg: #0d0e15;
+      --bg-grid: rgba(255, 255, 255, 0.04);
+      --surface-1: #151722;
+      --surface-2: #1b1e2c;
+      --surface-interactive: #24283b;
+      --surface-ticket: #11131c;
+      
+      --border-solid: #2e344d;
+      --border-focus: var(--accent-primary);
+      --shadow-hard: #000000;
+      
+      --text-primary: #ffffff;
+      --text-secondary: #c2c9db;
+      --text-tertiary: #78829d;
+      
+      --font-heading: 'Space Grotesk', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      
+      --card-radius: 16px;
+      --btn-radius: 12px;
+      --chip-radius: 8px;
+    }
+
+    /* 🎨 ПАЛИТРЫ ЦВЕТОВ (НЕЗАВИСИМЫЕ) */
+    /* 1. Sakura Pop (Розовый) - дефолт для Девушки */
+    [data-palette="sakura"] {
+      --accent-primary: #ff5c8a;
+      --accent-secondary: #ff85a2;
+      --accent-glow: rgba(255, 92, 138, 0.35);
+      --accent-bg: rgba(255, 92, 138, 0.14);
+      --accent-badge-border: rgba(255, 92, 138, 0.45);
+      --btn-text: #ffffff;
+      --swatch-color: #ff5c8a;
+    }
+
+    /* 2. Acid Lime (Кибер-лайм) - дефолт для Парня */
+    [data-palette="lime"] {
+      --accent-primary: #00ff88;
+      --accent-secondary: #00d2ff;
+      --accent-glow: rgba(0, 255, 136, 0.35);
+      --accent-bg: rgba(0, 255, 136, 0.12);
+      --accent-badge-border: rgba(0, 255, 136, 0.45);
+      --btn-text: #050e09;
+      --swatch-color: #00ff88;
+    }
+
+    /* 3. Neon Amethyst (Фиолетовый) */
+    [data-palette="amethyst"] {
+      --accent-primary: #a855f7;
+      --accent-secondary: #ec4899;
+      --accent-glow: rgba(168, 85, 247, 0.35);
+      --accent-bg: rgba(168, 85, 247, 0.14);
+      --accent-badge-border: rgba(168, 85, 247, 0.45);
+      --btn-text: #ffffff;
+      --swatch-color: #a855f7;
+    }
+
+    /* 4. Sunset Gold (Оранжевый / Золото) */
+    [data-palette="sunset"] {
+      --accent-primary: #ff9f1c;
+      --accent-secondary: #ff4081;
+      --accent-glow: rgba(255, 159, 28, 0.35);
+      --accent-bg: rgba(255, 159, 28, 0.14);
+      --accent-badge-border: rgba(255, 159, 28, 0.45);
+      --btn-text: #080502;
+      --swatch-color: #ff9f1c;
+    }
+
+    /* 5. Electric Cyan (Ледяной циан) */
+    [data-palette="cyan"] {
+      --accent-primary: #00e5ff;
+      --accent-secondary: #3b82f6;
+      --accent-glow: rgba(0, 229, 255, 0.35);
+      --accent-bg: rgba(0, 229, 255, 0.12);
+      --accent-badge-border: rgba(0, 229, 255, 0.45);
+      --btn-text: #010a0e;
+      --swatch-color: #00e5ff;
+    }
+
+    /* 👧 СТИЛЬ ДЕВУШКИ (Kawaii Retro Pop) */
+    [data-gender="girl"] {
+      --card-radius: 22px;
+      --btn-radius: 16px;
+      --font-heading: 'Fredoka', 'Space Grotesk', sans-serif;
+    }
+
+    /* 👦 СТИЛЬ ПАРНЯ (Tactical Mecha Arcade) */
+    [data-gender="boy"] {
+      --card-radius: 12px;
+      --btn-radius: 8px;
+      --font-heading: 'Chakra Petch', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      background-image: 
+        linear-gradient(to right, var(--bg-grid) 1px, transparent 1px),
+        linear-gradient(to bottom, var(--bg-grid) 1px, transparent 1px);
+      background-size: 28px 28px;
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 0.3s ease, color 0.2s ease;
+      position: relative;
+    }
+
+    /* АРКАДНЫЕ ДЕКОРАЦИИ */
+    .arcade-stickers-layer {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+
+    /* Стикеры для девушки */
+    .girl-sticker-element {
+      position: absolute;
+      opacity: 0.32;
+      filter: drop-shadow(3px 3px 0px rgba(0,0,0,0.6));
+      display: none;
+    }
+    [data-gender="girl"] .girl-sticker-element {
+      display: block;
+    }
+    .bow-sticker {
+      top: 60px;
+      right: 4%;
+      animation: floatBadge 5s ease-in-out infinite alternate;
+    }
+    .tamagotchi-sticker {
+      bottom: 110px;
+      left: 3%;
+      animation: floatBadge 6s ease-in-out infinite alternate-reverse;
+    }
+
+    /* Аркадные элементы для парня */
+    .boy-arcade-element {
+      position: absolute;
+      opacity: 0.3;
+      filter: drop-shadow(3px 3px 0px rgba(0,0,0,0.6));
+      display: none;
+    }
+    [data-gender="boy"] .boy-arcade-element {
+      display: block;
+    }
+    .crosshair-sticker {
+      top: 70px;
+      right: 4%;
+      animation: rotateSlow 24s linear infinite;
+    }
+    .radar-circle-sticker {
+      bottom: 90px;
+      left: 3%;
+      animation: pulseSize 4s ease-in-out infinite alternate;
+    }
+
+    @keyframes floatBadge {
+      0% { transform: translateY(0) rotate(-3deg); }
+      100% { transform: translateY(10px) rotate(3deg); }
+    }
+    @keyframes rotateSlow {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes pulseSize {
+      0% { transform: scale(1); opacity: 0.2; }
+      100% { transform: scale(1.08); opacity: 0.35; }
+    }
+
+    /* АДАПТИВНАЯ СЕТКА */
+    .app-viewport {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 1140px;
+      margin: 0 auto;
+      padding: 16px 16px 120px 16px;
+    }
+
+    @media (min-width: 992px) {
+      .app-viewport {
+        padding: 26px 24px 60px 24px;
+      }
+      .main-workspace-grid {
+        display: grid;
+        grid-template-columns: 1fr 390px;
+        gap: 30px;
+        align-items: start;
+      }
+      .mobile-only-dock {
+        display: none !important;
+      }
+      .desktop-ticket-sidebar {
+        display: block !important;
+        position: sticky;
+        top: 24px;
+      }
+    }
+
+    @media (max-width: 991px) {
+      .main-workspace-grid {
+        display: block;
+      }
+      .desktop-ticket-sidebar {
+        display: none !important;
+      }
+    }
+
+    /* ШАПКА */
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+      border-bottom: 2px solid var(--border-solid);
+      padding-bottom: 16px;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-arcade-logo {
+      width: 44px;
+      height: 44px;
+      background: var(--surface-1);
+      border: 2px solid var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-primary);
+    }
+
+    .brand-title-wrap {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand-title {
+      font-family: var(--font-heading);
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      line-height: 1;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .brand-version-chip {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+    }
+
+    .brand-tagline {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--text-tertiary);
+      font-weight: 700;
+      margin-top: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    /* БЛОК УПРАВЛЕНИЯ В ШАПКЕ */
+    .header-controls-block {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* Переключатель Девушка / Парень */
+    .gender-switch-control {
+      display: flex;
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 3px;
+      gap: 4px;
+    }
+
+    .gender-tab-btn {
+      background: transparent;
+      border: none;
+      padding: 7px 14px;
+      border-radius: calc(var(--btn-radius) - 3px);
+      font-size: 12.5px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+
+    .gender-tab-btn.active {
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    /* 🎨 СМЕНА ПАЛИТРЫ (СВОТЧИ) */
+    .palette-swatches-strip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 5px 8px;
+    }
+
+    .swatch-dot {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid transparent;
+      transition: transform 0.15s, border-color 0.15s;
+      position: relative;
+    }
+
+    .swatch-dot:hover {
+      transform: scale(1.15);
+    }
+
+    .swatch-dot.active {
+      transform: scale(1.2);
+      border-color: #ffffff;
+      box-shadow: 0 0 8px var(--accent-primary);
+    }
+
+    .swatch-sakura { background: #ff5c8a; }
+    .swatch-lime { background: #00ff88; }
+    .swatch-amethyst { background: #a855f7; }
+    .swatch-sunset { background: #ff9f1c; }
+    .swatch-cyan { background: #00e5ff; }
+
+    /* ГЛАВНЫЙ БАННЕР */
+    .hero-banner {
+      margin-bottom: 20px;
+    }
+
+    .hero-lobby-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 5px 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--accent-primary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+
+    .status-pulse-led {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-primary);
+      box-shadow: 0 0 8px var(--accent-primary);
+    }
+
+    .hero-headline {
+      font-family: var(--font-heading);
+      font-size: clamp(22px, 3.2vw, 28px);
+      font-weight: 800;
+      letter-spacing: -0.4px;
+      line-height: 1.25;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .hero-desc {
+      font-size: 13.5px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+    }
+
+    /* ТАКТИЛЬНЫЕ АРКАДНЫЕ КАРТОЧКИ (NEO-BRUTALISM) */
+    .arcade-card {
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+      border-radius: var(--card-radius);
+      padding: 20px;
+      margin-bottom: 18px;
+      position: relative;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .section-eyebrow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+      border-bottom: 1px dashed var(--border-solid);
+      padding-bottom: 10px;
+    }
+
+    .eyebrow-title {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .eyebrow-step-badge {
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      font-size: 10.5px;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    .eyebrow-extra-action {
+      background: var(--surface-2);
+      border: 1.5px solid var(--border-solid);
+      color: var(--accent-primary);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 800;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      transition: all 0.15s;
+    }
+
+    .eyebrow-extra-action:hover {
+      transform: translate(1px, 1px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+      border-color: var(--accent-primary);
+    }
+
+    /* 1. ИГРЫ */
+    .games-collection-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+
+    .empty-games-plate {
+      border: 2px dashed var(--border-solid);
+      border-radius: calc(var(--card-radius) - 4px);
+      padding: 28px 16px;
+      text-align: center;
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .empty-games-plate:hover {
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      transform: translate(-1px, -1px);
+    }
+
+    .empty-icon-wrap {
+      width: 48px;
+      height: 48px;
+      border-radius: var(--btn-radius);
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-primary);
+      margin-bottom: 12px;
+    }
+
+    .empty-title {
+      font-size: 15px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .empty-desc {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      line-height: 1.4;
+      margin-bottom: 14px;
+      max-width: 320px;
+    }
+
+    .btn-create-first-game {
+      background: var(--accent-primary);
+      border: 2px solid var(--shadow-hard);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      color: var(--btn-text);
+      font-size: 13px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      padding: 8px 18px;
+      border-radius: var(--btn-radius);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-create-first-game:hover {
+      transform: translate(1px, 1px);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+    }
+
+    .game-item-card {
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: calc(var(--card-radius) - 4px);
+      padding: 12px 10px;
+      cursor: pointer;
+      position: relative;
+      transition: all 0.15s;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 104px;
+      text-align: left;
+    }
+
+    .game-item-card:hover {
+      border-color: var(--accent-primary);
+      transform: translate(-1px, -1px);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+    }
+
+    .game-item-card:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .game-item-card.selected {
+      background: var(--surface-interactive);
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    /* ПОЛНАЯ АДАПТИВНОСТЬ: КРЕСТИК НИКОГДА НЕ ПРОПАДАЕТ */
+    .game-tag-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 8px;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .game-platform-badge {
+      flex: 1 1 auto;
+      min-width: 0;
+      max-width: calc(100% - 28px);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 3px 6px;
+      border-radius: 4px;
+      background: var(--surface-1);
+      color: var(--accent-primary);
+      border: 1px solid var(--border-solid);
+    }
+
+    .btn-delete-game {
+      flex: 0 0 22px;
+      width: 22px;
+      height: 22px;
+      min-width: 22px;
+      min-height: 22px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: var(--surface-1);
+      color: var(--text-tertiary);
+      border: 1.5px solid var(--border-solid);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-delete-game:hover {
+      color: #ffffff;
+      background: #ff4d4d;
+      border-color: #ff4d4d;
+      transform: scale(1.1);
+    }
+
+    .game-title-text {
+      font-size: 14.5px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-primary);
+      line-height: 1.25;
+      word-break: break-word;
+      margin-bottom: 6px;
+    }
+
+    .game-status-line {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font-mono);
+      font-weight: 700;
+    }
+
+    .game-item-card.selected .game-status-line {
+      color: var(--accent-primary);
+    }
+
+    .add-more-game-card {
+      border: 2px dashed var(--border-solid);
+      background: transparent;
+      border-radius: calc(var(--card-radius) - 4px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      cursor: pointer;
+      min-height: 104px;
+      transition: all 0.15s;
+      text-align: center;
+    }
+
+    .add-more-game-card:hover {
+      border-color: var(--accent-primary);
+      background: var(--surface-2);
+      transform: translate(-1px, -1px);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+    }
+
+    .add-more-icon {
+      color: var(--accent-primary);
+      margin-bottom: 6px;
+    }
+
+    .add-more-label {
+      font-size: 12px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-secondary);
+    }
+
+    /* 2. ИЗБРАННОЕ / АДРЕСАТ (PLAYER 2) */
+    .favorites-ribbon {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      padding: 8px 4px 12px 4px;
+      scrollbar-width: none;
+    }
+    .favorites-ribbon::-webkit-scrollbar {
+      display: none;
+    }
+
+    .fav-contact-item {
+      flex: 0 0 104px;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: calc(var(--card-radius) - 4px);
+      padding: 12px 8px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s;
+      position: relative;
+    }
+
+    .fav-contact-item:hover {
+      border-color: var(--accent-primary);
+      transform: translate(-1px, -1px);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+    }
+
+    .fav-contact-item:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .fav-contact-item.selected {
+      background: var(--surface-interactive);
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    .fav-avatar-shell {
+      width: 48px;
+      height: 48px;
+      margin: 0 auto 8px auto;
+      position: relative;
+    }
+
+    .fav-avatar-image {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      object-fit: cover;
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+    }
+
+    .fav-contact-item.selected .fav-avatar-image {
+      border-color: var(--accent-primary);
+    }
+
+    .fav-active-dot {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent-primary);
+      border: 2px solid var(--surface-2);
+    }
+
+    .fav-contact-name {
+      font-size: 12.5px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+
+    .fav-contact-sub {
+      font-size: 10.5px;
+      color: var(--text-tertiary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: var(--font-mono);
+      font-weight: 700;
+    }
+
+    .add-fav-contact-btn {
+      flex: 0 0 104px;
+      border: 2px dashed var(--border-solid);
+      border-radius: calc(var(--card-radius) - 4px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 8px;
+      cursor: pointer;
+      background: transparent;
+      color: var(--text-tertiary);
+      transition: all 0.15s;
+    }
+
+    .add-fav-contact-btn:hover {
+      border-color: var(--accent-primary);
+      background: var(--surface-2);
+      color: var(--text-primary);
+    }
+
+    .recipient-status-strip {
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      border-radius: var(--btn-radius);
+      padding: 10px 14px;
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+
+    /* 3. ДАТА-СТРИП + ВРЕМЯ */
+    .day-strip-scroll {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      padding: 4px 2px 10px 2px;
+      scrollbar-width: none;
+    }
+    .day-strip-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .day-strip-card {
+      flex: 0 0 84px;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 10px 6px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s;
+      user-select: none;
+    }
+
+    .day-strip-card:hover {
+      border-color: var(--accent-primary);
+      transform: translate(-1px, -1px);
+    }
+
+    .day-strip-card:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .day-strip-card.selected {
+      background: var(--surface-interactive);
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    .day-strip-week {
+      font-size: 10.5px;
+      font-weight: 800;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      font-family: var(--font-mono);
+      margin-bottom: 4px;
+    }
+
+    .day-strip-num {
+      font-size: 22px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-primary);
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+
+    .day-strip-month {
+      font-size: 10px;
+      color: var(--accent-primary);
+      font-weight: 800;
+      text-transform: uppercase;
+      font-family: var(--font-mono);
+    }
+
+    /* МОДУЛЬ ВРЕМЕНИ */
+    .time-selector-module {
+      margin-top: 14px;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      border-radius: var(--card-radius);
+      padding: 16px;
+    }
+
+    .time-hero-interactive-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .time-readout-pill {
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 6px 16px;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .time-readout-pill:hover {
+      border-color: var(--accent-primary);
+      transform: translate(-1px, -1px);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+    }
+
+    .time-readout-pill:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .clock-digits {
+      font-family: var(--font-mono);
+      font-size: 30px;
+      font-weight: 800;
+      color: var(--accent-primary);
+      letter-spacing: 1px;
+      line-height: 1;
+    }
+
+    .time-edit-hint {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-weight: 800;
+      text-transform: uppercase;
+      font-family: var(--font-mono);
+      background: var(--surface-2);
+      border: 1px solid var(--border-solid);
+      padding: 4px 8px;
+      border-radius: 6px;
+    }
+
+    .quick-steppers-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-step-time {
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      color: var(--text-primary);
+      padding: 8px 14px;
+      border-radius: var(--btn-radius);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-step-time:hover {
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+      transform: translate(1px, 1px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .quick-slots-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+    }
+
+    .quick-time-slot {
+      background: var(--surface-1);
+      border: 1.5px solid var(--border-solid);
+      border-radius: var(--btn-radius);
+      padding: 8px 4px;
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--text-secondary);
+      text-align: center;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      transition: all 0.15s;
+    }
+
+    .quick-time-slot:hover, .quick-time-slot.selected {
+      background: var(--accent-primary);
+      border-color: var(--shadow-hard);
+      color: var(--btn-text);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+    }
+
+    /* 4. ВАЙБ / НАСТРОЕНИЕ */
+    .vibe-chips-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+
+    .vibe-chip {
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--card-radius);
+      padding: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      text-align: left;
+    }
+
+    .vibe-chip:hover {
+      border-color: var(--accent-primary);
+      transform: translate(-1px, -1px);
+    }
+
+    .vibe-chip:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .vibe-chip.selected {
+      background: var(--surface-interactive);
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    .vibe-title {
+      font-size: 13.5px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-primary);
+      margin-bottom: 3px;
+    }
+
+    .vibe-subtitle {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      line-height: 1.3;
+    }
+
+    /* 5. ДЛИТЕЛЬНОСТЬ */
+    .duration-chips-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+
+    .duration-chip {
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      padding: 12px 10px;
+      border-radius: var(--btn-radius);
+      font-size: 12.5px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+      text-align: center;
+      user-select: none;
+    }
+
+    .duration-chip:hover {
+      border-color: var(--accent-primary);
+      transform: translate(-1px, -1px);
+    }
+
+    .duration-chip:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    .duration-chip.selected {
+      background: var(--surface-interactive);
+      border-color: var(--accent-primary);
+      color: var(--text-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    .duration-chip.infinite-highlight {
+      grid-column: 1 / -1;
+      border-style: dashed;
+      color: var(--accent-primary);
+    }
+
+    .duration-chip.infinite-highlight.selected {
+      border-style: solid;
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+    }
+
+    input[type="text"] {
+      width: 100%;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      border-radius: var(--btn-radius);
+      padding: 13px 16px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      outline: none;
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input[type="text"]:focus {
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    /* ==========================================================================
+       🎟️ АРКАДНЫЙ DUO PASS ТАЛОН (TACTILE GAMING TICKET)
+       ========================================================================== */
+    .desktop-ticket-sidebar {
+      display: none;
+    }
+
+    .ticket-pass-box {
+      background: var(--surface-ticket);
+      border: 3px solid var(--border-solid);
+      box-shadow: 6px 6px 0px var(--shadow-hard);
+      border-radius: var(--card-radius);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .ticket-punch-hole {
+      width: 48px;
+      height: 8px;
+      border-radius: 4px;
+      background: var(--bg);
+      border: 2px solid var(--border-solid);
+      margin: 12px auto 6px auto;
+    }
+
+    .ticket-header-strip {
+      background: var(--surface-2);
+      border-bottom: 2px dashed var(--border-solid);
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: relative;
+    }
+
+    /* Вырезы талончика по бокам */
+    .ticket-tear-notch-left, .ticket-tear-notch-right {
+      position: absolute;
+      bottom: -12px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--bg);
+      border: 2px solid var(--border-solid);
+      z-index: 2;
+    }
+    .ticket-tear-notch-left { left: -14px; }
+    .ticket-tear-notch-right { right: -14px; }
+
+    .ticket-badge {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 800;
+      color: var(--accent-primary);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .ticket-body {
+      padding: 22px 20px 20px 20px;
+      position: relative;
+    }
+
+    .ticket-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 13px;
+      font-size: 13px;
+    }
+
+    .ticket-label {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      font-family: var(--font-mono);
+    }
+
+    .ticket-value {
+      color: var(--text-primary);
+      font-weight: 800;
+      font-family: var(--font-heading);
+      text-align: right;
+    }
+
+    .ticket-value.highlight {
+      color: var(--accent-primary);
+    }
+
+    .ticket-barcode-wrap {
+      border-top: 2px dashed var(--border-solid);
+      margin-top: 16px;
+      padding-top: 14px;
+      text-align: center;
+      position: relative;
+    }
+
+    .ticket-laser-scan {
+      position: absolute;
+      top: 16px;
+      left: 15%;
+      width: 70%;
+      height: 2px;
+      background: var(--accent-primary);
+      box-shadow: 0 0 8px var(--accent-primary);
+      animation: laserMove 2.5s ease-in-out infinite alternate;
+    }
+
+    @keyframes laserMove {
+      0% { transform: translateY(0); }
+      100% { transform: translateY(22px); }
+    }
+
+    .ticket-barcode-lines {
+      font-family: var(--font-mono);
+      letter-spacing: 6px;
+      font-size: 16px;
+      opacity: 0.45;
+      user-select: none;
+    }
+
+    .ticket-cta-btn {
+      width: 100%;
+      background: var(--accent-primary);
+      border: 2px solid var(--shadow-hard);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 16px;
+      color: var(--btn-text);
+      font-family: var(--font-heading);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin-top: 18px;
+      transition: all 0.15s;
+    }
+
+    .ticket-cta-btn:hover {
+      transform: translate(2px, 2px);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+    }
+
+    .ticket-cta-btn:active {
+      transform: translate(4px, 4px);
+      box-shadow: 0px 0px 0px var(--shadow-hard);
+    }
+
+    .ticket-share-btn {
+      width: 100%;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 12px;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      cursor: pointer;
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      transition: all 0.15s;
+    }
+
+    .ticket-share-btn:hover {
+      border-color: var(--accent-primary);
+      color: var(--text-primary);
+      transform: translate(1px, 1px);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+    }
+
+    /* MOBILE DOCK */
+    .mobile-only-dock {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 12px 16px 22px 16px;
+      background: linear-gradient(to top, var(--bg) 85%, transparent);
+      z-index: 100;
+    }
+
+    .primary-submit-btn {
+      width: 100%;
+      background: var(--accent-primary);
+      border: 2px solid var(--shadow-hard);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 16px;
+      color: var(--btn-text);
+      font-family: var(--font-heading);
+      font-size: 16px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      transition: all 0.15s;
+    }
+
+    .primary-submit-btn:hover {
+      transform: translate(1px, 1px);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+    }
+
+    .primary-submit-btn:active {
+      transform: translate(3px, 3px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    /* МОДАЛЬНЫЕ ОКНА */
+    .modal-overlay-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+
+    .modal-overlay-backdrop.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal-dialog-panel {
+      background: var(--surface-1);
+      border: 3px solid var(--border-solid);
+      box-shadow: 6px 6px 0px var(--shadow-hard);
+      border-radius: var(--card-radius);
+      padding: 24px 22px;
+      width: 100%;
+      max-width: 400px;
+      transform: scale(0.95);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+    }
+
+    .modal-overlay-backdrop.active .modal-dialog-panel {
+      transform: scale(1);
+    }
+
+    .modal-header-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: var(--btn-radius);
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      color: var(--accent-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 12px auto;
+    }
+
+    .modal-heading {
+      font-family: var(--font-heading);
+      font-size: 21px;
+      font-weight: 800;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+      text-align: center;
+    }
+
+    .modal-subtext {
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-align: center;
+      line-height: 1.45;
+      margin-bottom: 16px;
+    }
+
+    .tag-choice-group {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .tag-pill-option {
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .tag-pill-option:hover {
+      border-color: var(--accent-primary);
+    }
+
+    .tag-pill-option.selected {
+      background: var(--accent-primary);
+      border-color: var(--shadow-hard);
+      color: var(--btn-text);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+
+    /* ТАЙМ-ПИКЕР */
+    .time-picker-dialog-body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 16px 0;
+    }
+
+    .keyboard-inputs-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .time-key-box {
+      width: 76px;
+      height: 68px;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      font-family: var(--font-mono);
+      font-size: 34px;
+      font-weight: 800;
+      color: var(--accent-primary);
+      text-align: center;
+      outline: none;
+      transition: all 0.15s;
+    }
+
+    .time-key-box:focus {
+      border-color: var(--accent-primary);
+      box-shadow: 3px 3px 0px var(--accent-primary);
+    }
+
+    .time-colon-separator {
+      font-size: 32px;
+      font-weight: 800;
+      color: var(--accent-primary);
+    }
+
+    .touch-columns-container {
+      display: flex;
+      justify-content: center;
+      gap: 14px;
+      width: 100%;
+      background: var(--surface-2);
+      border-radius: var(--card-radius);
+      padding: 10px;
+      border: 2px solid var(--border-solid);
+    }
+
+    .touch-col {
+      flex: 1;
+      height: 160px;
+      overflow-y: auto;
+      scrollbar-width: none;
+      text-align: center;
+    }
+    .touch-col::-webkit-scrollbar {
+      display: none;
+    }
+
+    .touch-col-item {
+      padding: 10px 0;
+      font-family: var(--font-mono);
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      border-radius: 6px;
+      transition: all 0.15s;
+    }
+
+    .touch-col-item.active {
+      color: var(--accent-primary);
+      font-size: 20px;
+      background: var(--surface-interactive);
+      border: 1px solid var(--accent-primary);
+    }
+
+    .modal-action-btn {
+      width: 100%;
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      border: 2px solid var(--shadow-hard);
+      box-shadow: 3px 3px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 14px;
+      font-family: var(--font-heading);
+      font-weight: 800;
+      font-size: 15px;
+      cursor: pointer;
+      margin-top: 10px;
+      transition: all 0.15s;
+    }
+    .modal-action-btn:hover {
+      transform: translate(1px, 1px);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+    }
+    .modal-action-btn:active {
+      transform: translate(3px, 3px);
+      box-shadow: 0px 0px 0px var(--shadow-hard);
+    }
+
+    .modal-cancel-btn {
+      width: 100%;
+      background: transparent;
+      border: none;
+      color: var(--text-tertiary);
+      font-size: 13px;
+      font-weight: 700;
+      padding: 10px;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body data-gender="girl" data-palette="sakura">
+
+  <!-- АРКАДНЫЕ ДЕКОРАЦИИ (ДЕВУШКА / ПАРЕНЬ) -->
+  <div class="arcade-stickers-layer">
+    <!-- Для девушки -->
+    <svg class="girl-sticker-element bow-sticker" width="70" height="52" viewBox="0 0 64 48" fill="none">
+      <path d="M32 20C32 20 22 8 10 14C-2 20 6 36 20 30C28 26 32 22 32 22C32 22 36 26 44 30C58 36 66 20 54 14C42 8 32 20 32 20Z" fill="var(--accent-primary)" />
+      <circle cx="32" cy="21" r="5" fill="#ffffff" />
+      <path d="M28 24L16 46M36 24L48 46" stroke="var(--accent-primary)" stroke-width="4" stroke-linecap="round" />
+    </svg>
+
+    <svg class="girl-sticker-element tamagotchi-sticker" width="60" height="72" viewBox="0 0 56 68" fill="none">
+      <path d="M28 2C14 2 2 16 2 36C2 54 14 66 28 66C42 66 54 54 54 36C54 16 42 2 28 2Z" fill="var(--surface-1)" stroke="var(--accent-primary)" stroke-width="3" />
+      <rect x="14" y="20" width="28" height="24" rx="4" fill="#0d0e15" stroke="var(--accent-primary)" />
+      <circle cx="28" cy="32" r="4" fill="var(--accent-primary)" />
+      <circle cx="20" cy="52" r="3" fill="var(--accent-primary)" />
+      <circle cx="28" cy="54" r="3" fill="var(--accent-primary)" />
+      <circle cx="36" cy="52" r="3" fill="var(--accent-primary)" />
+    </svg>
+
+    <!-- Для парня -->
+    <svg class="boy-arcade-element crosshair-sticker" width="68" height="68" viewBox="0 0 64 64" fill="none">
+      <circle cx="32" cy="32" r="28" stroke="var(--accent-primary)" stroke-width="2" stroke-dasharray="6 4" />
+      <circle cx="32" cy="32" r="12" stroke="var(--accent-primary)" stroke-width="1.5" />
+      <line x1="32" y1="2" x2="32" y2="16" stroke="var(--accent-primary)" stroke-width="2.5" />
+      <line x1="32" y1="48" x2="32" y2="62" stroke="var(--accent-primary)" stroke-width="2.5" />
+      <line x1="2" y1="32" x2="16" y2="32" stroke="var(--accent-primary)" stroke-width="2.5" />
+      <line x1="48" y1="32" x2="62" y2="32" stroke="var(--accent-primary)" stroke-width="2.5" />
+    </svg>
+
+    <svg class="boy-arcade-element radar-circle-sticker" width="76" height="76" viewBox="0 0 64 64" fill="none">
+      <rect x="4" y="4" width="56" height="56" rx="8" stroke="var(--accent-primary)" stroke-width="2" stroke-dasharray="8 6" />
+      <line x1="4" y1="32" x2="60" y2="32" stroke="var(--accent-primary)" stroke-width="1.5" />
+      <line x1="32" y1="4" x2="32" y2="60" stroke="var(--accent-primary)" stroke-width="1.5" />
+    </svg>
+  </div>
+
+  <div class="app-viewport">
+
+    <!-- ВЕРХНЯЯ ШАПКА -->
+    <header class="app-header">
+      <div class="brand-group">
+        <div class="brand-arcade-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="6"></rect>
+            <path d="M6 12h4m-2-2v4"></path>
+            <circle cx="16" cy="12" r="1.5" fill="currentColor"></circle>
+            <circle cx="19" cy="10" r="1.5" fill="currentColor"></circle>
+          </svg>
+        </div>
+        <div class="brand-title-wrap">
+          <div class="brand-title">DUO <span class="brand-version-chip">CO-OP</span></div>
+          <div class="brand-tagline" id="brandTagline">Player 1 Ready</div>
+        </div>
+      </div>
+
+      <div class="header-controls-block">
+        <!-- 🎨 СМЕНА ПАЛИТРЫ (СВОТЧИ) -->
+        <div class="palette-swatches-strip" title="Выбрать цвет интерфейса">
+          <div class="swatch-dot swatch-sakura active" data-swatch="sakura" title="Сакура Розовый"></div>
+          <div class="swatch-dot swatch-lime" data-swatch="lime" title="Кибер Лайм"></div>
+          <div class="swatch-dot swatch-amethyst" data-swatch="amethyst" title="Неон Аметист"></div>
+          <div class="swatch-dot swatch-sunset" data-swatch="sunset" title="Сансет Оранж"></div>
+          <div class="swatch-dot swatch-cyan" data-swatch="cyan" title="Ледяной Циан"></div>
+        </div>
+
+        <!-- 👧 / 👦 ПЕРЕКЛЮЧАТЕЛЬ ПОЛА -->
+        <div class="gender-switch-control">
+          <button class="gender-tab-btn active" id="btnGenderGirl">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 21a9 9 0 0 0 9-9 9 9 0 0 0-9-9 9 9 0 0 0-9 9 9 9 0 0 0 9 9Z"></path><path d="M12 17v4"></path><path d="M9 19h6"></path></svg>
+            Девушка
+          </button>
+          <button class="gender-tab-btn" id="btnGenderBoy">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="10" cy="14" r="5"></circle><path d="m14 10 7-7"></path><path d="M16 3h5v5"></path></svg>
+            Парень
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ОСНОВНАЯ СЕТКА -->
+    <div class="main-workspace-grid">
+
+      <!-- ЛЕВАЯ КОЛОНКА (НАСТРОЙКИ ИНВАЙТА) -->
+      <main class="workspace-main-column">
+
+        <!-- ГЛАВНЫЙ БАННЕР -->
+        <section class="hero-banner">
+          <div class="hero-lobby-status">
+            <span class="status-pulse-led"></span>
+            <span id="heroLobbyTag">CO-OP LOBBY // READY</span>
+          </div>
+          <h1 class="hero-headline" id="heroHeadlineText">Приглашение на совместную игру</h1>
+          <p class="hero-desc" id="heroDescText">Выбирай игру, настраивай тайминг и зови тиммейта в пару кликов.</p>
+        </section>
+
+        <!-- 1. ИГРЫ -->
+        <section class="arcade-card">
+          <div class="section-eyebrow">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">01</span>
+              Во что играем?
+            </span>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button class="eyebrow-extra-action" id="randomGamePickerBtn" title="Выбрать случайную игру">
+                <span>🎲 Рандом</span>
+              </button>
+              <span class="eyebrow-extra-action" id="gamesCounter" style="cursor: default;">0 игр</span>
+            </div>
+          </div>
+          <div id="gamesContainer"></div>
+        </section>
+
+        <!-- 2. ИЗБРАННОЕ / АДРЕСАТ (PLAYER 2) -->
+        <section class="arcade-card">
+          <div class="section-eyebrow">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">02</span>
+              Кому отправить? (PLAYER 2)
+            </span>
+          </div>
+
+          <div class="favorites-ribbon" id="favoritesRibbon">
+            <button class="add-fav-contact-btn" id="openAddFavModalBtn">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8m-4-4h8"></path></svg>
+              <span style="font-size: 11px; font-weight: 800; margin-top: 4px; font-family: var(--font-heading);">Добавить</span>
+            </button>
+          </div>
+
+          <div class="recipient-status-strip">
+            <span style="color: var(--text-secondary);">Адресат: <strong id="curRecipientNameDisplay" style="color: var(--accent-primary);">Любимка 💕</strong></span>
+            <span id="curRecipientUsernameDisplay" style="color: var(--text-tertiary); font-family: var(--font-mono); font-weight: 700;">@my_love</span>
+          </div>
+        </section>
+
+        <!-- 3. ДАТА И ТАЙМИНГ -->
+        <section class="arcade-card">
+          <div class="section-eyebrow">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">03</span>
+              Дата и время катки
+            </span>
+            <span style="font-size: 11px; color: var(--accent-primary); font-weight: 800; font-family: var(--font-mono);" id="selectedFullDateLabel">Сегодня</span>
+          </div>
+
+          <!-- Лента дней -->
+          <div class="day-strip-scroll" id="dayStripScroll"></div>
+
+          <!-- Модуль времени -->
+          <div class="time-selector-module">
+            <div class="time-hero-interactive-row">
+              <div class="time-readout-pill" id="openCustomTimeModalBtn" title="Нажми, чтобы ввести точное время">
+                <span class="clock-digits" id="clockDigitsDisplay">20:30</span>
+                <div class="time-edit-hint">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                  <span>Своё</span>
+                </div>
+              </div>
+
+              <div class="quick-steppers-bar">
+                <button class="btn-step-time" id="btnMinus15" title="Минус 15 мин">-15м</button>
+                <button class="btn-step-time" id="btnPlus15" title="Плюс 15 мин">+15м</button>
+              </div>
+            </div>
+
+            <!-- Быстрые слоты -->
+            <div class="quick-slots-grid" id="quickSlotsGrid">
+              <div class="quick-time-slot" data-slot="18:00">18:00</div>
+              <div class="quick-time-slot" data-slot="19:30">19:30</div>
+              <div class="quick-time-slot selected" data-slot="20:30">20:30</div>
+              <div class="quick-time-slot" data-slot="22:00">22:00</div>
+              <div class="quick-time-slot" data-slot="23:30">23:30</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. НАСТРОЕНИЕ И ВАЙБ -->
+        <section class="arcade-card">
+          <div class="section-eyebrow">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">04</span>
+              Вайб катки (настроение)
+            </span>
+          </div>
+
+          <div class="vibe-chips-grid" id="vibeChipsGrid">
+            <div class="vibe-chip selected" data-vibe="🍵 Уютный чилл">
+              <div class="vibe-title">🍵 Уютный чилл</div>
+              <div class="vibe-subtitle">Спокойно поболтать и отдохнуть</div>
+            </div>
+            <div class="vibe-chip" data-vibe="🎧 Дискорд и музон">
+              <div class="vibe-title">🎧 Дискорд и музон</div>
+              <div class="vibe-subtitle">В войсе под любимые треки</div>
+            </div>
+            <div class="vibe-chip" data-vibe="🔥 Потная катка">
+              <div class="vibe-title">🔥 Потная катка</div>
+              <div class="vibe-subtitle">Трайхард только на победу</div>
+            </div>
+            <div class="vibe-chip" data-vibe="🍿 Угар и мемы">
+              <div class="vibe-title">🍿 Угар и мемы</div>
+              <div class="vibe-subtitle">Полный хаос и веселье</div>
+            </div>
+            <div class="vibe-chip" data-vibe="💖 Игровое свидание">
+              <div class="vibe-title">💖 Игровое свидание</div>
+              <div class="vibe-subtitle">Только ты и я вдвоём</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. ДЛИТЕЛЬНОСТЬ -->
+        <section class="arcade-card">
+          <div class="section-eyebrow">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">05</span>
+              Сколько играем?
+            </span>
+          </div>
+
+          <div class="duration-chips-grid">
+            <div class="duration-chip" data-duration="⚡ 30-40 минут (быстро)">30–40 минут</div>
+            <div class="duration-chip selected" data-duration="🎮 1-2 часа (комфортно)">1–2 часа</div>
+            <div class="duration-chip" data-duration="🔥 3-4 часа (основательно)">3–4 часа</div>
+            <div class="duration-chip" data-duration="🌌 До утра (всю ночь)">Всю ночь</div>
+            <div class="duration-chip infinite-highlight" data-duration="♾️ Пока не надоест (без ограничений)">
+              ♾️ Пока не надоест (до упора)
+            </div>
+          </div>
+        </section>
+
+        <!-- ЗАПИСКА -->
+        <section class="arcade-card">
+          <div class="section-eyebrow">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">06</span>
+              Записка тиммейту (по желанию)
+            </span>
+          </div>
+          <input type="text" id="optionalNoteInput" placeholder="Короткое пожелание или правила катки...">
+        </section>
+
+      </main>
+
+      <!-- ПРАВАЯ КОЛОНКА DESKTOP (STICKY АРКАДНЫЙ ТАЛОН) -->
+      <aside class="desktop-ticket-sidebar">
+        <div class="ticket-pass-box">
+          <div class="ticket-punch-hole"></div>
+          
+          <div class="ticket-header-strip">
+            <div class="ticket-tear-notch-left"></div>
+            <div class="ticket-tear-notch-right"></div>
+            <span class="ticket-badge" id="ticketBadgeHeader">CO-OP PASS // INSERT COIN</span>
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--accent-primary); font-weight: 800; font-family: var(--font-mono);">
+              <span class="status-pulse-led"></span> P1 READY
+            </div>
+          </div>
+
+          <div class="ticket-body">
+            <div class="ticket-row">
+              <span class="ticket-label">Игра</span>
+              <span class="ticket-value highlight" id="ticketGameValue">— Не выбрана —</span>
+            </div>
+
+            <div class="ticket-row">
+              <span class="ticket-label">Адресат (P2)</span>
+              <span class="ticket-value" id="ticketRecipientValue">Любимка 💕</span>
+            </div>
+
+            <div class="ticket-row">
+              <span class="ticket-label">Тайминг</span>
+              <span class="ticket-value" id="ticketTimingValue">Загрузка...</span>
+            </div>
+
+            <div class="ticket-row">
+              <span class="ticket-label">Вайб</span>
+              <span class="ticket-value" id="ticketVibeValue">🍵 Уютный чилл</span>
+            </div>
+
+            <div class="ticket-row">
+              <span class="ticket-label">Длительность</span>
+              <span class="ticket-value" id="ticketDurationValue">🎮 1–2 часа</span>
+            </div>
+
+            <div class="ticket-row" id="ticketNoteRow" style="display: none;">
+              <span class="ticket-label">Записка</span>
+              <span class="ticket-value" id="ticketNoteValue" style="max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">—</span>
+            </div>
+
+            <div class="ticket-barcode-wrap">
+              <div class="ticket-laser-scan"></div>
+              <div class="ticket-barcode-lines">||| | |||| | ||||| |||</div>
+              <div style="font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); margin-top: 5px; font-weight: 800;">PASS ID: #DUO-ARCADE-2026</div>
+            </div>
+
+            <button class="ticket-cta-btn" id="desktopSubmitBtn">
+              <span>Сформировать инвайт</span>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+            </button>
+
+            <button class="ticket-share-btn" id="desktopShareBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
+              Поделиться в Telegram
+            </button>
+          </div>
+        </div>
+      </aside>
+
+    </div>
+
+  </div> <!-- /app-viewport -->
+
+  <!-- МОБИЛЬНАЯ НИЖНЯЯ ПАНЕЛЬ -->
+  <div class="mobile-only-dock">
+    <button class="primary-submit-btn" id="mobileSubmitBtn">
+      <span id="mobileSubmitLabel">Отправить инвайт 💕</span>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+    </button>
+  </div>
+
+  <!-- ==========================================================================
+       МОДАЛЬНЫЕ ОКНА
+       ========================================================================== -->
+
+  <!-- 1. КАСТОМНЫЙ ТАЙМ-ПИКЕР -->
+  <div class="modal-overlay-backdrop" id="customTimeModal">
+    <div class="modal-dialog-panel">
+      <div class="modal-header-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+      </div>
+      <h3 class="modal-heading">Точное время</h3>
+      <p class="modal-subtext">Вводи цифры с клавиатуры на ПК или выбирай в удобных колонках на телефоне:</p>
+
+      <div class="time-picker-dialog-body">
+        <div class="keyboard-inputs-row">
+          <input type="text" class="time-key-box" id="keyInputHours" maxlength="2" placeholder="20" inputmode="numeric">
+          <span class="time-colon-separator">:</span>
+          <input type="text" class="time-key-box" id="keyInputMinutes" maxlength="2" placeholder="30" inputmode="numeric">
+        </div>
+
+        <div class="touch-columns-container">
+          <div class="touch-col" id="touchColHours"></div>
+          <div class="touch-col" id="touchColMinutes"></div>
+        </div>
+      </div>
+
+      <button class="modal-action-btn" id="applyCustomTimeBtn">Применить время ✨</button>
+      <button class="modal-cancel-btn" id="closeCustomTimeModalBtn">Отмена</button>
+    </div>
+  </div>
+
+  <!-- 2. МОДАЛКА: ДОБАВЛЕНИЕ ИГРЫ -->
+  <div class="modal-overlay-backdrop" id="addGameModal">
+    <div class="modal-dialog-panel">
+      <div class="modal-header-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="6" width="20" height="12" rx="6"></rect><path d="M6 12h4m-2-2v4m7-2h2m-1-1v2"></path></svg>
+      </div>
+      <h3 class="modal-heading">Добавить игру</h3>
+      <p class="modal-subtext">Введи название игры и выбери платформу:</p>
+
+      <input type="text" id="newGameTitleInput" placeholder="Название игры (Roblox, CS2, Minecraft...)" style="margin-bottom: 14px;">
+
+      <div style="font-size: 11px; font-weight: 800; color: var(--text-tertiary); text-transform: uppercase; font-family: var(--font-mono); margin-bottom: 8px;">
+        Платформа:
+      </div>
+
+      <div class="tag-choice-group" id="platformTagGroup">
+        <div class="tag-pill-option selected" data-tag="Кроссплатформа">🌐 Кроссплатформа</div>
+        <div class="tag-pill-option" data-tag="ПК / Steam">💻 ПК / Steam</div>
+        <div class="tag-pill-option" data-tag="Мобильная">📱 Мобильная</div>
+        <div class="tag-pill-option" data-tag="Консоли">🎮 Консоли</div>
+      </div>
+
+      <button class="modal-action-btn" id="saveNewGameBtn">Сохранить игру</button>
+      <button class="modal-cancel-btn" id="closeAddGameModalBtn">Отмена</button>
+    </div>
+  </div>
+
+  <!-- 3. МОДАЛКА: ДОБАВЛЕНИЕ КОНТАКТА -->
+  <div class="modal-overlay-backdrop" id="addFavModal">
+    <div class="modal-dialog-panel">
+      <div class="modal-header-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+      </div>
+      <h3 class="modal-heading">Новый тиммейт (PLAYER 2)</h3>
+      <p class="modal-subtext">Добавь контакт в избранное для отправки приглашения в один клик:</p>
+
+      <input type="text" id="newFavNameInput" placeholder="Имя (например: Любимка 💕)" style="margin-bottom: 10px;">
+      <input type="text" id="newFavUsernameInput" placeholder="Telegram @username" style="margin-bottom: 14px;">
+
+      <button class="modal-action-btn" id="saveNewFavBtn">Сохранить</button>
+      <button class="modal-cancel-btn" id="closeAddFavModalBtn">Отмена</button>
+    </div>
+  </div>
+
+  <!-- 4. МОДАЛКА: ГОТОВЫЙ ИНВАЙТ -->
+  <div class="modal-overlay-backdrop" id="successModal">
+    <div class="modal-dialog-panel">
+      <div class="modal-header-icon" style="background: var(--surface-2); border-color: var(--accent-primary);">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      </div>
+      <h3 class="modal-heading">Инвайт сформирован</h3>
+      
+      <div id="summaryCardPreview" style="background: var(--surface-2); border: 2px solid var(--border-solid); border-radius: var(--card-radius); padding: 16px; font-size: 13.5px; line-height: 1.55; color: var(--text-secondary); text-align: left; margin: 12px 0 16px 0;">
+      </div>
+
+      <button class="modal-action-btn" id="shareViaTelegramBtn">Отправить в Telegram 🚀</button>
+      <button class="modal-cancel-btn" id="closeSuccessBtn">Готово</button>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       СКРИПТЫ
+       ========================================================================== -->
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    function haptic(type = 'light') {
+      if (tg?.HapticFeedback) {
+        if (type === 'light') tg.HapticFeedback.impactOccurred('light');
+        if (type === 'medium') tg.HapticFeedback.impactOccurred('medium');
+        if (type === 'success') tg.HapticFeedback.notificationOccurred('success');
+      }
+    }
+
+    // Умный авто-расчёт времени устройства + 30 мин
+    const nowDevice = new Date();
+    let initialHour = nowDevice.getHours();
+    let initialMinute = nowDevice.getMinutes();
+    if (initialMinute < 30) {
+      initialMinute = 30;
+    } else {
+      initialMinute = 0;
+      initialHour = (initialHour + 1) % 24;
+    }
+
+    const state = {
+      gender: localStorage.getItem('duo_gender') || 'girl',
+      palette: localStorage.getItem('duo_palette') || 'sakura',
+      myPhoto: tg?.initDataUnsafe?.user?.photo_url || null,
+      myName: tg?.initDataUnsafe?.user?.first_name || 'Игрок',
+      myUsername: tg?.initDataUnsafe?.user?.username ? `@${tg.initDataUnsafe.user.username}` : '',
+      
+      selectedGame: null,
+      selectedRecipient: null,
+      selectedDateText: '',
+      timeHours: initialHour,
+      timeMinutes: initialMinute,
+      vibe: '🍵 Уютный чилл',
+      duration: '🎮 1-2 часа (комфортно)',
+      note: ''
+    };
+
+    let gamesList = JSON.parse(localStorage.getItem('duo_custom_games')) || [];
+
+    let defaultFavorites = [
+      { id: '1', name: 'Любимка 💕', username: '@my_love', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=FavA' },
+      { id: '2', name: 'Тиммейт ⚡', username: '@teammate', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=FavB' }
+    ];
+    let favoritesList = JSON.parse(localStorage.getItem('duo_favorites')) || defaultFavorites;
+
+    // ПЕРЕКЛЮЧЕНИЕ ПАЛИТРЫ
+    function applyPalette(paletteName) {
+      state.palette = paletteName;
+      localStorage.setItem('duo_palette', paletteName);
+      document.body.setAttribute('data-palette', paletteName);
+
+      document.querySelectorAll('.swatch-dot').forEach(dot => {
+        dot.classList.toggle('active', dot.dataset.swatch === paletteName);
+      });
+    }
+
+    document.querySelectorAll('.swatch-dot').forEach(dot => {
+      dot.onclick = () => {
+        haptic('light');
+        applyPalette(dot.dataset.swatch);
+      };
+    });
+
+    // ПЕРЕКЛЮЧЕНИЕ ПОЛА
+    const btnGenderGirl = document.getElementById('btnGenderGirl');
+    const btnGenderBoy = document.getElementById('btnGenderBoy');
+    const brandTagline = document.getElementById('brandTagline');
+    const heroHeadlineText = document.getElementById('heroHeadlineText');
+    const heroDescText = document.getElementById('heroDescText');
+    const heroLobbyTag = document.getElementById('heroLobbyTag');
+    const mobileSubmitLabel = document.getElementById('mobileSubmitLabel');
+    const ticketBadgeHeader = document.getElementById('ticketBadgeHeader');
+
+    function applyGender(gender, autoSwitchPalette = false) {
+      state.gender = gender;
+      localStorage.setItem('duo_gender', gender);
+      document.body.setAttribute('data-gender', gender);
+
+      btnGenderGirl.classList.remove('active');
+      btnGenderBoy.classList.remove('active');
+
+      if (gender === 'girl') {
+        btnGenderGirl.classList.add('active');
+        brandTagline.innerText = 'Player 1 Ready 💕';
+        heroHeadlineText.innerText = 'Приглашение на совместную игру';
+        heroDescText.innerText = 'Выбирай игру, настраивай тайминг и зови своего краша или тиммейта.';
+        heroLobbyTag.innerText = 'CO-OP LOBBY // CUTE SQUAD';
+        mobileSubmitLabel.innerText = 'Отправить инвайт 💕';
+        ticketBadgeHeader.innerText = 'CO-OP PASS // VIP TICKET';
+        if (autoSwitchPalette) applyPalette('sakura');
+      } else {
+        btnGenderBoy.classList.add('active');
+        brandTagline.innerText = 'Tactical Squad Leader ⚡';
+        heroHeadlineText.innerText = 'Сбор на совместную катку';
+        heroDescText.innerText = 'Выбирай игру из пула, настраивай тайминг и собирай пати на победу.';
+        heroLobbyTag.innerText = 'CO-OP LOBBY // COMBAT SQUAD';
+        mobileSubmitLabel.innerText = 'Зарубиться в пати 🚀';
+        ticketBadgeHeader.innerText = 'CO-OP PASS // BATTLEPASS';
+        if (autoSwitchPalette) applyPalette('lime');
+      }
+
+      updateTicketPass();
+    }
+
+    btnGenderGirl.onclick = () => { haptic('light'); applyGender('girl', true); };
+    btnGenderBoy.onclick = () => { haptic('light'); applyGender('boy', true); };
+
+    function getFormattedTime() {
+      const hh = String(state.timeHours).padStart(2, '0');
+      const mm = String(state.timeMinutes).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+
+    function formatGameDisplay(game) {
+      if (!game) return '— Не выбрана —';
+      const title = (game.title || '').trim();
+      const tag = (game.tag || '').trim();
+      if (!tag || tag === 'Кроссплатформа' || tag === '🌐 Кроссплатформа' || title.toLowerCase() === tag.toLowerCase()) {
+        return title;
+      }
+      return `${title} · ${tag}`;
+    }
+
+    function updateTicketPass() {
+      const ticketGame = document.getElementById('ticketGameValue');
+      const ticketRecipient = document.getElementById('ticketRecipientValue');
+      const ticketTiming = document.getElementById('ticketTimingValue');
+      const ticketVibe = document.getElementById('ticketVibeValue');
+      const ticketDuration = document.getElementById('ticketDurationValue');
+      const ticketNoteRow = document.getElementById('ticketNoteRow');
+      const ticketNoteValue = document.getElementById('ticketNoteValue');
+
+      ticketGame.innerText = formatGameDisplay(state.selectedGame);
+      ticketRecipient.innerText = state.selectedRecipient ? `${state.selectedRecipient.name}` : '— Не выбран —';
+      ticketTiming.innerText = `${state.selectedDateText} в ${getFormattedTime()}`;
+      ticketVibe.innerText = state.vibe;
+      ticketDuration.innerText = state.duration;
+
+      if (state.note) {
+        ticketNoteRow.style.display = 'flex';
+        ticketNoteValue.innerText = state.note;
+      } else {
+        ticketNoteRow.style.display = 'none';
+      }
+    }
+
+    // 1. ИГРЫ
+    const gamesContainer = document.getElementById('gamesContainer');
+    const gamesCounter = document.getElementById('gamesCounter');
+    const addGameModal = document.getElementById('addGameModal');
+    const newGameTitleInput = document.getElementById('newGameTitleInput');
+    const saveNewGameBtn = document.getElementById('saveNewGameBtn');
+    const closeAddGameModalBtn = document.getElementById('closeAddGameModalBtn');
+    const randomGamePickerBtn = document.getElementById('randomGamePickerBtn');
+    let selectedPlatformTag = 'Кроссплатформа';
+
+    function renderGames() {
+      gamesCounter.innerText = `${gamesList.length} игр`;
+
+      if (gamesList.length === 0) {
+        gamesContainer.innerHTML = `
+          <div class="empty-games-plate" id="openFirstGameAddBtn">
+            <div class="empty-icon-wrap">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="6" width="20" height="12" rx="6"></rect><path d="M6 12h4m-2-2v4m7-2h2m-1-1v2"></path></svg>
+            </div>
+            <div class="empty-title">Список игр пока пуст</div>
+            <div class="empty-desc">Добавь свои любимые игры или плейсы (Roblox, CS2, Minecraft...), чтобы звать тиммейтов в один клик.</div>
+            <div class="btn-create-first-game">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              Добавить первую игру
+            </div>
+          </div>
+        `;
+
+        document.getElementById('openFirstGameAddBtn').onclick = () => {
+          haptic('light');
+          openAddGameModal();
+        };
+        state.selectedGame = null;
+      } else {
+        let html = '<div class="games-collection-grid">';
+        gamesList.forEach((game) => {
+          const isSelected = state.selectedGame?.id === game.id;
+          html += `
+            <div class="game-item-card ${isSelected ? 'selected' : ''}" data-id="${game.id}">
+              <div class="game-tag-line">
+                <span class="game-platform-badge" title="${game.tag}">${game.tag}</span>
+                <button class="btn-delete-game" data-del-id="${game.id}" title="Удалить игру">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+              </div>
+              <div class="game-title-text">${game.title}</div>
+              <div class="game-status-line">
+                <span>${isSelected ? '● Выбрано' : 'Нажми для выбора'}</span>
+              </div>
+            </div>
+          `;
+        });
+
+        html += `
+          <div class="add-more-game-card" id="openAddMoreBtn">
+            <svg class="add-more-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8m-4-4h8"></path></svg>
+            <div class="add-more-label">Добавить игру</div>
+          </div>
+        `;
+        html += '</div>';
+
+        gamesContainer.innerHTML = html;
+
+        gamesContainer.querySelectorAll('.game-item-card').forEach(card => {
+          card.onclick = (e) => {
+            if (e.target.closest('.btn-delete-game')) return;
+            haptic('light');
+            gamesContainer.querySelectorAll('.game-item-card').forEach(c => c.classList.remove('selected'));
+            card.classList.add('selected');
+            const found = gamesList.find(g => g.id === card.dataset.id);
+            if (found) state.selectedGame = found;
+            renderGames();
+            updateTicketPass();
+          };
+        });
+
+        gamesContainer.querySelectorAll('.btn-delete-game').forEach(btn => {
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            haptic('medium');
+            const delId = btn.dataset.delId;
+            gamesList = gamesList.filter(g => g.id !== delId);
+            localStorage.setItem('duo_custom_games', JSON.stringify(gamesList));
+            if (state.selectedGame?.id === delId) state.selectedGame = gamesList[0] || null;
+            renderGames();
+            updateTicketPass();
+          };
+        });
+
+        document.getElementById('openAddMoreBtn').onclick = () => {
+          haptic('light');
+          openAddGameModal();
+        };
+
+        if (!state.selectedGame && gamesList.length > 0) {
+          state.selectedGame = gamesList[0];
+        }
+      }
+      updateTicketPass();
+    }
+
+    // РАНДОМАЙЗЕР
+    randomGamePickerBtn.onclick = () => {
+      haptic('light');
+      if (gamesList.length === 0) {
+        alert('Сначала добавь хотя бы пару игр в список!');
+        openAddGameModal();
+        return;
+      }
+      const randomIdx = Math.floor(Math.random() * gamesList.length);
+      state.selectedGame = gamesList[randomIdx];
+      renderGames();
+      updateTicketPass();
+      confetti({ particleCount: 45, spread: 60, origin: { y: 0.3 } });
+    };
+
+    function openAddGameModal() {
+      newGameTitleInput.value = '';
+      selectedPlatformTag = 'Кроссплатформа';
+      document.querySelectorAll('#platformTagGroup .tag-pill-option').forEach(p => {
+        p.classList.toggle('selected', p.dataset.tag === selectedPlatformTag);
+      });
+      addGameModal.classList.add('active');
+      setTimeout(() => newGameTitleInput.focus(), 200);
+    }
+
+    document.querySelectorAll('#platformTagGroup .tag-pill-option').forEach(pill => {
+      pill.onclick = () => {
+        haptic('light');
+        document.querySelectorAll('#platformTagGroup .tag-pill-option').forEach(p => p.classList.remove('selected'));
+        pill.classList.add('selected');
+        selectedPlatformTag = pill.dataset.tag;
+      };
+    });
+
+    closeAddGameModalBtn.onclick = () => addGameModal.classList.remove('active');
+
+    saveNewGameBtn.onclick = () => {
+      const title = newGameTitleInput.value.trim();
+      if (!title) {
+        alert('Пожалуйста, напиши название игры!');
+        return;
+      }
+
+      const newGame = {
+        id: Date.now().toString(),
+        title: title,
+        tag: selectedPlatformTag
+      };
+
+      gamesList.push(newGame);
+      localStorage.setItem('duo_custom_games', JSON.stringify(gamesList));
+      state.selectedGame = newGame;
+      renderGames();
+      addGameModal.classList.remove('active');
+      haptic('success');
+    };
+
+    renderGames();
+
+    // 2. ИЗБРАННОЕ
+    const favoritesRibbon = document.getElementById('favoritesRibbon');
+    const openAddFavModalBtn = document.getElementById('openAddFavModalBtn');
+    const curRecipientNameDisplay = document.getElementById('curRecipientNameDisplay');
+    const curRecipientUsernameDisplay = document.getElementById('curRecipientUsernameDisplay');
+    const addFavModal = document.getElementById('addFavModal');
+    const newFavNameInput = document.getElementById('newFavNameInput');
+    const newFavUsernameInput = document.getElementById('newFavUsernameInput');
+    const saveNewFavBtn = document.getElementById('saveNewFavBtn');
+    const closeAddFavModalBtn = document.getElementById('closeAddFavModalBtn');
+
+    function renderFavorites() {
+      favoritesRibbon.querySelectorAll('.fav-contact-item').forEach(el => el.remove());
+
+      favoritesList.forEach((fav, index) => {
+        const isSelected = state.selectedRecipient?.id === fav.id || (!state.selectedRecipient && index === 0);
+        if (isSelected && !state.selectedRecipient) state.selectedRecipient = fav;
+
+        const card = document.createElement('div');
+        card.className = `fav-contact-item ${isSelected ? 'selected' : ''}`;
+        card.innerHTML = `
+          <div class="fav-avatar-shell">
+            <img class="fav-avatar-image" src="${fav.avatar}" alt="${fav.name}">
+            <div class="fav-active-dot"></div>
+          </div>
+          <div class="fav-contact-name">${fav.name}</div>
+          <div class="fav-contact-sub">${fav.username}</div>
+        `;
+
+        card.onclick = () => {
+          haptic('light');
+          favoritesRibbon.querySelectorAll('.fav-contact-item').forEach(c => c.classList.remove('selected'));
+          card.classList.add('selected');
+          state.selectedRecipient = fav;
+          updateRecipientDisplay();
+          updateTicketPass();
+        };
+
+        favoritesRibbon.insertBefore(card, openAddFavModalBtn);
+      });
+
+      updateRecipientDisplay();
+      updateTicketPass();
+    }
+
+    function updateRecipientDisplay() {
+      if (state.selectedRecipient) {
+        curRecipientNameDisplay.innerText = state.selectedRecipient.name;
+        curRecipientUsernameDisplay.innerText = state.selectedRecipient.username;
+      }
+    }
+
+    renderFavorites();
+
+    openAddFavModalBtn.onclick = () => {
+      haptic('light');
+      newFavNameInput.value = '';
+      newFavUsernameInput.value = '';
+      addFavModal.classList.add('active');
+    };
+
+    closeAddFavModalBtn.onclick = () => addFavModal.classList.remove('active');
+
+    saveNewFavBtn.onclick = () => {
+      const name = newFavNameInput.value.trim();
+      let username = newFavUsernameInput.value.trim();
+      if (!name) {
+        alert('Укажи имя контакта!');
+        return;
+      }
+      if (username && !username.startsWith('@')) username = '@' + username;
+
+      const newFav = {
+        id: Date.now().toString(),
+        name: name,
+        username: username || '@username',
+        avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(name)}`
+      };
+
+      favoritesList.push(newFav);
+      localStorage.setItem('duo_favorites', JSON.stringify(favoritesList));
+      state.selectedRecipient = newFav;
+      renderFavorites();
+      addFavModal.classList.remove('active');
+      haptic('success');
+    };
+
+    // 3. КАСТОМНЫЙ ДАТА-СТРИП + ТАЙМ-ПИКЕР
+    const dayStripScroll = document.getElementById('dayStripScroll');
+    const selectedFullDateLabel = document.getElementById('selectedFullDateLabel');
+    const clockDigitsDisplay = document.getElementById('clockDigitsDisplay');
+    const btnMinus15 = document.getElementById('btnMinus15');
+    const btnPlus15 = document.getElementById('btnPlus15');
+    const openCustomTimeModalBtn = document.getElementById('openCustomTimeModalBtn');
+    const customTimeModal = document.getElementById('customTimeModal');
+    const closeCustomTimeModalBtn = document.getElementById('closeCustomTimeModalBtn');
+    const applyCustomTimeBtn = document.getElementById('applyCustomTimeBtn');
+
+    const keyInputHours = document.getElementById('keyInputHours');
+    const keyInputMinutes = document.getElementById('keyInputMinutes');
+    const touchColHours = document.getElementById('touchColHours');
+    const touchColMinutes = document.getElementById('touchColMinutes');
+
+    for (let h = 0; h < 24; h++) {
+      const item = document.createElement('div');
+      item.className = 'touch-col-item';
+      item.dataset.val = h;
+      item.innerText = String(h).padStart(2, '0');
+      item.onclick = () => {
+        haptic('light');
+        setModalHour(h);
+      };
+      touchColHours.appendChild(item);
+    }
+
+    for (let m = 0; m < 60; m += 5) {
+      const item = document.createElement('div');
+      item.className = 'touch-col-item';
+      item.dataset.val = m;
+      item.innerText = String(m).padStart(2, '0');
+      item.onclick = () => {
+        haptic('light');
+        setModalMinute(m);
+      };
+      touchColMinutes.appendChild(item);
+    }
+
+    function setModalHour(h) {
+      modalHour = h;
+      keyInputHours.value = String(h).padStart(2, '0');
+      touchColHours.querySelectorAll('.touch-col-item').forEach(el => {
+        el.classList.toggle('active', Number(el.dataset.val) === h);
+      });
+    }
+
+    function setModalMinute(m) {
+      modalMinute = m;
+      keyInputMinutes.value = String(m).padStart(2, '0');
+      touchColMinutes.querySelectorAll('.touch-col-item').forEach(el => {
+        el.classList.toggle('active', Number(el.dataset.val) === m);
+      });
+    }
+
+    let modalHour = state.timeHours;
+    let modalMinute = state.timeMinutes;
+
+    keyInputHours.addEventListener('input', (e) => {
+      let val = Number(e.target.value.replace(/\D/g, ''));
+      if (val > 23) val = 23;
+      setModalHour(val);
+      if (e.target.value.length >= 2) {
+        keyInputMinutes.focus();
+        keyInputMinutes.select();
+      }
+    });
+
+    keyInputMinutes.addEventListener('input', (e) => {
+      let val = Number(e.target.value.replace(/\D/g, ''));
+      if (val > 59) val = 59;
+      setModalMinute(val);
+    });
+
+    openCustomTimeModalBtn.onclick = () => {
+      haptic('light');
+      setModalHour(state.timeHours);
+      setModalMinute(state.timeMinutes);
+      customTimeModal.classList.add('active');
+      setTimeout(() => {
+        keyInputHours.focus();
+        keyInputHours.select();
+      }, 200);
+    };
+
+    closeCustomTimeModalBtn.onclick = () => customTimeModal.classList.remove('active');
+
+    applyCustomTimeBtn.onclick = () => {
+      haptic('success');
+      state.timeHours = modalHour;
+      state.timeMinutes = modalMinute;
+      unselectQuickSlots();
+      updateClockDigits();
+      customTimeModal.classList.remove('active');
+    };
+
+    const daysOfWeek = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+    const monthsRu = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+
+    function generateDayStrip() {
+      dayStripScroll.innerHTML = '';
+      const now = new Date();
+
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(now);
+        d.setDate(now.getDate() + i);
+
+        const dayNum = d.getDate();
+        const monthStr = monthsRu[d.getMonth()];
+        const weekDay = (i === 0) ? 'Сегодня' : (i === 1 ? 'Завтра' : daysOfWeek[d.getDay()]);
+        const fullLabel = `${weekDay}, ${dayNum} ${monthStr}`;
+
+        if (i === 0 && !state.selectedDateText) {
+          state.selectedDateText = fullLabel;
+          selectedFullDateLabel.innerText = fullLabel;
+        }
+
+        const card = document.createElement('div');
+        card.className = `day-strip-card ${i === 0 ? 'selected' : ''}`;
+        card.innerHTML = `
+          <div class="day-strip-week">${weekDay}</div>
+          <div class="day-strip-num">${dayNum}</div>
+          <div class="day-strip-month">${monthStr}</div>
+        `;
+
+        card.onclick = () => {
+          haptic('light');
+          dayStripScroll.querySelectorAll('.day-strip-card').forEach(c => c.classList.remove('selected'));
+          card.classList.add('selected');
+          state.selectedDateText = fullLabel;
+          selectedFullDateLabel.innerText = fullLabel;
+          updateTicketPass();
+        };
+
+        dayStripScroll.appendChild(card);
+      }
+    }
+
+    generateDayStrip();
+
+    function updateClockDigits() {
+      clockDigitsDisplay.innerText = getFormattedTime();
+      updateTicketPass();
+    }
+    updateClockDigits();
+
+    btnPlus15.onclick = () => {
+      haptic('light');
+      state.timeMinutes += 15;
+      if (state.timeMinutes >= 60) {
+        state.timeMinutes = 0;
+        state.timeHours = (state.timeHours + 1) % 24;
+      }
+      unselectQuickSlots();
+      updateClockDigits();
+    };
+
+    btnMinus15.onclick = () => {
+      haptic('light');
+      state.timeMinutes -= 15;
+      if (state.timeMinutes < 0) {
+        state.timeMinutes = 45;
+        state.timeHours = (state.timeHours - 1 + 24) % 24;
+      }
+      unselectQuickSlots();
+      updateClockDigits();
+    };
+
+    function unselectQuickSlots() {
+      document.querySelectorAll('.quick-time-slot').forEach(s => s.classList.remove('selected'));
+    }
+
+    document.querySelectorAll('.quick-time-slot').forEach(slot => {
+      slot.onclick = () => {
+        haptic('light');
+        unselectQuickSlots();
+        slot.classList.add('selected');
+        const [hh, mm] = slot.dataset.slot.split(':').map(Number);
+        state.timeHours = hh;
+        state.timeMinutes = mm;
+        updateClockDigits();
+      };
+    });
+
+    // 4. НАСТРОЕНИЕ И ВАЙБ
+    document.querySelectorAll('.vibe-chip').forEach(chip => {
+      chip.onclick = () => {
+        haptic('light');
+        document.querySelectorAll('.vibe-chip').forEach(c => c.classList.remove('selected'));
+        chip.classList.add('selected');
+        state.vibe = chip.dataset.vibe;
+        updateTicketPass();
+      };
+    });
+
+    // 5. ДЛИТЕЛЬНОСТЬ
+    document.querySelectorAll('.duration-chip').forEach(chip => {
+      chip.onclick = () => {
+        haptic('light');
+        document.querySelectorAll('.duration-chip').forEach(c => c.classList.remove('selected'));
+        chip.classList.add('selected');
+        state.duration = chip.dataset.duration;
+        updateTicketPass();
+      };
+    });
+
+    document.getElementById('optionalNoteInput').addEventListener('input', (e) => {
+      state.note = e.target.value.trim();
+      updateTicketPass();
+    });
+
+    // ОТПРАВКА ИНВАЙТА
+    const successModal = document.getElementById('successModal');
+    const summaryCardPreview = document.getElementById('summaryCardPreview');
+    const shareViaTelegramBtn = document.getElementById('shareViaTelegramBtn');
+    const closeSuccessBtn = document.getElementById('closeSuccessBtn');
+
+    function handleSendInvite() {
+      if (!state.selectedGame) {
+        haptic('medium');
+        alert('Пожалуйста, добавь и выбери игру в пункте 1!');
+        openAddGameModal();
+        return;
+      }
+
+      if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      state.note = document.getElementById('optionalNoteInput').value.trim();
+
+      const colorsMap = {
+        sakura: ['#ff5c8a', '#ff85a2', '#c084fc', '#ffffff'],
+        lime: ['#00ff88', '#00d2ff', '#38ef7d', '#ffffff'],
+        amethyst: ['#a855f7', '#ec4899', '#c084fc', '#ffffff'],
+        sunset: ['#ff9f1c', '#ff4081', '#f77f00', '#ffffff'],
+        cyan: ['#00e5ff', '#3b82f6', '#00b4d8', '#ffffff']
+      };
+
+      confetti({
+        particleCount: 160,
+        spread: 95,
+        origin: { y: 0.65 },
+        colors: colorsMap[state.palette] || colorsMap.sakura
+      });
+
+      const recipientText = state.selectedRecipient 
+        ? `${state.selectedRecipient.name} (${state.selectedRecipient.username})` 
+        : 'Всем';
+
+      const payload = {
+        app: 'DUO',
+        sender: {
+          name: state.myName,
+          username: state.myUsername,
+          gender: state.gender,
+          palette: state.palette
+        },
+        recipient: state.selectedRecipient,
+        place: state.selectedGame.title,
+        gameTag: state.selectedGame.tag,
+        day: state.selectedDateText,
+        time: getFormattedTime(),
+        vibe: state.vibe,
+        duration: state.duration,
+        note: state.note || 'Без записки'
+      };
+
+      if (tg && tg.sendData) {
+        tg.sendData(JSON.stringify(payload));
+      }
+
+      const gameText = formatGameDisplay(state.selectedGame);
+
+      summaryCardPreview.innerHTML = `
+        🎯 <b>Кому:</b> ${recipientText}<br>
+        🕹 <b>Игра:</b> ${gameText}<br>
+        📅 <b>Когда:</b> ${state.selectedDateText} в ${getFormattedTime()}<br>
+        ✨ <b>Вайб:</b> ${state.vibe}<br>
+        ⏳ <b>Длительность:</b> ${state.duration}
+        ${state.note ? `<br>💌 <i>"${state.note}"</i>` : ''}
+      `;
+
+      successModal.classList.add('active');
+    }
+
+    function shareToTelegram() {
+      const gameTitle = formatGameDisplay(state.selectedGame);
+      const textInvite = encodeURIComponent(
+        `🎮 Привет! Зову тебя в совместную катку в DUO!\n\n` +
+        `🕹 Игра: ${gameTitle}\n` +
+        `📅 Тайминг: ${state.selectedDateText} в ${getFormattedTime()}\n` +
+        `✨ Вайб: ${state.vibe}\n` +
+        `⏳ Длительность: ${state.duration}\n` +
+        (state.note ? `💌 Записка: "${state.note}"\n` : '') +
+        `\nПогнали? Жду твоего ответа! 🚀`
+      );
+
+      const shareUrl = `https://t.me/share/url?url=&text=${textInvite}`;
+      if (tg && tg.openTelegramLink) {
+        tg.openTelegramLink(shareUrl);
+      } else {
+        window.open(shareUrl, '_blank');
+      }
+    }
+
+    document.getElementById('mobileSubmitBtn').onclick = handleSendInvite;
+    document.getElementById('desktopSubmitBtn').onclick = handleSendInvite;
+    document.getElementById('desktopShareBtn').onclick = shareToTelegram;
+    shareViaTelegramBtn.onclick = shareToTelegram;
+
+    closeSuccessBtn.onclick = () => {
+      if (tg && tg.close) {
+        tg.close();
+      } else {
+        successModal.classList.remove('active');
+      }
+    };
+
+    // Инициализация темы и палитры
+    applyPalette(state.palette);
+    applyGender(state.gender, false);
+  </script>
+</body>
+</html>

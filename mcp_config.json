@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "figma-context": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-figma"],
+      "env": {
+        "FIGMA_PERSONAL_ACCESS_TOKEN": "YOUR_FIGMA_TOKEN_HERE"
+      },
+      "description": "MCP-сервер для прямого чтения макетов, дизайн-токенов и компонентов из Figma"
+    },
+    "playwright-ui-test": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-playwright"],
+      "description": "MCP-сервер для тестирования адаптивности, скриншотов на Desktop/Mobile и проверки UI"
+    },
+    "shadcn-ui": {
+      "command": "npx",
+      "args": ["-y", "shadcn-mcp"],
+      "description": "MCP-сервер для генерации доступных UI-компонентов на базе Radix UI и Tailwind"
+    },
+    "iconify-mcp": {
+      "command": "npx",
+      "args": ["-y", "iconify-mcp"],
+      "description": "MCP-сервер для мгновенного поиска и вставки 100k+ чистых векторных SVG-иконок"
+    }
+  }
+}
