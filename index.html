@@ -802,6 +802,145 @@
       }
     }
 
+    /* Лента избранных контактов */
+    .fav-ribbon {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+      margin-bottom: 12px;
+      scrollbar-width: thin;
+    }
+    .fav-ribbon::-webkit-scrollbar {
+      height: 4px;
+    }
+    .fav-ribbon::-webkit-scrollbar-thumb {
+      background: var(--border-solid);
+      border-radius: 4px;
+    }
+    .fav-card {
+      flex: 0 0 auto;
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      border-radius: var(--btn-radius);
+      padding: 8px 12px;
+      cursor: pointer;
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: all 0.15s;
+      user-select: none;
+    }
+    .fav-card:hover {
+      border-color: var(--text-tertiary);
+    }
+    .fav-card.selected {
+      border-color: var(--accent-primary);
+      box-shadow: 2px 2px 0px var(--accent-primary);
+      background: var(--surface-interactive);
+    }
+    .fav-avatar-circle {
+      width: 32px;
+      height: 32px;
+      min-width: 32px;
+      min-height: 32px;
+      flex-shrink: 0;
+      border-radius: 50%;
+      background: var(--surface-1);
+      border: 1.5px solid var(--accent-primary);
+      color: var(--accent-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 13px;
+    }
+    .fav-card-meta {
+      min-width: 0;
+      max-width: 130px;
+    }
+    .fav-card-name {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.2;
+    }
+    .fav-card-user {
+      font-size: 10.5px;
+      font-family: var(--font-mono);
+      color: var(--text-tertiary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+    .fav-del-btn {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--surface-1);
+      border: 1px solid var(--border-solid);
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      cursor: pointer;
+      opacity: 0.6;
+      transition: opacity 0.15s, color 0.15s;
+    }
+    .fav-del-btn:hover {
+      opacity: 1;
+      color: #ff5c8a;
+      border-color: #ff5c8a;
+    }
+    .fav-add-card-btn {
+      flex: 0 0 auto;
+      background: var(--surface-1);
+      border: 2px dashed var(--border-solid);
+      border-radius: var(--btn-radius);
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: all 0.15s;
+      user-select: none;
+    }
+    .fav-add-card-btn:hover {
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+    }
+    .btn-save-as-fav {
+      background: var(--surface-interactive);
+      border: 1.5px solid var(--border-solid);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 800;
+      padding: 4px 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .btn-save-as-fav:hover {
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+    }
+
     .optional-recipient-box {
       background: var(--surface-1);
       border: 2px solid var(--border-solid);
@@ -1743,32 +1882,25 @@
               <span class="eyebrow-step-badge">02</span>
               Кому отправить инвайт?
             </span>
+            <span style="font-size: 11px; color: var(--text-tertiary); font-weight: 700; font-family: var(--font-mono);" id="favCountBadge">0 в избранном</span>
           </div>
 
-          <!-- Главная карточка отправки в Telegram -->
-          <div class="tg-send-main-card" id="tgSendCard">
-            <div class="tg-icon-badge">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-              </svg>
-            </div>
-            <div class="tg-send-info">
-              <div class="tg-send-title">Отправить в чат Telegram</div>
-              <div class="tg-send-desc">При клике откроется Telegram со списком твоих друзей и чатов</div>
-            </div>
-            <div class="tg-check-pill">
-              <span>● Готово</span>
-            </div>
-          </div>
+          <!-- Лента избранных контактов -->
+          <div class="fav-ribbon" id="favRibbon"></div>
 
-          <!-- Опциональное поле никнейма / имени -->
+          <!-- Поле никнейма / имени -->
           <div class="optional-recipient-box">
-            <label class="optional-recipient-label" for="targetRecipientInput">Подписать имя или @username напарника (необязательно):</label>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <label class="optional-recipient-label" for="targetRecipientInput" style="margin-bottom: 0;">Никнейм @username или имя напарника:</label>
+              <button class="btn-save-as-fav" id="btnQuickSaveFav" style="display: none;" title="Сохранить в избранное для быстрой отправки в один клик">⭐ В избранное</button>
+            </div>
             <div class="recipient-input-wrapper">
               <svg class="recipient-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-              <input type="text" id="targetRecipientInput" class="recipient-clean-input" placeholder="Например: Аня, Саня или @nickname" maxlength="35">
+              <input type="text" id="targetRecipientInput" class="recipient-clean-input" placeholder="Введи ник (например: @rds0645010 или Саня)" maxlength="35">
               <button class="clear-recipient-btn" id="clearRecipientBtn" style="display: none;" title="Очистить">×</button>
+            </div>
+            <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 8px; line-height: 1.35;">
+              💡 <b>Совет:</b> чтобы протестировать прямо сейчас, введи <b>свой собственный @username</b> — и бот пришлет инвайт с кнопками лично тебе!
             </div>
           </div>
         </section>
@@ -2014,6 +2146,30 @@
     </div>
   </div>
 
+  <!-- МОДАЛКА: ДОБАВЛЕНИЕ В ИЗБРАННОЕ -->
+  <div class="modal-overlay-backdrop" id="addFavModal">
+    <div class="modal-dialog-panel">
+      <div class="modal-header-icon" style="background: var(--surface-2); border-color: var(--accent-primary);">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+      </div>
+      <h3 class="modal-heading">Добавить напарника ⭐</h3>
+      <p class="modal-subtext">Сохрани друга в избранное, чтобы звать его в катки в один клик:</p>
+
+      <div style="margin-bottom: 12px; text-align: left;">
+        <label style="font-size: 11px; font-weight: 800; color: var(--text-tertiary); text-transform: uppercase;">Имя напарника:</label>
+        <input type="text" id="favNameInput" placeholder="Например: Саня, Аня, Бро" maxlength="25" style="width: 100%; margin-top: 5px;">
+      </div>
+
+      <div style="margin-bottom: 16px; text-align: left;">
+        <label style="font-size: 11px; font-weight: 800; color: var(--text-tertiary); text-transform: uppercase;">Telegram @username:</label>
+        <input type="text" id="favUsernameInput" placeholder="@username" maxlength="32" style="width: 100%; margin-top: 5px;">
+      </div>
+
+      <button class="modal-action-btn" id="saveFavBtn">Сохранить ⭐</button>
+      <button class="modal-cancel-btn" id="closeFavModalBtn">Отмена</button>
+    </div>
+  </div>
+
   <!-- 3. МОДАЛКА: ГОТОВЫЙ ИНВАЙТ -->
   <div class="modal-overlay-backdrop" id="successModal">
     <div class="modal-dialog-panel">
@@ -2236,8 +2392,10 @@
       const ticketNoteValue = document.getElementById('ticketNoteValue');
 
       ticketGame.innerText = formatGameDisplay(state.selectedGame);
-      ticketRecipient.innerText = state.customRecipient ? state.customRecipient : 'Чат в Telegram 🚀';
-      ticketTiming.innerText = `${state.selectedDateText} в ${getFormattedTime()}`;
+      ticketRecipient.innerText = state.customRecipient 
+        ? (state.customRecipientName && state.customRecipientName !== state.customRecipient ? `${state.customRecipientName} (${state.customRecipient})` : state.customRecipient)
+        : 'Чат в Telegram 🚀';
+      ticketTiming.innerText = `${state.selectedDateText || 'Сегодня'} в ${getFormattedTime()}`;
       ticketVibe.innerText = state.vibe;
       ticketDuration.innerText = state.duration;
 
@@ -2409,10 +2567,134 @@
 
     renderGames();
 
-    // 2. АДРЕСАТ / КУДА ОТПРАВИТЬ
+    // 2. ИЗБРАННОЕ И АДРЕСАТ
+    const favRibbon = document.getElementById('favRibbon');
+    const favCountBadge = document.getElementById('favCountBadge');
     const targetRecipientInput = document.getElementById('targetRecipientInput');
     const clearRecipientBtn = document.getElementById('clearRecipientBtn');
-    const tgSendCard = document.getElementById('tgSendCard');
+    const btnQuickSaveFav = document.getElementById('btnQuickSaveFav');
+    const addFavModal = document.getElementById('addFavModal');
+    const favNameInput = document.getElementById('favNameInput');
+    const favUsernameInput = document.getElementById('favUsernameInput');
+    const saveFavBtn = document.getElementById('saveFavBtn');
+    const closeFavModalBtn = document.getElementById('closeFavModalBtn');
+
+    let favList = JSON.parse(localStorage.getItem('duo_fav_contacts')) || [];
+    let activeFavId = localStorage.getItem('duo_active_fav_id') || 'tg';
+
+    function renderFavRibbon() {
+      if (!favRibbon) return;
+      if (favCountBadge) favCountBadge.innerText = `${favList.length} в избранном`;
+
+      let html = `
+        <div class="fav-card ${activeFavId === 'tg' ? 'selected' : ''}" id="favCardTgDirect" title="Отправить любому чату в Telegram">
+          <div class="fav-avatar-circle">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </div>
+          <div class="fav-card-meta">
+            <div class="fav-card-name">В Telegram</div>
+            <div class="fav-card-user">Выбор чата 🚀</div>
+          </div>
+        </div>
+      `;
+
+      favList.forEach(fav => {
+        const isSel = activeFavId === fav.id;
+        const letter = (fav.name || 'U').trim().charAt(0).toUpperCase();
+        html += `
+          <div class="fav-card ${isSel ? 'selected' : ''}" data-id="${fav.id}" title="Выбрать ${fav.name}">
+            <button class="fav-del-btn" data-del-id="${fav.id}" title="Удалить из избранного">×</button>
+            <div class="fav-avatar-circle">${letter}</div>
+            <div class="fav-card-meta">
+              <div class="fav-card-name">${fav.name}</div>
+              <div class="fav-card-user">${fav.username}</div>
+            </div>
+          </div>
+        `;
+      });
+
+      html += `
+        <div class="fav-add-card-btn" id="openAddFavBtn" title="Добавить напарника в избранное">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8m-4-4h8"></path></svg>
+          <span>+ Тиммейт</span>
+        </div>
+      `;
+
+      favRibbon.innerHTML = html;
+
+      // Клик по "В Telegram"
+      const tgCard = document.getElementById('favCardTgDirect');
+      if (tgCard) {
+        tgCard.onclick = () => {
+          haptic('light');
+          activeFavId = 'tg';
+          localStorage.setItem('duo_active_fav_id', 'tg');
+          state.customRecipient = '';
+          state.customRecipientName = '';
+          localStorage.removeItem('duo_custom_recipient');
+          if (targetRecipientInput) targetRecipientInput.value = '';
+          if (clearRecipientBtn) clearRecipientBtn.style.display = 'none';
+          if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
+          renderFavRibbon();
+          updateTicketPass();
+        };
+      }
+
+      // Клик по сохраненному тиммейту
+      favRibbon.querySelectorAll('.fav-card[data-id]').forEach(card => {
+        card.onclick = (e) => {
+          if (e.target.closest('.fav-del-btn')) return;
+          haptic('light');
+          const found = favList.find(f => f.id === card.dataset.id);
+          if (found) {
+            activeFavId = found.id;
+            localStorage.setItem('duo_active_fav_id', found.id);
+            state.customRecipient = found.username;
+            state.customRecipientName = found.name;
+            localStorage.setItem('duo_custom_recipient', found.username);
+            if (targetRecipientInput) targetRecipientInput.value = found.username;
+            if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
+            if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
+            renderFavRibbon();
+            updateTicketPass();
+          }
+        };
+      });
+
+      // Удаление тиммейта
+      favRibbon.querySelectorAll('.fav-del-btn').forEach(btn => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          haptic('medium');
+          const delId = btn.dataset.delId;
+          favList = favList.filter(f => f.id !== delId);
+          localStorage.setItem('duo_fav_contacts', JSON.stringify(favList));
+          if (activeFavId === delId) {
+            activeFavId = 'tg';
+            localStorage.setItem('duo_active_fav_id', 'tg');
+            state.customRecipient = '';
+            state.customRecipientName = '';
+            if (targetRecipientInput) targetRecipientInput.value = '';
+          }
+          renderFavRibbon();
+          updateTicketPass();
+        };
+      });
+
+      // Открытие модалки добавления
+      const addBtn = document.getElementById('openAddFavBtn');
+      if (addBtn) {
+        addBtn.onclick = () => {
+          haptic('light');
+          favNameInput.value = '';
+          favUsernameInput.value = targetRecipientInput.value.trim() || '';
+          addFavModal.classList.add('active');
+          setTimeout(() => favNameInput.focus(), 200);
+        };
+      }
+    }
+
+    renderFavRibbon();
 
     if (state.customRecipient && targetRecipientInput) {
       targetRecipientInput.value = state.customRecipient;
@@ -2423,11 +2705,32 @@
       targetRecipientInput.addEventListener('input', (e) => {
         const val = e.target.value.trim();
         state.customRecipient = val;
+        state.customRecipientName = val;
         localStorage.setItem('duo_custom_recipient', val);
         if (clearRecipientBtn) {
           clearRecipientBtn.style.display = val ? 'block' : 'none';
         }
+        
+        // Показываем кнопку "⭐ В избранное", если ник введен и еще не сохранен
+        const alreadySaved = favList.some(f => f.username.toLowerCase() === val.toLowerCase() || f.name.toLowerCase() === val.toLowerCase());
+        if (btnQuickSaveFav) {
+          btnQuickSaveFav.style.display = (val.length >= 2 && !alreadySaved) ? 'flex' : 'none';
+        }
+
+        activeFavId = 'custom';
+        favRibbon.querySelectorAll('.fav-card').forEach(c => c.classList.remove('selected'));
         updateTicketPass();
+      });
+    }
+
+    if (btnQuickSaveFav) {
+      btnQuickSaveFav.addEventListener('click', () => {
+        haptic('light');
+        const val = targetRecipientInput.value.trim();
+        favNameInput.value = val.replace('@', '');
+        favUsernameInput.value = val.startsWith('@') ? val : '@' + val;
+        addFavModal.classList.add('active');
+        setTimeout(() => favNameInput.focus(), 200);
       });
     }
 
@@ -2439,17 +2742,54 @@
           targetRecipientInput.focus();
         }
         state.customRecipient = '';
+        state.customRecipientName = '';
         localStorage.removeItem('duo_custom_recipient');
         clearRecipientBtn.style.display = 'none';
+        if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
+        activeFavId = 'tg';
+        renderFavRibbon();
         updateTicketPass();
       });
     }
 
-    if (tgSendCard) {
-      tgSendCard.addEventListener('click', () => {
-        haptic('light');
-        if (targetRecipientInput) targetRecipientInput.focus();
-      });
+    if (saveFavBtn) {
+      saveFavBtn.onclick = () => {
+        const name = favNameInput.value.trim();
+        let user = favUsernameInput.value.trim();
+        if (!name) {
+          alert('Пожалуйста, напиши имя тиммейта!');
+          return;
+        }
+        if (!user) user = '@' + name.toLowerCase();
+        if (!user.startsWith('@')) user = '@' + user;
+
+        const newFav = {
+          id: Date.now().toString(),
+          name: name,
+          username: user
+        };
+
+        favList.push(newFav);
+        localStorage.setItem('duo_fav_contacts', JSON.stringify(favList));
+
+        activeFavId = newFav.id;
+        localStorage.setItem('duo_active_fav_id', newFav.id);
+        state.customRecipient = newFav.username;
+        state.customRecipientName = newFav.name;
+        localStorage.setItem('duo_custom_recipient', newFav.username);
+        if (targetRecipientInput) targetRecipientInput.value = newFav.username;
+        if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
+        if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
+
+        renderFavRibbon();
+        updateTicketPass();
+        addFavModal.classList.remove('active');
+        haptic('success');
+      };
+    }
+
+    if (closeFavModalBtn) {
+      closeFavModalBtn.onclick = () => addFavModal.classList.remove('active');
     }
 
     // 3. КАСТОМНЫЙ ДАТА-СТРИП + ТАЙМ-ПИКЕР
