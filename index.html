@@ -1650,13 +1650,11 @@
     .tour-backdrop-overlay {
       position: fixed;
       inset: 0;
-      background: rgba(5, 7, 12, 0.78);
-      backdrop-filter: blur(4px);
-      -webkit-backdrop-filter: blur(4px);
+      background: rgba(0, 0, 0, 0.6);
       z-index: 9998;
       display: none;
       opacity: 0;
-      transition: opacity 0.25s ease;
+      transition: opacity 0.2s ease;
       pointer-events: auto;
     }
     .tour-backdrop-overlay.active {
@@ -1667,9 +1665,10 @@
     .tour-spotlight-active {
       position: relative !important;
       z-index: 9999 !important;
+      background: var(--surface-1) !important;
       outline: 3px solid var(--accent-primary) !important;
       box-shadow: 0 0 0 6px var(--accent-bg), 0 0 35px var(--accent-glow) !important;
-      transition: outline 0.3s ease, box-shadow 0.3s ease !important;
+      transition: outline 0.2s ease, box-shadow 0.2s ease !important;
       animation: tourPulseRing 2s infinite ease-in-out !important;
     }
 
@@ -2473,14 +2472,6 @@
     </div>
 
   </div> <!-- /app-viewport -->
-
-  <!-- МОБИЛЬНАЯ НИЖНЯЯ ПАНЕЛЬ -->
-  <div class="mobile-only-dock">
-    <button class="primary-submit-btn" id="mobileSubmitBtn">
-      <span id="mobileSubmitLabel">Отправить инвайт 💕</span>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-    </button>
-  </div>
 
   <!-- ==========================================================================
        МОДАЛЬНЫЕ ОКНА
@@ -3710,9 +3701,8 @@
       }
 
       const submitBtns = [
-        document.getElementById('mobileSubmitBtn'),
-        document.getElementById('desktopSubmitBtn'),
-        document.getElementById('mobileTicketSubmitBtn')
+        document.getElementById('mobileTicketSubmitBtn'),
+        document.getElementById('desktopSubmitBtn')
       ];
       submitBtns.forEach(b => { if (b) { b.innerText = 'Отправка... ⏳'; b.style.opacity = '0.7'; } });
 
@@ -3770,46 +3760,54 @@
       const modalTitle = document.getElementById('successModalTitle');
       const modalSubtext = document.getElementById('successModalSubtext');
       const shareBtn = document.getElementById('shareViaTelegramBtn');
+      const copyBtn = document.getElementById('copyTextOnlyBtn');
+      const closeBtn = document.getElementById('closeSuccessBtn');
 
       let deliveryStatusHtml = '';
       if (botDelivered) {
-        if (modalTitle) modalTitle.innerHTML = 'Отправлено прямо в ЛС! 🎉';
-        if (modalSubtext) modalSubtext.innerHTML = `Бот <b>@duo_play_date_bot</b> доставил интерактивную карточку в личные сообщения <b>${recipientFoundName}</b>!`;
+        if (modalTitle) modalTitle.innerHTML = 'Доставлено в ЛС! 🎉';
+        if (modalSubtext) modalSubtext.innerHTML = `Бот отправил интерактивную карточку для <b>${recipientFoundName}</b>.`;
         if (shareBtn) shareBtn.style.display = 'none';
+        if (copyBtn) copyBtn.style.display = 'none';
+        if (closeBtn) closeBtn.innerText = 'Отлично, жду катку! 🎮';
 
         deliveryStatusHtml = `
-          <div style="margin-top: 10px; padding: 10px 12px; background: rgba(0, 255, 136, 0.15); border: 1.5px solid #00ff88; border-radius: 8px; color: #00ff88; font-size: 12px; font-weight: 800; line-height: 1.4;">
-            🤖 Бот успешно доставил инвайт с кнопками прямо в ЛС ${recipientFoundName}!<br>
-            <span style="font-size: 11px; font-weight: 600; opacity: 0.9;">Когда напарник ответит в боте, тебе мгновенно придет уведомление.</span>
+          <div style="margin-top: 10px; padding: 9px 12px; background: rgba(0, 255, 136, 0.12); border: 1.5px solid #00ff88; border-radius: 8px; color: #00ff88; font-size: 11.5px; font-weight: 800; display: flex; align-items: center; gap: 7px;">
+            <span class="status-pulse-led"></span> Ждём ответ напарника (бот сразу уведомит тебя)
           </div>
         `;
       } else {
-        if (modalTitle) modalTitle.innerHTML = 'Инвайт сформирован! 💌';
-        if (state.customRecipient) {
-          if (modalSubtext) modalSubtext.innerHTML = `Напарник <b>${state.customRecipient}</b> ещё не нажимал <code>/start</code> в боте. Telegram разрешает ботам писать только тем, кто запустил бота.`;
-        } else {
-          if (modalSubtext) modalSubtext.innerHTML = 'Готовое приглашение скопировано в буфер! Выбери чат напарника в Telegram:';
+        if (modalTitle) modalTitle.innerHTML = 'Инвайт готов! 💌';
+        if (modalSubtext) {
+          modalSubtext.innerHTML = state.customRecipient 
+            ? `Ссылка с 1-клик кнопками создана! Отправь её напарнику <b>${state.customRecipient}</b>:`
+            : `Готово! Выбери чат напарника в Telegram для отправки:`;
         }
         if (shareBtn) {
           shareBtn.style.display = 'block';
-          shareBtn.innerText = '🚀 Переслать в чат Telegram';
+          shareBtn.innerText = '🚀 Переслать в Telegram';
         }
+        if (copyBtn) {
+          copyBtn.style.display = 'block';
+          copyBtn.innerText = '📋 Скопировать ссылку';
+        }
+        if (closeBtn) closeBtn.innerText = 'Закрыть';
 
         deliveryStatusHtml = `
-          <div style="margin-top: 10px; padding: 10px 12px; background: rgba(0, 229, 255, 0.12); border: 1.5px solid var(--accent-primary); border-radius: 8px; color: var(--text-primary); font-size: 11.5px; font-weight: 700; line-height: 1.35;">
-            🔗 <b>Умный инвайт с 1-клик принятием готов!</b><br>
-            <span style="font-size: 11px; font-weight: 500; opacity: 0.9;">Напарник нажмет ссылку и бот сразу покажет кнопки ответа: «Я в деле! / Позже».</span>
+          <div style="margin-top: 10px; padding: 9px 12px; background: rgba(0, 229, 255, 0.12); border: 1.5px solid var(--accent-primary); border-radius: 8px; color: var(--text-primary); font-size: 11.5px; font-weight: 700;">
+            🔗 Ссылка с 1-клик принятием уже скопирована в буфер
           </div>
         `;
       }
 
       summaryCardPreview.innerHTML = `
-        🎯 <b>Кому:</b> ${recipientText}<br>
-        🕹 <b>Игра:</b> ${gameText}<br>
-        📅 <b>Когда:</b> ${state.selectedDateText} в ${getFormattedTime()}<br>
-        ✨ <b>Вайб:</b> ${state.vibe}<br>
-        ⏳ <b>Длительность:</b> ${state.duration}
-        ${state.note ? `<br>💌 <i>"${state.note}"</i>` : ''}
+        <div style="display: flex; flex-direction: column; gap: 5px; font-size: 13px;">
+          <div>🕹 <b>Игра:</b> ${gameText}</div>
+          <div>👤 <b>Кому:</b> ${recipientText}</div>
+          <div>📅 <b>Время:</b> ${state.selectedDateText} в ${getFormattedTime()}</div>
+          <div>✨ <b>Вайб:</b> ${state.vibe} (${state.duration})</div>
+          ${state.note ? `<div>💌 <i>"${state.note}"</i></div>` : ''}
+        </div>
         ${deliveryStatusHtml}
       `;
 
@@ -3860,13 +3858,15 @@
       }
     }
 
-    document.getElementById('mobileSubmitBtn').onclick = handleSendInvite;
-    document.getElementById('desktopSubmitBtn').onclick = handleSendInvite;
-    document.getElementById('desktopShareBtn').onclick = shareToTelegram;
-    shareViaTelegramBtn.onclick = shareToTelegram;
-
-    const mobileTicketSubmitBtn = document.getElementById('mobileTicketSubmitBtn');
-    if (mobileTicketSubmitBtn) mobileTicketSubmitBtn.onclick = handleSendInvite;
+    const mobileBtn = document.getElementById('mobileSubmitBtn');
+    if (mobileBtn) mobileBtn.onclick = handleSendInvite;
+    const desktopBtn = document.getElementById('desktopSubmitBtn');
+    if (desktopBtn) desktopBtn.onclick = handleSendInvite;
+    const ticketSubmitBtn = document.getElementById('mobileTicketSubmitBtn');
+    if (ticketSubmitBtn) ticketSubmitBtn.onclick = handleSendInvite;
+    const desktopShareBtn = document.getElementById('desktopShareBtn');
+    if (desktopShareBtn) desktopShareBtn.onclick = shareToTelegram;
+    if (shareViaTelegramBtn) shareViaTelegramBtn.onclick = shareToTelegram;
 
     // ==========================================
     // 🎓 ОБУЧЕНИЕ НОВИЧКА ("ВЕСТИ ЗА РУКУ")
