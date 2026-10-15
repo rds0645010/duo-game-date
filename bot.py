@@ -81,9 +81,17 @@ def save_user(user_id: int, username: str, first_name: str, photo_url: str = Non
 def find_user_by_username(username: str):
     if not username:
         return None
-    clean = username.lower().replace("@", "").strip()
+    s = str(username).strip()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # Если передан числовой user_id
+    if s.isdigit():
+        cursor.execute("SELECT user_id, first_name FROM users WHERE user_id = ?", (int(s),))
+        row = cursor.fetchone()
+        if row:
+            conn.close()
+            return row
+    clean = s.lower().replace("@", "").strip()
     cursor.execute("SELECT user_id, first_name FROM users WHERE username = ?", (clean,))
     row = cursor.fetchone()
     conn.close()
@@ -111,7 +119,7 @@ bot = Bot(token=BOT_TOKEN) if (BOT_TOKEN and BOT_TOKEN != "YOUR_BOT_TOKEN_HERE")
 dp = Dispatcher()
 
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip() or "https://duo-game-date.onrender.com"
 
 
 def get_app_url():
@@ -238,11 +246,29 @@ async def handle_health(request):
     })
 
 
+async def handle_api_check_user(request):
+    try:
+        username = request.query.get("username", "").strip()
+        if not username:
+            return web.json_response({"found": False, "error": "empty_username"})
+        user = find_user_by_username(username)
+        if user:
+            return web.json_response({
+                "found": True,
+                "user_id": user[0],
+                "first_name": user[1]
+            })
+        return web.json_response({"found": False})
+    except Exception as e:
+        return web.json_response({"found": False, "error": str(e)}, status=500)
+
+
 async def handle_api_send_invite(request):
     try:
         data = await request.json()
         sender_id = data.get("sender_id")
         sender_name = data.get("sender_name", "Тиммейт")
+        sender_username = data.get("sender_username", "")
         recipient_username = data.get("recipient_username", "")
         place = data.get("place", "Roblox")
         day = data.get("day", "Сегодня")
@@ -250,6 +276,13 @@ async def handle_api_send_invite(request):
         vibe = data.get("vibe", "🍵 Уютный чилл")
         duration = data.get("duration", "1-2 часа")
         note = data.get("note", "")
+
+        # Авто-регистрация отправителя в базе (если переданы данные из Telegram)
+        if sender_id and str(sender_id) != "0":
+            try:
+                save_user(int(sender_id), sender_username, sender_name)
+            except Exception as e:
+                logging.warning(f"Error auto-saving sender: {e}")
 
         invite_id = create_invite_record(
             sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note
@@ -301,18 +334,33 @@ async def handle_api_send_invite(request):
         )
 
         if bot:
-            await bot.send_message(
-                chat_id=target_chat_id,
-                text=invite_msg,
-                reply_markup=reply_kb,
-                parse_mode="Markdown"
-            )
-
-        return web.json_response({
-            "success": True,
-            "delivered": True,
-            "recipient_name": target_first_name
-        })
+            try:
+                await bot.send_message(
+                    chat_id=target_chat_id,
+                    text=invite_msg,
+                    reply_markup=reply_kb,
+                    parse_mode="Markdown"
+                )
+                return web.json_response({
+                    "success": True,
+                    "delivered": True,
+                    "recipient_name": target_first_name
+                })
+            except Exception as send_err:
+                logging.warning(f"Failed to send bot message to {target_chat_id}: {send_err}")
+                return web.json_response({
+                    "success": True,
+                    "delivered": False,
+                    "reason": "forbidden",
+                    "message": f"Telegram не разрешил отправить сообщение: {send_err}"
+                })
+        else:
+            return web.json_response({
+                "success": True,
+                "delivered": False,
+                "reason": "no_bot",
+                "message": "Бот не настроен на сервере"
+            })
 
     except Exception as e:
         logging.error(f"Error in api_send_invite: {e}")
@@ -339,6 +387,7 @@ def create_web_app():
     app.middlewares.append(cors_middleware)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/api/check_user", handle_api_check_user)
     app.router.add_post("/api/send_invite", handle_api_send_invite)
     return app
 

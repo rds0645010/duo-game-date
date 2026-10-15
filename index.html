@@ -1899,8 +1899,19 @@
               <input type="text" id="targetRecipientInput" class="recipient-clean-input" placeholder="Введи ник (например: @rds0645010 или Саня)" maxlength="35">
               <button class="clear-recipient-btn" id="clearRecipientBtn" style="display: none;" title="Очистить">×</button>
             </div>
-            <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 8px; line-height: 1.35;">
-              💡 <b>Совет:</b> чтобы протестировать прямо сейчас, введи <b>свой собственный @username</b> — и бот пришлет инвайт с кнопками лично тебе!
+            <!-- Live Status Badge -->
+            <div id="recipientStatusBadge" class="recipient-live-badge info" style="margin-top: 8px; font-size: 11.5px; padding: 7px 10px; border-radius: 6px; font-weight: 700; line-height: 1.35; background: var(--surface-2); border: 1.5px solid var(--border-solid); color: var(--text-secondary);">
+              💡 Введи @username напарника или выбери «В Telegram» выше
+            </div>
+            <!-- Быстрый тест на себе -->
+            <div id="selfTestBar" style="margin-top: 8px; display: none; align-items: center; justify-content: space-between; gap: 8px; background: rgba(0, 229, 255, 0.08); border: 1.5px solid var(--accent-primary); border-radius: 8px; padding: 8px 12px;">
+              <div style="font-size: 11.5px; color: var(--text-primary); font-weight: 700;">
+                🧪 <b>Тест на себе:</b> <span id="selfTestUsernameText" style="color: var(--accent-primary);">@username</span>
+              </div>
+              <button id="btnSelfTest" type="button" style="background: var(--accent-primary); color: var(--btn-text); border: 1.5px solid var(--shadow-hard); box-shadow: 2px 2px 0px var(--shadow-hard); font-size: 11.5px; font-weight: 800; padding: 5px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap;">Отправить себе ⚡</button>
+            </div>
+            <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 8px; line-height: 1.4;">
+              ℹ️ <b>Как работает бот:</b> если напарник запускал бота <code>/start</code> — инвайт прилетит прямо в ЛС с интерактивными кнопками! Если ещё нет — откроется окно Telegram, чтобы ты отправил ему красивую карточку в 1 клик.
             </div>
           </div>
         </section>
@@ -2173,11 +2184,11 @@
   <!-- 3. МОДАЛКА: ГОТОВЫЙ ИНВАЙТ -->
   <div class="modal-overlay-backdrop" id="successModal">
     <div class="modal-dialog-panel">
-      <div class="modal-header-icon" style="background: var(--surface-2); border-color: var(--accent-primary);">
+      <div class="modal-header-icon" id="successModalIcon" style="background: var(--surface-2); border-color: var(--accent-primary);">
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
-      <h3 class="modal-heading">Инвайт готов! 🚀</h3>
-      <p class="modal-subtext">Выбери чат в открывшемся Telegram, чтобы отправить инвайт другу:</p>
+      <h3 class="modal-heading" id="successModalTitle">Инвайт готов! 🚀</h3>
+      <p class="modal-subtext" id="successModalSubtext">Выбери чат в Telegram, чтобы отправить инвайт напарнику:</p>
       
       <div id="summaryCardPreview" style="background: var(--surface-2); border: 2px solid var(--border-solid); border-radius: var(--card-radius); padding: 16px; font-size: 13.5px; line-height: 1.55; color: var(--text-secondary); text-align: left; margin: 12px 0 16px 0;">
       </div>
@@ -2198,11 +2209,14 @@
       tg.expand();
     }
 
-    // Автоматическое сопряжение с сервером бота (если открыто через кнопку бота)
+    // Автоматическое сопряжение с сервером бота
+    const DEFAULT_SERVER_URL = 'https://duo-game-date.onrender.com';
     const urlParams = new URLSearchParams(window.location.search);
     const srvParam = urlParams.get('srv');
     if (srvParam) {
       localStorage.setItem('duo_server_url', srvParam.replace(/\/$/, ''));
+    } else if (!localStorage.getItem('duo_server_url')) {
+      localStorage.setItem('duo_server_url', DEFAULT_SERVER_URL);
     }
 
     function haptic(type = 'light') {
@@ -2636,6 +2650,7 @@
           if (clearRecipientBtn) clearRecipientBtn.style.display = 'none';
           if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
           renderFavRibbon();
+          checkRecipientOnlineStatus('');
           updateTicketPass();
         };
       }
@@ -2656,6 +2671,7 @@
             if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
             if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
             renderFavRibbon();
+            checkRecipientOnlineStatus(found.username);
             updateTicketPass();
           }
         };
@@ -2675,6 +2691,7 @@
             state.customRecipient = '';
             state.customRecipientName = '';
             if (targetRecipientInput) targetRecipientInput.value = '';
+            checkRecipientOnlineStatus('');
           }
           renderFavRibbon();
           updateTicketPass();
@@ -2696,9 +2713,78 @@
 
     renderFavRibbon();
 
+    let checkRecipientTimeout = null;
+    async function checkRecipientOnlineStatus(username) {
+      const badge = document.getElementById('recipientStatusBadge');
+      if (!badge) return;
+      if (!username || username.trim() === '') {
+        badge.style.background = 'var(--surface-2)';
+        badge.style.borderColor = 'var(--border-solid)';
+        badge.style.color = 'var(--text-secondary)';
+        badge.innerHTML = '💡 Введи никнейм друга или выбери «В Telegram» выше';
+        return;
+      }
+      const clean = username.replace('@', '').trim();
+      if (clean.length < 2) return;
+
+      badge.style.background = 'var(--surface-2)';
+      badge.style.borderColor = 'var(--border-solid)';
+      badge.style.color = 'var(--text-secondary)';
+      badge.innerHTML = '⏳ Проверяем напарника в базе бота...';
+
+      const srv = localStorage.getItem('duo_server_url') || DEFAULT_SERVER_URL;
+      try {
+        const res = await fetch(`${srv}/api/check_user?username=${encodeURIComponent(clean)}`);
+        const data = await res.json();
+        if (data.found) {
+          badge.style.background = 'rgba(0, 255, 136, 0.12)';
+          badge.style.borderColor = '#00ff88';
+          badge.style.color = '#00ff88';
+          badge.innerHTML = `🟢 <b>${data.first_name || clean}</b> найден в боте! Инвайт прилетит прямо в ЛС с кнопками.`;
+        } else {
+          badge.style.background = 'rgba(255, 159, 28, 0.12)';
+          badge.style.borderColor = '#ff9f1c';
+          badge.style.color = '#ff9f1c';
+          badge.innerHTML = `🟡 <b>@${clean}</b> ещё не нажимал /start в боте. Инвайт откроется для отправки в чат в 1 клик!`;
+        }
+      } catch (e) {
+        badge.style.background = 'var(--surface-2)';
+        badge.style.borderColor = 'var(--border-solid)';
+        badge.style.color = 'var(--text-secondary)';
+        badge.innerHTML = `💡 Готовый инвайт откроется для отправки @${clean} в Telegram`;
+      }
+    }
+
     if (state.customRecipient && targetRecipientInput) {
       targetRecipientInput.value = state.customRecipient;
       if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
+      checkRecipientOnlineStatus(state.customRecipient);
+    }
+
+    // Инициализация кнопки «Тест на себе»
+    const myTgUser = tg?.initDataUnsafe?.user;
+    if (myTgUser && (myTgUser.username || myTgUser.id)) {
+      const selfTestBar = document.getElementById('selfTestBar');
+      const selfTestUsernameText = document.getElementById('selfTestUsernameText');
+      const btnSelfTest = document.getElementById('btnSelfTest');
+      if (selfTestBar && selfTestUsernameText && btnSelfTest) {
+        selfTestBar.style.display = 'flex';
+        const myDisplay = myTgUser.username ? ('@' + myTgUser.username) : (myTgUser.first_name || 'Я');
+        selfTestUsernameText.innerText = myDisplay;
+        btnSelfTest.onclick = () => {
+          haptic('light');
+          const myVal = myTgUser.username ? ('@' + myTgUser.username) : String(myTgUser.id);
+          if (targetRecipientInput) targetRecipientInput.value = myVal;
+          state.customRecipient = myVal;
+          state.customRecipientName = myTgUser.first_name || 'Я';
+          localStorage.setItem('duo_custom_recipient', myVal);
+          if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
+          checkRecipientOnlineStatus(myVal);
+          activeFavId = 'custom';
+          renderFavRibbon();
+          updateTicketPass();
+        };
+      }
     }
 
     if (targetRecipientInput) {
@@ -2720,6 +2806,11 @@
         activeFavId = 'custom';
         favRibbon.querySelectorAll('.fav-card').forEach(c => c.classList.remove('selected'));
         updateTicketPass();
+
+        clearTimeout(checkRecipientTimeout);
+        checkRecipientTimeout = setTimeout(() => {
+          checkRecipientOnlineStatus(val);
+        }, 350);
       });
     }
 
@@ -2748,6 +2839,7 @@
         if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
         activeFavId = 'tg';
         renderFavRibbon();
+        checkRecipientOnlineStatus('');
         updateTicketPass();
       });
     }
@@ -2782,6 +2874,7 @@
         if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
 
         renderFavRibbon();
+        checkRecipientOnlineStatus(newFav.username);
         updateTicketPass();
         addFavModal.classList.remove('active');
         haptic('success');
@@ -3043,18 +3136,27 @@
         navigator.clipboard.writeText(textInvite).catch(() => {});
       }
 
+      const submitBtns = [document.getElementById('mobileSubmitBtn'), document.getElementById('desktopSubmitBtn')];
+      submitBtns.forEach(b => { if (b) { b.innerText = 'Отправка... ⏳'; b.style.opacity = '0.7'; } });
+
       // Проверяем возможность прямой отправки через сервер бота (если настроен)
       let botDelivered = false;
       let recipientFoundName = '';
-      const serverUrl = localStorage.getItem('duo_server_url') || '';
+      let botFailMessage = '';
+      const serverUrl = localStorage.getItem('duo_server_url') || DEFAULT_SERVER_URL;
+
       if (serverUrl && state.customRecipient) {
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 7000);
           const res = await fetch(`${serverUrl}/api/send_invite`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
             body: JSON.stringify({
               sender_id: tg?.initDataUnsafe?.user?.id || 0,
               sender_name: state.myName || tg?.initDataUnsafe?.user?.first_name || 'Твой тиммейт',
+              sender_username: tg?.initDataUnsafe?.user?.username || '',
               recipient_username: state.customRecipient,
               place: gameText,
               day: state.selectedDateText,
@@ -3064,27 +3166,52 @@
               note: state.note
             })
           });
+          clearTimeout(timeoutId);
           const json = await res.json();
           if (json.delivered) {
             botDelivered = true;
             recipientFoundName = json.recipient_name || state.customRecipient;
+          } else {
+            botFailMessage = json.message || '';
           }
         } catch (e) {
           console.warn('Bot server check:', e);
         }
       }
 
+      submitBtns.forEach(b => { if (b) { b.innerText = 'Отправить инвайт 🚀'; b.style.opacity = '1'; } });
+
+      const modalTitle = document.getElementById('successModalTitle');
+      const modalSubtext = document.getElementById('successModalSubtext');
+      const shareBtn = document.getElementById('shareViaTelegramBtn');
+
       let deliveryStatusHtml = '';
       if (botDelivered) {
+        if (modalTitle) modalTitle.innerHTML = 'Отправлено прямо в ЛС! 🎉';
+        if (modalSubtext) modalSubtext.innerHTML = `Бот <b>@duo_play_date_bot</b> доставил интерактивную карточку в личные сообщения <b>${recipientFoundName}</b>!`;
+        if (shareBtn) shareBtn.style.display = 'none';
+
         deliveryStatusHtml = `
-          <div style="margin-top: 10px; padding: 8px 10px; background: rgba(0, 255, 136, 0.15); border: 1.5px solid #00ff88; border-radius: 8px; color: #00ff88; font-size: 11.5px; font-weight: 800;">
-            🤖 Бот успешно доставил инвайт в личные сообщения ${recipientFoundName}!
+          <div style="margin-top: 10px; padding: 10px 12px; background: rgba(0, 255, 136, 0.15); border: 1.5px solid #00ff88; border-radius: 8px; color: #00ff88; font-size: 12px; font-weight: 800; line-height: 1.4;">
+            🤖 Бот успешно доставил инвайт с кнопками прямо в ЛС ${recipientFoundName}!<br>
+            <span style="font-size: 11px; font-weight: 600; opacity: 0.9;">Когда напарник ответит в боте, тебе мгновенно придет уведомление.</span>
           </div>
         `;
       } else {
+        if (modalTitle) modalTitle.innerHTML = 'Инвайт сформирован! 💌';
+        if (state.customRecipient) {
+          if (modalSubtext) modalSubtext.innerHTML = `Напарник <b>${state.customRecipient}</b> ещё не нажимал <code>/start</code> в боте. Telegram разрешает ботам писать только тем, кто запустил бота.`;
+        } else {
+          if (modalSubtext) modalSubtext.innerHTML = 'Готовое приглашение скопировано в буфер! Выбери чат напарника в Telegram:';
+        }
+        if (shareBtn) {
+          shareBtn.style.display = 'block';
+          shareBtn.innerText = '🚀 Переслать в чат Telegram';
+        }
+
         deliveryStatusHtml = `
-          <div style="margin-top: 10px; padding: 6px 10px; background: rgba(0, 255, 136, 0.12); border: 1px solid #00ff88; border-radius: 6px; color: #00ff88; font-size: 11px; font-weight: 700;">
-            ✓ Готовый текст скопирован в буфер обмена!
+          <div style="margin-top: 10px; padding: 8px 10px; background: rgba(0, 229, 255, 0.12); border: 1.5px solid var(--accent-primary); border-radius: 8px; color: var(--text-primary); font-size: 11.5px; font-weight: 700; line-height: 1.35;">
+            ✓ Красивый текст скопирован в буфер обмена! Нажми кнопку ниже, чтобы переслать его напарнику в один клик.
           </div>
         `;
       }
@@ -3100,11 +3227,6 @@
       `;
 
       successModal.classList.add('active');
-
-      // Если бот сам не доставил — открываем нативный выбор чата Telegram!
-      if (!botDelivered) {
-        shareToTelegram();
-      }
     }
 
     function buildInviteText() {
