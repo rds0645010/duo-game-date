@@ -112,6 +112,32 @@ def create_invite_record(sender_id, sender_name, recipient_username, place, day,
     return invite_id
 
 
+def get_invite_record(invite_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note, status
+        FROM invites WHERE id = ?
+    """, (invite_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "id": row[0],
+            "sender_id": row[1],
+            "sender_name": row[2],
+            "recipient_username": row[3],
+            "place": row[4],
+            "day": row[5],
+            "time": row[6],
+            "vibe": row[7],
+            "duration": row[8],
+            "note": row[9],
+            "status": row[10]
+        }
+    return None
+
+
 init_db()
 
 # Бот и Диспетчер
@@ -140,11 +166,71 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
     )
 
     app_link = get_app_url()
+
+    # 🔗 Обработка перехода по умной вирусной ссылке (?start=inv_123)
+    if command and command.args and command.args.startswith("inv_"):
+        try:
+            inv_id_str = command.args.replace("inv_", "").strip()
+            if inv_id_str.isdigit():
+                inv = get_invite_record(int(inv_id_str))
+                if inv:
+                    sender_name = inv["sender_name"] or "Твой тиммейт"
+                    invite_msg = (
+                        f"👾 **ТЕБЯ ЗОВУТ В ИГРУ В DUO!** 🎮\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"👤 **От кого:** {sender_name}\n"
+                        f"🕹 **Игра:** {inv['place']}\n"
+                        f"📅 **Время:** {inv['day']} в {inv['time']}\n"
+                        f"✨ **Вайб:** {inv['vibe']}\n"
+                        f"⏳ **Сколько играем:** {inv['duration']}\n"
+                    )
+                    if inv["note"] and inv["note"] != "Без записки":
+                        invite_msg += f"💌 **Записка:** _{inv['note']}_\n"
+                    invite_msg += (
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"Ты в деле? Выбери ответ ниже 👇"
+                    )
+
+                    reply_kb = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="✅ Я в деле! Погнали!",
+                                    callback_data=f"accept_{inv['sender_id'] or 0}_{inv['id']}"
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    text="⏰ Давай, но позже",
+                                    callback_data=f"later_{inv['sender_id'] or 0}_{inv['id']}"
+                                ),
+                                InlineKeyboardButton(
+                                    text="💔 Не сегодня",
+                                    callback_data=f"decline_{inv['sender_id'] or 0}_{inv['id']}"
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    text="🎮 Открыть DUO ✨",
+                                    web_app=WebAppInfo(url=app_link)
+                                )
+                            ]
+                        ]
+                    )
+                    await message.answer(invite_msg, reply_markup=reply_kb, parse_mode="Markdown")
+                    return
+        except Exception as e:
+            logging.error(f"Error handling deep link invite: {e}")
+
     welcome_text = (
-        f"Привет, {user.first_name}! 👾\n\n"
-        "Добро пожаловать в **DUO** — твой сервис для совместных игр и игровых свиданий!\n\n"
-        "✨ Теперь твои друзья могут звать тебя в катки в один клик, а бот будет мгновенно присылать приглашения прямо сюда!\n\n"
-        "Нажми кнопку ниже, чтобы открыть приложение и создать своё приглашение:"
+        f"👾 **DUO — ТВОЙ ХАБ ДЛЯ СОВМЕСТНЫХ ИГР** 🎮\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Привет, {user.first_name}! 👋\n\n"
+        f"✨ **Зови тиммейтов** в любимые игры за 2 клика.\n"
+        f"🔔 **Получай инвайты** с кнопками прямо сюда в ЛС.\n"
+        f"📅 **Назначай тайминги** и собирай дуэты без долгих споров.\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Нажми кнопку ниже, чтобы открыть лобби и создать приглашение 👇"
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -179,7 +265,10 @@ async def handle_accept(callback: types.CallbackQuery):
     
     await callback.answer("Приглашение принято! 🎉")
     await callback.message.edit_text(
-        callback.message.text + "\n\n✅ **Ты согласился(лась) пойти в игру! Запускай катку! 🚀**",
+        callback.message.text + "\n\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "✅ **Ты в деле! Запускай игру! 🚀**\n"
+        "Твой напарник уже получил уведомление.",
         parse_mode="Markdown"
     )
 
@@ -187,7 +276,13 @@ async def handle_accept(callback: types.CallbackQuery):
         try:
             await bot.send_message(
                 chat_id=sender_id,
-                text=f"🥳 **УРА!** {callback.from_user.full_name} принял(а) твоё приглашение в DUO! Погнали играть 🚀"
+                text=(
+                    f"🎉 **ЕСТЬ КОНТАКТ! ТИММЕЙТ В ДЕЛЕ!** 🚀\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **{callback.from_user.full_name}** принял(а) твой инвайт в DUO!\n"
+                    f"Готовьтесь к совместной кате 🎮✨"
+                ),
+                parse_mode="Markdown"
             )
         except Exception as e:
             logging.warning(f"Could not notify sender: {e}")
@@ -200,7 +295,9 @@ async def handle_later(callback: types.CallbackQuery):
 
     await callback.answer("Ответ отправлен ⏰")
     await callback.message.edit_text(
-        callback.message.text + "\n\n⏰ **Ответ:** Давай, но чуть попозже!",
+        callback.message.text + "\n\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "⏰ **Ответ:** Давай, но чуть попозже!",
         parse_mode="Markdown"
     )
 
@@ -208,7 +305,12 @@ async def handle_later(callback: types.CallbackQuery):
         try:
             await bot.send_message(
                 chat_id=sender_id,
-                text=f"⏰ **{callback.from_user.full_name}** не против сыграть, но предлагает чуть позже!"
+                text=(
+                    f"⏰ **ОТВЕТ ОТ НАПАРНИКА**\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **{callback.from_user.full_name}** не против сыграть, но предлагает чуть позже!"
+                ),
+                parse_mode="Markdown"
             )
         except Exception as e:
             logging.warning(f"Could not notify sender: {e}")
@@ -221,7 +323,9 @@ async def handle_decline(callback: types.CallbackQuery):
 
     await callback.answer("Отклонено 💔")
     await callback.message.edit_text(
-        callback.message.text + "\n\n💔 **Ответ:** Сегодня не получится.",
+        callback.message.text + "\n\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "💔 **Ответ:** Сегодня не получится.",
         parse_mode="Markdown"
     )
 
@@ -229,7 +333,12 @@ async def handle_decline(callback: types.CallbackQuery):
         try:
             await bot.send_message(
                 chat_id=sender_id,
-                text=f"💔 **{callback.from_user.full_name}** сегодня не сможет пойти в игру."
+                text=(
+                    f"💔 **ОТВЕТ ОТ НАПАРНИКА**\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **{callback.from_user.full_name}** сегодня не сможет пойти в игру."
+                ),
+                parse_mode="Markdown"
             )
         except Exception as e:
             logging.warning(f"Could not notify sender: {e}")
@@ -287,12 +396,16 @@ async def handle_api_send_invite(request):
         invite_id = create_invite_record(
             sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note
         )
+        invite_link = f"https://t.me/duo_play_date_bot?start=inv_{invite_id}"
+        app_link = get_app_url()
 
         recipient_db = find_user_by_username(recipient_username)
         if not recipient_db:
             return web.json_response({
                 "success": True,
                 "delivered": False,
+                "invite_id": invite_id,
+                "invite_link": invite_link,
                 "reason": "not_in_bot",
                 "message": f"Пользователь @{recipient_username} еще не нажал /start в боте"
             })
@@ -300,8 +413,9 @@ async def handle_api_send_invite(request):
         target_chat_id, target_first_name = recipient_db
 
         invite_msg = (
-            f"💌 **ТЕБЯ ЗОВУТ В КАТКУ В DUO!** 🎮\n\n"
-            f"От: **{sender_name}**\n\n"
+            f"👾 **ТЕБЯ ЗОВУТ В ИГРУ В DUO!** 🎮\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 **От кого:** {sender_name}\n"
             f"🕹 **Игра:** {place}\n"
             f"📅 **Время:** {day} в {time}\n"
             f"✨ **Вайб:** {vibe}\n"
@@ -310,7 +424,10 @@ async def handle_api_send_invite(request):
         if note and note != "Без записки":
             invite_msg += f"💌 **Записка:** _{note}_\n"
 
-        invite_msg += "\nЧто скажешь? Погнали? 👇"
+        invite_msg += (
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"Ты в деле? Выбери ответ ниже 👇"
+        )
 
         reply_kb = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -329,6 +446,12 @@ async def handle_api_send_invite(request):
                         text="💔 Не сегодня",
                         callback_data=f"decline_{sender_id or 0}_{invite_id}"
                     )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🎮 Открыть DUO ✨",
+                        web_app=WebAppInfo(url=app_link)
+                    )
                 ]
             ]
         )
@@ -344,6 +467,8 @@ async def handle_api_send_invite(request):
                 return web.json_response({
                     "success": True,
                     "delivered": True,
+                    "invite_id": invite_id,
+                    "invite_link": invite_link,
                     "recipient_name": target_first_name
                 })
             except Exception as send_err:
@@ -351,6 +476,8 @@ async def handle_api_send_invite(request):
                 return web.json_response({
                     "success": True,
                     "delivered": False,
+                    "invite_id": invite_id,
+                    "invite_link": invite_link,
                     "reason": "forbidden",
                     "message": f"Telegram не разрешил отправить сообщение: {send_err}"
                 })
@@ -358,6 +485,8 @@ async def handle_api_send_invite(request):
             return web.json_response({
                 "success": True,
                 "delivered": False,
+                "invite_id": invite_id,
+                "invite_link": invite_link,
                 "reason": "no_bot",
                 "message": "Бот не настроен на сервере"
             })

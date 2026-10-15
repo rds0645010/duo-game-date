@@ -2428,7 +2428,28 @@
       note: ''
     };
 
-    let gamesList = JSON.parse(localStorage.getItem('duo_custom_games')) || [];
+    const DEFAULT_STARTER_GAMES = [
+      { id: 'starter_roblox', title: 'Roblox', tag: 'Кроссплатформа' },
+      { id: 'starter_minecraft', title: 'Minecraft', tag: 'Кроссплатформа' },
+      { id: 'starter_cs2', title: 'Counter-Strike 2', tag: 'Steam / ПК' },
+      { id: 'starter_dota2', title: 'Dota 2', tag: 'Steam / ПК' },
+      { id: 'starter_genshin', title: 'Genshin Impact', tag: 'Кроссплатформа' }
+    ];
+
+    let storedGames = null;
+    try {
+      storedGames = JSON.parse(localStorage.getItem('duo_custom_games'));
+    } catch (e) {}
+
+    let gamesList = (Array.isArray(storedGames) && storedGames.length > 0)
+      ? storedGames
+      : [...DEFAULT_STARTER_GAMES];
+
+    if (!storedGames || storedGames.length === 0) {
+      localStorage.setItem('duo_custom_games', JSON.stringify(gamesList));
+    }
+
+    let currentInviteLink = '';
 
     // ПЕРЕКЛЮЧЕНИЕ ПАЛИТРЫ
     function applyPalette(paletteName) {
@@ -3349,7 +3370,7 @@
       let botFailMessage = '';
       const serverUrl = localStorage.getItem('duo_server_url') || DEFAULT_SERVER_URL;
 
-      if (serverUrl && state.customRecipient) {
+      if (serverUrl) {
         try {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 7000);
@@ -3372,6 +3393,9 @@
           });
           clearTimeout(timeoutId);
           const json = await res.json();
+          if (json.invite_link) {
+            currentInviteLink = json.invite_link;
+          }
           if (json.delivered) {
             botDelivered = true;
             recipientFoundName = json.recipient_name || state.customRecipient;
@@ -3381,6 +3405,12 @@
         } catch (e) {
           console.warn('Bot server check:', e);
         }
+      }
+
+      // Обновляем буфер обмена с актуальной умной ссылкой
+      const updatedTextInvite = buildInviteText(currentInviteLink);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(updatedTextInvite).catch(() => {});
       }
 
       submitBtns.forEach(b => { if (b) { b.innerText = 'Отправить инвайт 🚀'; b.style.opacity = '1'; } });
@@ -3414,8 +3444,9 @@
         }
 
         deliveryStatusHtml = `
-          <div style="margin-top: 10px; padding: 8px 10px; background: rgba(0, 229, 255, 0.12); border: 1.5px solid var(--accent-primary); border-radius: 8px; color: var(--text-primary); font-size: 11.5px; font-weight: 700; line-height: 1.35;">
-            ✓ Красивый текст скопирован в буфер обмена! Нажми кнопку ниже, чтобы переслать его напарнику в один клик.
+          <div style="margin-top: 10px; padding: 10px 12px; background: rgba(0, 229, 255, 0.12); border: 1.5px solid var(--accent-primary); border-radius: 8px; color: var(--text-primary); font-size: 11.5px; font-weight: 700; line-height: 1.35;">
+            🔗 <b>Умный инвайт с 1-клик принятием готов!</b><br>
+            <span style="font-size: 11px; font-weight: 500; opacity: 0.9;">Напарник нажмет ссылку и бот сразу покажет кнопки ответа: «Я в деле! / Позже».</span>
           </div>
         `;
       }
@@ -3433,23 +3464,29 @@
       successModal.classList.add('active');
     }
 
-    function buildInviteText() {
+    function buildInviteText(link = currentInviteLink) {
       const gameTitle = formatGameDisplay(state.selectedGame);
-      const recipientMention = state.customRecipient ? `🎯 Для: ${state.customRecipient}\n` : '';
+      const recipientMention = state.customRecipient ? `👤 Для: ${state.customRecipient}\n` : '';
+      const fallbackBotLink = 'https://t.me/duo_play_date_bot?start=play';
+      const actualLink = link || fallbackBotLink;
+
       return (
-        `🎮 Привет! Зову тебя в совместную катку в DUO!\n\n` +
+        `👾 ПРИГЛАШЕНИЕ В КАТКУ В DUO! 🎮\n` +
+        `━━━━━━━━━━━━━━━━━━━\n` +
         recipientMention +
         `🕹 Игра: ${gameTitle}\n` +
         `📅 Тайминг: ${state.selectedDateText} в ${getFormattedTime()}\n` +
         `✨ Вайб: ${state.vibe}\n` +
         `⏳ Длительность: ${state.duration}\n` +
         (state.note ? `💌 Записка: "${state.note}"\n` : '') +
-        `\nПогнали? Жду ответа! 🚀`
+        `━━━━━━━━━━━━━━━━━━━\n` +
+        `👉 Принять инвайт в 1 клик:\n${actualLink}\n\n` +
+        `Погнали? Жду ответа! 🚀`
       );
     }
 
     function shareToTelegram() {
-      const textInvite = buildInviteText();
+      const textInvite = buildInviteText(currentInviteLink);
       
       // Страховочное копирование в буфер
       if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -3480,11 +3517,11 @@
     if (copyBtn) {
       copyBtn.onclick = () => {
         haptic('light');
-        const textInvite = buildInviteText();
+        const textInvite = buildInviteText(currentInviteLink);
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(textInvite).then(() => {
             haptic('success');
-            alert('Текст приглашения успешно скопирован в буфер обмена!');
+            alert('Текст приглашения с ссылкой скопирован в буфер обмена!');
           }).catch(() => {
             prompt('Скопируй текст приглашения вручную:', textInvite);
           });
