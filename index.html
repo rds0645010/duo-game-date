@@ -1560,6 +1560,236 @@
       box-shadow: 2px 2px 0px var(--shadow-hard);
     }
 
+    /* МОБИЛЬНЫЙ БИЛЕТ DUO PASS */
+    .mobile-ticket-section {
+      display: none;
+    }
+    @media (max-width: 991px) {
+      .mobile-ticket-section {
+        display: block !important;
+        margin-top: 14px;
+        margin-bottom: 24px;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+      }
+    }
+
+    /* 🎓 ОБУЧЕНИЕ НОВИЧКА ("ВЕСТИ ЗА РУКУ") */
+    .header-tour-btn {
+      height: 36px;
+      padding: 0 12px;
+      border-radius: var(--btn-radius);
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      color: var(--text-primary);
+      font-size: 12px;
+      font-weight: 800;
+      font-family: var(--font-heading);
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+    .header-tour-btn:hover {
+      transform: translate(1px, 1px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+    }
+
+    .welcome-tour-banner {
+      background: var(--surface-1);
+      border: 2px solid var(--accent-primary);
+      box-shadow: 4px 4px 0px var(--shadow-hard);
+      border-radius: var(--card-radius);
+      padding: 14px 16px;
+      margin-bottom: 18px;
+      animation: bannerSlideDown 0.3s ease;
+    }
+    @keyframes bannerSlideDown {
+      from { transform: translateY(-10px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .btn-start-welcome-tour {
+      padding: 7px 14px;
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      font-size: 12px;
+      font-weight: 800;
+      border: 1.5px solid var(--shadow-hard);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .btn-start-welcome-tour:active {
+      transform: translate(1px, 1px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+    }
+    .btn-dismiss-welcome-tour {
+      padding: 7px 10px;
+      background: var(--surface-2);
+      color: var(--text-tertiary);
+      font-size: 11.5px;
+      font-weight: 700;
+      border: 1.5px solid var(--border-solid);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .btn-dismiss-welcome-tour:hover {
+      color: var(--text-primary);
+    }
+
+    .tour-backdrop-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 7, 12, 0.78);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      z-index: 9998;
+      display: none;
+      opacity: 0;
+      transition: opacity 0.25s ease;
+      pointer-events: auto;
+    }
+    .tour-backdrop-overlay.active {
+      display: block;
+      opacity: 1;
+    }
+
+    .tour-spotlight-active {
+      position: relative !important;
+      z-index: 9999 !important;
+      outline: 3px solid var(--accent-primary) !important;
+      box-shadow: 0 0 0 6px var(--accent-bg), 0 0 35px var(--accent-glow) !important;
+      transition: outline 0.3s ease, box-shadow 0.3s ease !important;
+      animation: tourPulseRing 2s infinite ease-in-out !important;
+    }
+
+    @keyframes tourPulseRing {
+      0% {
+        box-shadow: 0 0 0 4px var(--accent-bg), 0 0 20px var(--accent-glow);
+      }
+      50% {
+        box-shadow: 0 0 0 10px var(--accent-bg), 0 0 40px var(--accent-glow);
+      }
+      100% {
+        box-shadow: 0 0 0 4px var(--accent-bg), 0 0 20px var(--accent-glow);
+      }
+    }
+
+    .tour-popover-card {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: calc(100% - 32px);
+      max-width: 440px;
+      background: var(--surface-1);
+      border: 3px solid var(--accent-primary);
+      box-shadow: 6px 6px 0px var(--shadow-hard);
+      border-radius: var(--card-radius);
+      padding: 18px 20px;
+      z-index: 10000;
+      display: none;
+      animation: tourSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .tour-popover-card.active {
+      display: block;
+    }
+
+    @keyframes tourSlideUp {
+      from { transform: translate(-50%, 20px); opacity: 0; }
+      to { transform: translate(-50%, 0); opacity: 1; }
+    }
+
+    .tour-badge-strip {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .tour-badge-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 800;
+      padding: 3px 8px;
+      background: var(--accent-bg);
+      border: 1.5px solid var(--accent-primary);
+      color: var(--accent-primary);
+      border-radius: 6px;
+      letter-spacing: 0.05em;
+    }
+    .tour-skip-btn {
+      background: none;
+      border: none;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      padding: 4px 6px;
+    }
+    .tour-skip-btn:hover {
+      color: var(--text-primary);
+    }
+    .tour-title-text {
+      font-family: var(--font-heading);
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+    .tour-desc-text {
+      font-size: 13.5px;
+      line-height: 1.45;
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+    }
+    .tour-actions-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .tour-prev-btn {
+      padding: 9px 14px;
+      font-size: 12.5px;
+      font-weight: 700;
+      border-radius: var(--btn-radius);
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .tour-next-btn {
+      flex: 1;
+      padding: 10px 16px;
+      font-size: 13.5px;
+      font-weight: 800;
+      border-radius: var(--btn-radius);
+      background: var(--accent-primary);
+      color: var(--btn-text);
+      border: 2px solid var(--shadow-hard);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: transform 0.1s, box-shadow 0.1s;
+    }
+    .tour-next-btn:active {
+      transform: translate(2px, 2px);
+      box-shadow: 0px 0px 0px var(--shadow-hard);
+    }
+
     /* MOBILE DOCK */
     .mobile-only-dock {
       position: fixed;
@@ -1900,6 +2130,11 @@
           </button>
         </div>
 
+        <!-- 💡 ОБУЧЕНИЕ НОВИЧКА -->
+        <button class="header-tour-btn" id="startTourBtn" title="Интерактивное обучение (вести за руку)" type="button">
+          💡 Тур
+        </button>
+
         <!-- ⚙️ НАСТРОЙКИ (КРУГЛАЯ КНОПКА) -->
         <button class="header-gear-circle-btn" id="openSettingsModalBtn" title="Настройки и тест бота" type="button">
           ⚙️
@@ -1913,6 +2148,25 @@
       <!-- ЛЕВАЯ КОЛОНКА (НАСТРОЙКИ ИНВАЙТА) -->
       <main class="workspace-main-column">
 
+        <!-- БАННЕР ОБУЧЕНИЯ ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ -->
+        <div class="welcome-tour-banner" id="welcomeTourBanner" style="display: none;">
+          <div style="display: flex; align-items: flex-start; gap: 10px;">
+            <div style="font-size: 24px; line-height: 1;">👾</div>
+            <div style="flex: 1;">
+              <div style="font-size: 13.5px; font-weight: 800; color: var(--text-primary); margin-bottom: 2px;">
+                Впервые в DUO? Пройди быстрый тур!
+              </div>
+              <div style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4;">
+                Покажем за 15 секунд, как выбрать игру, настроить тайминг и позвать тиммейта в 1 клик.
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 8px;">
+                <button class="btn-start-welcome-tour" id="btnStartWelcomeTour" type="button">🚀 Пройти тур</button>
+                <button class="btn-dismiss-welcome-tour" id="btnDismissWelcomeTour" type="button">Позже</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- ГЛАВНЫЙ БАННЕР -->
         <section class="hero-banner">
           <div class="hero-lobby-status">
@@ -1924,7 +2178,7 @@
         </section>
 
         <!-- 1. ИГРЫ -->
-        <section class="arcade-card">
+        <section class="arcade-card" id="stepSectionGames">
           <div class="section-eyebrow">
             <span class="eyebrow-title">
               <span class="eyebrow-step-badge">01</span>
@@ -1941,7 +2195,7 @@
         </section>
 
         <!-- 2. АДРЕСАТ / КУДА ОТПРАВИТЬ -->
-        <section class="arcade-card">
+        <section class="arcade-card" id="stepSectionRecipient">
           <div class="section-eyebrow">
             <span class="eyebrow-title">
               <span class="eyebrow-step-badge">02</span>
@@ -1979,7 +2233,7 @@
         </section>
 
         <!-- 3. ДАТА И ТАЙМИНГ -->
-        <section class="arcade-card">
+        <section class="arcade-card" id="stepSectionTiming">
           <div class="section-eyebrow">
             <span class="eyebrow-title">
               <span class="eyebrow-step-badge">03</span>
@@ -2083,6 +2337,73 @@
           <input type="text" id="optionalNoteInput" placeholder="Короткое пожелание или правила катки...">
         </section>
 
+        <!-- 🎟️ МОБИЛЬНЫЙ АРКАДНЫЙ ТАЛОН (DUO CO-OP PASS) -->
+        <section class="mobile-ticket-section arcade-card" id="stepSectionTicket">
+          <div class="section-eyebrow" style="margin-bottom: 12px;">
+            <span class="eyebrow-title">
+              <span class="eyebrow-step-badge">🎟️</span>
+              Твой готовый билет (DUO PASS)
+            </span>
+            <span class="status-pulse-led"></span>
+          </div>
+
+          <div class="ticket-pass-box">
+            <div class="ticket-punch-hole"></div>
+            
+            <div class="ticket-header-strip">
+              <div class="ticket-tear-notch-left"></div>
+              <div class="ticket-tear-notch-right"></div>
+              <span class="ticket-badge ticketBadgeHeader">CO-OP PASS // INSERT COIN</span>
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--accent-primary); font-weight: 800; font-family: var(--font-mono);">
+                <span class="status-pulse-led"></span> P1 READY
+              </div>
+            </div>
+
+            <div class="ticket-body">
+              <div class="ticket-row">
+                <span class="ticket-label">Игра</span>
+                <span class="ticket-value highlight ticketGameValue">— Не выбрана —</span>
+              </div>
+
+              <div class="ticket-row">
+                <span class="ticket-label">Адресат (P2)</span>
+                <span class="ticket-value ticketRecipientValue">В Telegram 🚀</span>
+              </div>
+
+              <div class="ticket-row">
+                <span class="ticket-label">Тайминг</span>
+                <span class="ticket-value ticketTimingValue">Загрузка...</span>
+              </div>
+
+              <div class="ticket-row">
+                <span class="ticket-label">Вайб</span>
+                <span class="ticket-value ticketVibeValue">🍵 Уютный чилл</span>
+              </div>
+
+              <div class="ticket-row">
+                <span class="ticket-label">Длительность</span>
+                <span class="ticket-value ticketDurationValue">🎮 1–2 часа</span>
+              </div>
+
+              <div class="ticket-row ticketNoteRow" style="display: none;">
+                <span class="ticket-label">Записка</span>
+                <span class="ticket-value ticketNoteValue" style="max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">—</span>
+              </div>
+
+              <div class="ticket-barcode-wrap">
+                <div class="ticket-laser-scan"></div>
+                <div class="ticket-barcode-lines">||| | |||| | ||||| |||</div>
+                <div style="font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); margin-top: 5px; font-weight: 800;">PASS ID: #DUO-ARCADE-2026</div>
+              </div>
+
+              <button class="ticket-cta-btn" id="mobileTicketSubmitBtn" type="button" style="margin-top: 14px;">
+                <span>Сформировать инвайт 🚀</span>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
       </main>
 
       <!-- ПРАВАЯ КОЛОНКА DESKTOP (STICKY АРКАДНЫЙ ТАЛОН) -->
@@ -2093,7 +2414,7 @@
           <div class="ticket-header-strip">
             <div class="ticket-tear-notch-left"></div>
             <div class="ticket-tear-notch-right"></div>
-            <span class="ticket-badge" id="ticketBadgeHeader">CO-OP PASS // INSERT COIN</span>
+            <span class="ticket-badge ticketBadgeHeader" id="ticketBadgeHeader">CO-OP PASS // INSERT COIN</span>
             <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--accent-primary); font-weight: 800; font-family: var(--font-mono);">
               <span class="status-pulse-led"></span> P1 READY
             </div>
@@ -2102,32 +2423,32 @@
           <div class="ticket-body">
             <div class="ticket-row">
               <span class="ticket-label">Игра</span>
-              <span class="ticket-value highlight" id="ticketGameValue">— Не выбрана —</span>
+              <span class="ticket-value highlight ticketGameValue" id="ticketGameValue">— Не выбрана —</span>
             </div>
 
             <div class="ticket-row">
               <span class="ticket-label">Адресат (P2)</span>
-              <span class="ticket-value" id="ticketRecipientValue">Любимка 💕</span>
+              <span class="ticket-value ticketRecipientValue" id="ticketRecipientValue">Любимка 💕</span>
             </div>
 
             <div class="ticket-row">
               <span class="ticket-label">Тайминг</span>
-              <span class="ticket-value" id="ticketTimingValue">Загрузка...</span>
+              <span class="ticket-value ticketTimingValue" id="ticketTimingValue">Загрузка...</span>
             </div>
 
             <div class="ticket-row">
               <span class="ticket-label">Вайб</span>
-              <span class="ticket-value" id="ticketVibeValue">🍵 Уютный чилл</span>
+              <span class="ticket-value ticketVibeValue" id="ticketVibeValue">🍵 Уютный чилл</span>
             </div>
 
             <div class="ticket-row">
               <span class="ticket-label">Длительность</span>
-              <span class="ticket-value" id="ticketDurationValue">🎮 1–2 часа</span>
+              <span class="ticket-value ticketDurationValue" id="ticketDurationValue">🎮 1–2 часа</span>
             </div>
 
-            <div class="ticket-row" id="ticketNoteRow" style="display: none;">
+            <div class="ticket-row ticketNoteRow" id="ticketNoteRow" style="display: none;">
               <span class="ticket-label">Записка</span>
-              <span class="ticket-value" id="ticketNoteValue" style="max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">—</span>
+              <span class="ticket-value ticketNoteValue" id="ticketNoteValue" style="max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">—</span>
             </div>
 
             <div class="ticket-barcode-wrap">
@@ -2300,14 +2621,43 @@
         <div id="settingsSelfTestResult" style="margin-top: 8px; font-size: 11.5px; line-height: 1.35; display: none;"></div>
       </div>
 
+      <!-- Обучение новичка (Вести за руку) -->
+      <div style="background: var(--surface-2); border: 1.5px solid var(--accent-primary); border-radius: var(--btn-radius); padding: 12px; margin-bottom: 14px;">
+        <div style="font-size: 12.5px; font-weight: 800; color: var(--text-primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+          🎓 Обучение новичка («Вести за руку»)
+        </div>
+        <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.35; margin-bottom: 8px;">
+          Пошаговый интерактивный тур по всем шагам приложения с подсветкой элементов.
+        </div>
+        <button class="modal-action-btn" id="btnRestartTourFromSettings" type="button" style="margin-top: 0; padding: 9px; font-size: 12px; background: var(--accent-primary); color: var(--btn-text);">
+          🚀 Запустить обучение новичка
+        </button>
+      </div>
+
       <!-- Очистка данных -->
       <div style="border-top: 1px dashed var(--border-solid); padding-top: 10px; margin-bottom: 12px;">
         <button id="btnClearAppDataBtn" type="button" style="background: none; border: none; color: #ff5c8a; font-size: 11.5px; font-weight: 800; cursor: pointer; padding: 4px 0; display: flex; align-items: center; gap: 6px;">
-          🗑 Очистить сохраненных тиммейтов и игры
+          🔄 Сбросить к стартовым играм (сброс новичка)
         </button>
       </div>
 
       <button class="modal-cancel-btn" id="closeSettingsModalBtn" type="button" style="width: 100%; margin-top: 0;">Закрыть</button>
+    </div>
+  </div>
+
+  <!-- 🎓 ИНТЕРАКТИВНОЕ ОБУЧЕНИЕ НОВИЧКА ("ВЕСТИ ЗА РУКУ") -->
+  <div class="tour-backdrop-overlay" id="tourOverlay"></div>
+
+  <div class="tour-popover-card" id="tourPopoverCard">
+    <div class="tour-badge-strip">
+      <span class="tour-badge-pill" id="tourBadgeText">ШАГ 1 ИЗ 4 // ВЫБОР ИГРЫ</span>
+      <button class="tour-skip-btn" id="tourSkipBtn" type="button">Пропустить ✕</button>
+    </div>
+    <div class="tour-title-text" id="tourTitleText">Во что играем?</div>
+    <div class="tour-desc-text" id="tourDescText">Описание шага...</div>
+    <div class="tour-actions-row">
+      <button class="tour-prev-btn" id="tourPrevBtn" type="button">👈 Назад</button>
+      <button class="tour-next-btn" id="tourNextBtn" type="button">Далее 👉</button>
     </div>
   </div>
 
@@ -2530,28 +2880,25 @@
     }
 
     function updateTicketPass() {
-      const ticketGame = document.getElementById('ticketGameValue');
-      const ticketRecipient = document.getElementById('ticketRecipientValue');
-      const ticketTiming = document.getElementById('ticketTimingValue');
-      const ticketVibe = document.getElementById('ticketVibeValue');
-      const ticketDuration = document.getElementById('ticketDurationValue');
-      const ticketNoteRow = document.getElementById('ticketNoteRow');
-      const ticketNoteValue = document.getElementById('ticketNoteValue');
-
-      ticketGame.innerText = formatGameDisplay(state.selectedGame);
-      ticketRecipient.innerText = state.customRecipient 
+      const gameStr = formatGameDisplay(state.selectedGame);
+      const recipientStr = state.customRecipient 
         ? (state.customRecipientName && state.customRecipientName !== state.customRecipient ? `${state.customRecipientName} (${state.customRecipient})` : state.customRecipient)
         : 'Чат в Telegram 🚀';
-      ticketTiming.innerText = `${state.selectedDateText || 'Сегодня'} в ${getFormattedTime()}`;
-      ticketVibe.innerText = state.vibe;
-      ticketDuration.innerText = state.duration;
+      const timingStr = `${state.selectedDateText || 'Сегодня'} в ${getFormattedTime()}`;
+      const vibeStr = state.vibe;
+      const durationStr = state.duration;
+      const noteStr = state.note || '—';
+      const hasNote = Boolean(state.note && state.note.length > 0);
 
-      if (state.note) {
-        ticketNoteRow.style.display = 'flex';
-        ticketNoteValue.innerText = state.note;
-      } else {
-        ticketNoteRow.style.display = 'none';
-      }
+      document.querySelectorAll('.ticketGameValue, #ticketGameValue').forEach(el => el.innerText = gameStr);
+      document.querySelectorAll('.ticketRecipientValue, #ticketRecipientValue').forEach(el => el.innerText = recipientStr);
+      document.querySelectorAll('.ticketTimingValue, #ticketTimingValue').forEach(el => el.innerText = timingStr);
+      document.querySelectorAll('.ticketVibeValue, #ticketVibeValue').forEach(el => el.innerText = vibeStr);
+      document.querySelectorAll('.ticketDurationValue, #ticketDurationValue').forEach(el => el.innerText = durationStr);
+      document.querySelectorAll('.ticketNoteValue, #ticketNoteValue').forEach(el => el.innerText = noteStr);
+      document.querySelectorAll('.ticketNoteRow, #ticketNoteRow').forEach(el => {
+        el.style.display = hasNote ? 'flex' : 'none';
+      });
     }
 
     // 1. ИГРЫ
@@ -3019,11 +3366,12 @@
 
     if (btnClearAppDataBtn) {
       btnClearAppDataBtn.onclick = () => {
-        if (confirm('Сбросить сохраненные игры и список избранных тиммейтов?')) {
+        if (confirm('Сбросить сохраненные игры и тиммейтов к исходному состоянию нового пользователя?')) {
           localStorage.removeItem('duo_fav_contacts');
           localStorage.removeItem('duo_custom_games');
           localStorage.removeItem('duo_active_fav_id');
           localStorage.removeItem('duo_custom_recipient');
+          localStorage.removeItem('duo_tour_seen');
           location.reload();
         }
       };
@@ -3361,7 +3709,11 @@
         navigator.clipboard.writeText(textInvite).catch(() => {});
       }
 
-      const submitBtns = [document.getElementById('mobileSubmitBtn'), document.getElementById('desktopSubmitBtn')];
+      const submitBtns = [
+        document.getElementById('mobileSubmitBtn'),
+        document.getElementById('desktopSubmitBtn'),
+        document.getElementById('mobileTicketSubmitBtn')
+      ];
       submitBtns.forEach(b => { if (b) { b.innerText = 'Отправка... ⏳'; b.style.opacity = '0.7'; } });
 
       // Проверяем возможность прямой отправки через сервер бота (если настроен)
@@ -3512,6 +3864,173 @@
     document.getElementById('desktopSubmitBtn').onclick = handleSendInvite;
     document.getElementById('desktopShareBtn').onclick = shareToTelegram;
     shareViaTelegramBtn.onclick = shareToTelegram;
+
+    const mobileTicketSubmitBtn = document.getElementById('mobileTicketSubmitBtn');
+    if (mobileTicketSubmitBtn) mobileTicketSubmitBtn.onclick = handleSendInvite;
+
+    // ==========================================
+    // 🎓 ОБУЧЕНИЕ НОВИЧКА ("ВЕСТИ ЗА РУКУ")
+    // ==========================================
+    const TOUR_STEPS = [
+      {
+        elementId: 'stepSectionGames',
+        badge: 'ШАГ 1 ИЗ 4 // ВЫБОР ИГРЫ',
+        title: '🕹️ Во что играем?',
+        desc: 'Мы уже добавили 5 популярных игр для совместных каток (Roblox, CS2, Minecraft...). Просто нажми на карточку для выбора или добавь свою игру через «+ Добавить игру»!'
+      },
+      {
+        elementId: 'stepSectionRecipient',
+        badge: 'ШАГ 2 ИЗ 4 // КОМУ ОТПРАВИТЬ',
+        title: '👤 Кому отправить инвайт?',
+        desc: 'Нажми «+ Тиммейт», чтобы сохранить друга в быстрый доступ, либо введи @никнейм разово. А если оставить «В Telegram» — сможешь отправить инвайт в любой чат!'
+      },
+      {
+        elementId: 'stepSectionTiming',
+        badge: 'ШАГ 3 ИЗ 4 // ТАЙМИНГ И ВАЙБ',
+        title: '⏰ Время и атмосфера',
+        desc: 'Выбери дату, добавь удобное время (+15м) и выбери настроение катки — уютный чилл, потный ранкед или игровое свидание!'
+      },
+      {
+        elementId: 'stepSectionTicket',
+        badge: 'ШАГ 4 ИЗ 4 // DUO PASS И ОТПРАВКА',
+        title: '🎟️ Твой билет на катку готов!',
+        desc: 'Все данные автоматически собраны в аркадный талон DUO PASS. Нажми «Отправить инвайт»: бот сформирует персональную ссылку с кнопками «Я в деле! / Позже» прямо в Telegram!'
+      }
+    ];
+
+    let currentTourStep = 0;
+
+    function startOnboardingTour(stepIndex = 0) {
+      currentTourStep = stepIndex;
+      haptic('medium');
+      if (settingsModal) settingsModal.classList.remove('active');
+      const overlay = document.getElementById('tourOverlay');
+      const popover = document.getElementById('tourPopoverCard');
+      const banner = document.getElementById('welcomeTourBanner');
+      if (banner) banner.style.display = 'none';
+      if (!overlay || !popover) return;
+
+      overlay.classList.add('active');
+      popover.classList.add('active');
+      renderTourStep();
+    }
+
+    function renderTourStep() {
+      const step = TOUR_STEPS[currentTourStep];
+      if (!step) {
+        closeOnboardingTour();
+        return;
+      }
+
+      document.querySelectorAll('.tour-spotlight-active').forEach(el => {
+        el.classList.remove('tour-spotlight-active');
+      });
+
+      let targetEl = document.getElementById(step.elementId);
+      if (step.elementId === 'stepSectionTicket' && window.innerWidth > 991) {
+        targetEl = document.querySelector('.desktop-ticket-sidebar .ticket-pass-box');
+      }
+
+      if (targetEl) {
+        targetEl.classList.add('tour-spotlight-active');
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      const badgeEl = document.getElementById('tourBadgeText');
+      const titleEl = document.getElementById('tourTitleText');
+      const descEl = document.getElementById('tourDescText');
+      const prevBtn = document.getElementById('tourPrevBtn');
+      const nextBtn = document.getElementById('tourNextBtn');
+
+      if (badgeEl) badgeEl.innerText = step.badge;
+      if (titleEl) titleEl.innerText = step.title;
+      if (descEl) descEl.innerText = step.desc;
+
+      if (prevBtn) {
+        prevBtn.style.display = currentTourStep > 0 ? 'inline-block' : 'none';
+      }
+      if (nextBtn) {
+        if (currentTourStep === TOUR_STEPS.length - 1) {
+          nextBtn.innerHTML = '🎉 Всё понятно, погнали!';
+        } else {
+          nextBtn.innerHTML = 'Далее 👉';
+        }
+      }
+    }
+
+    function nextTourStep() {
+      haptic('light');
+      if (currentTourStep < TOUR_STEPS.length - 1) {
+        currentTourStep++;
+        renderTourStep();
+      } else {
+        closeOnboardingTour(true);
+      }
+    }
+
+    function prevTourStep() {
+      haptic('light');
+      if (currentTourStep > 0) {
+        currentTourStep--;
+        renderTourStep();
+      }
+    }
+
+    function closeOnboardingTour(completed = false) {
+      haptic('light');
+      document.querySelectorAll('.tour-spotlight-active').forEach(el => {
+        el.classList.remove('tour-spotlight-active');
+      });
+      const overlay = document.getElementById('tourOverlay');
+      const popover = document.getElementById('tourPopoverCard');
+      if (overlay) overlay.classList.remove('active');
+      if (popover) popover.classList.remove('active');
+      localStorage.setItem('duo_tour_seen', 'true');
+      const banner = document.getElementById('welcomeTourBanner');
+      if (banner) banner.style.display = 'none';
+      if (completed) {
+        launchConfetti();
+      }
+    }
+
+    const startTourBtn = document.getElementById('startTourBtn');
+    if (startTourBtn) startTourBtn.onclick = () => startOnboardingTour(0);
+
+    const btnRestartTourFromSettings = document.getElementById('btnRestartTourFromSettings');
+    if (btnRestartTourFromSettings) btnRestartTourFromSettings.onclick = () => startOnboardingTour(0);
+
+    const tourPrevBtn = document.getElementById('tourPrevBtn');
+    if (tourPrevBtn) tourPrevBtn.onclick = prevTourStep;
+
+    const tourNextBtn = document.getElementById('tourNextBtn');
+    if (tourNextBtn) tourNextBtn.onclick = nextTourStep;
+
+    const tourSkipBtn = document.getElementById('tourSkipBtn');
+    if (tourSkipBtn) tourSkipBtn.onclick = () => closeOnboardingTour(false);
+
+    const tourOverlay = document.getElementById('tourOverlay');
+    if (tourOverlay) tourOverlay.onclick = () => closeOnboardingTour(false);
+
+    const btnStartWelcomeTour = document.getElementById('btnStartWelcomeTour');
+    if (btnStartWelcomeTour) btnStartWelcomeTour.onclick = () => startOnboardingTour(0);
+
+    const btnDismissWelcomeTour = document.getElementById('btnDismissWelcomeTour');
+    if (btnDismissWelcomeTour) {
+      btnDismissWelcomeTour.onclick = () => {
+        haptic('light');
+        localStorage.setItem('duo_tour_seen', 'true');
+        const banner = document.getElementById('welcomeTourBanner');
+        if (banner) banner.style.display = 'none';
+      };
+    }
+
+    // Проверяем, показывать ли баннер тура новичку
+    if (!localStorage.getItem('duo_tour_seen')) {
+      const banner = document.getElementById('welcomeTourBanner');
+      if (banner) {
+        setTimeout(() => { banner.style.display = 'block'; }, 400);
+      }
+    }
 
     const copyBtn = document.getElementById('copyTextOnlyBtn');
     if (copyBtn) {
