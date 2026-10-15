@@ -379,6 +379,29 @@
       transform: scale(1.15);
     }
 
+    .header-gear-circle-btn {
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      border-radius: 50%;
+      background: var(--surface-1);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-primary);
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+    .header-gear-circle-btn:hover {
+      transform: translate(1px, 1px);
+      box-shadow: 1px 1px 0px var(--shadow-hard);
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
+    }
+
     .swatch-dot.active {
       transform: scale(1.2);
       border-color: #ffffff;
@@ -807,16 +830,47 @@
       display: flex;
       gap: 10px;
       overflow-x: auto;
-      padding-bottom: 8px;
-      margin-bottom: 12px;
-      scrollbar-width: thin;
+      padding-bottom: 4px;
+      margin-bottom: 10px;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      -webkit-overflow-scrolling: touch;
     }
     .fav-ribbon::-webkit-scrollbar {
-      height: 4px;
+      display: none;
+      width: 0;
+      height: 0;
     }
-    .fav-ribbon::-webkit-scrollbar-thumb {
-      background: var(--border-solid);
-      border-radius: 4px;
+
+    .target-status-card {
+      background: var(--surface-2);
+      border: 2px solid var(--border-solid);
+      box-shadow: 2px 2px 0px var(--shadow-hard);
+      border-radius: var(--btn-radius);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 6px;
+      box-sizing: border-box;
+      width: 100%;
+    }
+    .btn-toggle-manual {
+      background: var(--surface-1);
+      border: 1.5px solid var(--border-solid);
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text-secondary);
+      padding: 5px 9px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-toggle-manual:hover {
+      border-color: var(--accent-primary);
+      color: var(--accent-primary);
     }
     .fav-card {
       flex: 0 0 auto;
@@ -1172,22 +1226,28 @@
 
     .quick-slots-grid {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 6px;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 5px;
+      width: 100%;
+      box-sizing: border-box;
     }
 
     .quick-time-slot {
       background: var(--surface-1);
       border: 1.5px solid var(--border-solid);
       border-radius: var(--btn-radius);
-      padding: 8px 4px;
-      font-size: 12px;
+      padding: 7px 2px;
+      font-size: 11px;
       font-weight: 800;
       color: var(--text-secondary);
       text-align: center;
       cursor: pointer;
       font-family: var(--font-mono);
       transition: all 0.15s;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      box-sizing: border-box;
     }
 
     .quick-time-slot:hover, .quick-time-slot.selected {
@@ -1839,6 +1899,11 @@
             Парень
           </button>
         </div>
+
+        <!-- ⚙️ НАСТРОЙКИ (КРУГЛАЯ КНОПКА) -->
+        <button class="header-gear-circle-btn" id="openSettingsModalBtn" title="Настройки и тест бота" type="button">
+          ⚙️
+        </button>
       </div>
     </header>
 
@@ -1888,30 +1953,27 @@
           <!-- Лента избранных контактов -->
           <div class="fav-ribbon" id="favRibbon"></div>
 
-          <!-- Поле никнейма / имени -->
-          <div class="optional-recipient-box">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-              <label class="optional-recipient-label" for="targetRecipientInput" style="margin-bottom: 0;">Никнейм @username или имя напарника:</label>
-              <button class="btn-save-as-fav" id="btnQuickSaveFav" style="display: none;" title="Сохранить в избранное для быстрой отправки в один клик">⭐ В избранное</button>
+          <!-- Карточка текущего выбранного адресата -->
+          <div class="target-status-card" id="targetStatusCard">
+            <div id="targetStatusIcon" style="font-size: 20px; line-height: 1;">🚀</div>
+            <div style="flex: 1; min-width: 0;">
+              <div id="targetStatusTitle" style="font-size: 13px; font-weight: 800; color: var(--text-primary);">В Telegram</div>
+              <div id="targetStatusDesc" style="font-size: 11px; color: var(--text-secondary); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Выбор любого чата при отправке</div>
             </div>
+            <button id="btnToggleManualNick" type="button" class="btn-toggle-manual" title="Ввести @никнейм разово">
+              ✍️ Разовый @ник
+            </button>
+          </div>
+
+          <!-- Раскрывающееся поле для разового ввода (по умолчанию скрыто) -->
+          <div id="manualRecipientBox" style="display: none; margin-top: 10px;">
             <div class="recipient-input-wrapper">
               <svg class="recipient-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-              <input type="text" id="targetRecipientInput" class="recipient-clean-input" placeholder="Введи ник (например: @rds0645010 или Саня)" maxlength="35">
+              <input type="text" id="targetRecipientInput" class="recipient-clean-input" placeholder="Введи @username напарника (например: @alex)" maxlength="35">
               <button class="clear-recipient-btn" id="clearRecipientBtn" style="display: none;" title="Очистить">×</button>
             </div>
-            <!-- Live Status Badge -->
-            <div id="recipientStatusBadge" class="recipient-live-badge info" style="margin-top: 8px; font-size: 11.5px; padding: 7px 10px; border-radius: 6px; font-weight: 700; line-height: 1.35; background: var(--surface-2); border: 1.5px solid var(--border-solid); color: var(--text-secondary);">
-              💡 Введи @username напарника или выбери «В Telegram» выше
-            </div>
-            <!-- Быстрый тест на себе -->
-            <div id="selfTestBar" style="margin-top: 8px; display: none; align-items: center; justify-content: space-between; gap: 8px; background: rgba(0, 229, 255, 0.08); border: 1.5px solid var(--accent-primary); border-radius: 8px; padding: 8px 12px;">
-              <div style="font-size: 11.5px; color: var(--text-primary); font-weight: 700;">
-                🧪 <b>Тест на себе:</b> <span id="selfTestUsernameText" style="color: var(--accent-primary);">@username</span>
-              </div>
-              <button id="btnSelfTest" type="button" style="background: var(--accent-primary); color: var(--btn-text); border: 1.5px solid var(--shadow-hard); box-shadow: 2px 2px 0px var(--shadow-hard); font-size: 11.5px; font-weight: 800; padding: 5px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap;">Отправить себе ⚡</button>
-            </div>
-            <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 8px; line-height: 1.4;">
-              ℹ️ <b>Как работает бот:</b> если напарник запускал бота <code>/start</code> — инвайт прилетит прямо в ЛС с интерактивными кнопками! Если ещё нет — откроется окно Telegram, чтобы ты отправил ему красивую карточку в 1 клик.
+            <div style="font-size: 10.5px; color: var(--text-tertiary); margin-top: 5px;">
+              💡 Нажми <b>[ + Тиммейт ]</b> в ленте выше, чтобы сохранить друга навсегда и звать в 1 клик.
             </div>
           </div>
         </section>
@@ -2196,6 +2258,56 @@
       <button class="modal-action-btn" id="shareViaTelegramBtn">Выбрать чат в Telegram ✈️</button>
       <button class="modal-action-btn" id="copyTextOnlyBtn" style="background: var(--surface-interactive); color: var(--text-primary); border-color: var(--border-solid); margin-top: 8px;">📋 Скопировать текст ещё раз</button>
       <button class="modal-cancel-btn" id="closeSuccessBtn">Закрыть окно</button>
+    </div>
+  </div>
+
+  <!-- 4. МОДАЛКА: НАСТРОЙКИ & ТЕСТИРОВАНИЕ БОТА -->
+  <div class="modal-overlay-backdrop" id="settingsModal">
+    <div class="modal-dialog-panel" style="max-width: 440px; text-align: left;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <div class="modal-header-icon" style="margin: 0; width: 38px; height: 38px; background: var(--surface-2); border-color: var(--accent-primary); font-size: 18px;">
+            ⚙️
+          </div>
+          <div>
+            <h3 class="modal-heading" style="margin: 0; font-size: 17px;">Настройки DUO</h3>
+            <p class="modal-subtext" style="margin: 2px 0 0 0; font-size: 11.5px;">Статус подключения и тест бота</p>
+          </div>
+        </div>
+        <button id="closeSettingsModalCrossBtn" type="button" style="background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text-tertiary); padding: 0 4px; line-height: 1;">×</button>
+      </div>
+
+      <!-- Информация о профиле -->
+      <div style="background: var(--surface-2); border: 1.5px solid var(--border-solid); border-radius: var(--btn-radius); padding: 12px; margin-bottom: 12px;">
+        <div style="font-size: 10.5px; font-weight: 800; color: var(--text-tertiary); text-transform: uppercase; margin-bottom: 5px;">Твой профиль:</div>
+        <div style="font-size: 13px; font-weight: 800; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between;">
+          <span id="settingsUserDisplay">Загрузка профиля...</span>
+          <span id="settingsBotStatusBadge" style="font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(0,255,136,0.15); color: #00ff88; font-weight: 800;">Бот онлайн 🟢</span>
+        </div>
+      </div>
+
+      <!-- Тестирование бота на себе -->
+      <div style="background: rgba(0, 229, 255, 0.06); border: 1.5px solid var(--accent-primary); border-radius: var(--btn-radius); padding: 12px; margin-bottom: 14px;">
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 800; color: var(--text-primary); margin-bottom: 5px;">
+          🧪 Тест отправки на себе
+        </div>
+        <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.35; margin-bottom: 10px;">
+          Бот отправит тестовый инвайт с кнопками в твои личные сообщения, чтобы ты лично проверил доставку:
+        </div>
+        <button class="modal-action-btn" id="btnSettingsSelfTest" type="button" style="margin-top: 0; padding: 9px; font-size: 12px;">
+          ⚡ Отправить тестовый инвайт себе
+        </button>
+        <div id="settingsSelfTestResult" style="margin-top: 8px; font-size: 11.5px; line-height: 1.35; display: none;"></div>
+      </div>
+
+      <!-- Очистка данных -->
+      <div style="border-top: 1px dashed var(--border-solid); padding-top: 10px; margin-bottom: 12px;">
+        <button id="btnClearAppDataBtn" type="button" style="background: none; border: none; color: #ff5c8a; font-size: 11.5px; font-weight: 800; cursor: pointer; padding: 4px 0; display: flex; align-items: center; gap: 6px;">
+          🗑 Очистить сохраненных тиммейтов и игры
+        </button>
+      </div>
+
+      <button class="modal-cancel-btn" id="closeSettingsModalBtn" type="button" style="width: 100%; margin-top: 0;">Закрыть</button>
     </div>
   </div>
 
@@ -2648,9 +2760,10 @@
           localStorage.removeItem('duo_custom_recipient');
           if (targetRecipientInput) targetRecipientInput.value = '';
           if (clearRecipientBtn) clearRecipientBtn.style.display = 'none';
-          if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
+          const box = document.getElementById('manualRecipientBox');
+          if (box) box.style.display = 'none';
           renderFavRibbon();
-          checkRecipientOnlineStatus('');
+          updateTargetStatusCard();
           updateTicketPass();
         };
       }
@@ -2669,9 +2782,10 @@
             localStorage.setItem('duo_custom_recipient', found.username);
             if (targetRecipientInput) targetRecipientInput.value = found.username;
             if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
-            if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
+            const box = document.getElementById('manualRecipientBox');
+            if (box) box.style.display = 'none';
             renderFavRibbon();
-            checkRecipientOnlineStatus(found.username);
+            updateTargetStatusCard();
             updateTicketPass();
           }
         };
@@ -2691,9 +2805,9 @@
             state.customRecipient = '';
             state.customRecipientName = '';
             if (targetRecipientInput) targetRecipientInput.value = '';
-            checkRecipientOnlineStatus('');
           }
           renderFavRibbon();
+          updateTargetStatusCard();
           updateTicketPass();
         };
       });
@@ -2713,80 +2827,188 @@
 
     renderFavRibbon();
 
-    let checkRecipientTimeout = null;
+    function updateTargetStatusCard() {
+      const targetStatusIcon = document.getElementById('targetStatusIcon');
+      const targetStatusTitle = document.getElementById('targetStatusTitle');
+      const targetStatusDesc = document.getElementById('targetStatusDesc');
+      if (!targetStatusTitle) return;
+
+      if (activeFavId === 'tg') {
+        if (targetStatusIcon) targetStatusIcon.innerText = '🚀';
+        targetStatusTitle.innerText = 'В Telegram';
+        if (targetStatusDesc) targetStatusDesc.innerHTML = 'Выбор любого чата при отправке';
+      } else {
+        const found = favList.find(f => f.id === activeFavId);
+        if (found) {
+          if (targetStatusIcon) targetStatusIcon.innerText = '👤';
+          targetStatusTitle.innerHTML = `${found.name} <span style="color: var(--accent-primary); font-size: 11px;">(${found.username})</span>`;
+          checkRecipientOnlineStatus(found.username);
+        } else if (state.customRecipient) {
+          if (targetStatusIcon) targetStatusIcon.innerText = '✍️';
+          targetStatusTitle.innerHTML = `Разовый: <span style="color: var(--accent-primary);">${state.customRecipient}</span>`;
+          checkRecipientOnlineStatus(state.customRecipient);
+        }
+      }
+    }
+
     async function checkRecipientOnlineStatus(username) {
-      const badge = document.getElementById('recipientStatusBadge');
-      if (!badge) return;
+      const targetStatusDesc = document.getElementById('targetStatusDesc');
+      if (!targetStatusDesc) return;
       if (!username || username.trim() === '') {
-        badge.style.background = 'var(--surface-2)';
-        badge.style.borderColor = 'var(--border-solid)';
-        badge.style.color = 'var(--text-secondary)';
-        badge.innerHTML = '💡 Введи никнейм друга или выбери «В Telegram» выше';
+        targetStatusDesc.innerHTML = 'Выбор любого чата в Telegram при отправке';
         return;
       }
       const clean = username.replace('@', '').trim();
       if (clean.length < 2) return;
 
-      badge.style.background = 'var(--surface-2)';
-      badge.style.borderColor = 'var(--border-solid)';
-      badge.style.color = 'var(--text-secondary)';
-      badge.innerHTML = '⏳ Проверяем напарника в базе бота...';
+      targetStatusDesc.innerHTML = '⏳ Проверяем напарника в боте...';
 
       const srv = localStorage.getItem('duo_server_url') || DEFAULT_SERVER_URL;
       try {
         const res = await fetch(`${srv}/api/check_user?username=${encodeURIComponent(clean)}`);
         const data = await res.json();
         if (data.found) {
-          badge.style.background = 'rgba(0, 255, 136, 0.12)';
-          badge.style.borderColor = '#00ff88';
-          badge.style.color = '#00ff88';
-          badge.innerHTML = `🟢 <b>${data.first_name || clean}</b> найден в боте! Инвайт прилетит прямо в ЛС с кнопками.`;
+          targetStatusDesc.innerHTML = `<span style="color: #00ff88; font-weight: 800;">🟢 Найден в боте!</span> Инвайт прилетит прямо в ЛС`;
         } else {
-          badge.style.background = 'rgba(255, 159, 28, 0.12)';
-          badge.style.borderColor = '#ff9f1c';
-          badge.style.color = '#ff9f1c';
-          badge.innerHTML = `🟡 <b>@${clean}</b> ещё не нажимал /start в боте. Инвайт откроется для отправки в чат в 1 клик!`;
+          targetStatusDesc.innerHTML = `<span style="color: #ff9f1c; font-weight: 800;">🟡 Не запускал бота</span> Будет переслан в чат`;
         }
       } catch (e) {
-        badge.style.background = 'var(--surface-2)';
-        badge.style.borderColor = 'var(--border-solid)';
-        badge.style.color = 'var(--text-secondary)';
-        badge.innerHTML = `💡 Готовый инвайт откроется для отправки @${clean} в Telegram`;
+        targetStatusDesc.innerHTML = `Откроется для отправки @${clean} в Telegram`;
       }
+    }
+
+    const btnToggleManualNick = document.getElementById('btnToggleManualNick');
+    const manualRecipientBox = document.getElementById('manualRecipientBox');
+    if (btnToggleManualNick && manualRecipientBox) {
+      btnToggleManualNick.onclick = () => {
+        haptic('light');
+        const isHidden = manualRecipientBox.style.display === 'none';
+        manualRecipientBox.style.display = isHidden ? 'block' : 'none';
+        if (isHidden && targetRecipientInput) {
+          targetRecipientInput.focus();
+        }
+      };
     }
 
     if (state.customRecipient && targetRecipientInput) {
       targetRecipientInput.value = state.customRecipient;
       if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
-      checkRecipientOnlineStatus(state.customRecipient);
+      updateTargetStatusCard();
+    } else {
+      updateTargetStatusCard();
     }
 
-    // Инициализация кнопки «Тест на себе»
-    const myTgUser = tg?.initDataUnsafe?.user;
-    if (myTgUser && (myTgUser.username || myTgUser.id)) {
-      const selfTestBar = document.getElementById('selfTestBar');
-      const selfTestUsernameText = document.getElementById('selfTestUsernameText');
-      const btnSelfTest = document.getElementById('btnSelfTest');
-      if (selfTestBar && selfTestUsernameText && btnSelfTest) {
-        selfTestBar.style.display = 'flex';
-        const myDisplay = myTgUser.username ? ('@' + myTgUser.username) : (myTgUser.first_name || 'Я');
-        selfTestUsernameText.innerText = myDisplay;
-        btnSelfTest.onclick = () => {
-          haptic('light');
-          const myVal = myTgUser.username ? ('@' + myTgUser.username) : String(myTgUser.id);
-          if (targetRecipientInput) targetRecipientInput.value = myVal;
-          state.customRecipient = myVal;
-          state.customRecipientName = myTgUser.first_name || 'Я';
-          localStorage.setItem('duo_custom_recipient', myVal);
-          if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
-          checkRecipientOnlineStatus(myVal);
-          activeFavId = 'custom';
-          renderFavRibbon();
-          updateTicketPass();
-        };
-      }
+    // ==========================================
+    // ⚙️ НАСТРОЙКИ И ТЕСТИРОВАНИЕ БОТА (В ШЕСТЕРЁНКЕ)
+    // ==========================================
+    const settingsModal = document.getElementById('settingsModal');
+    const openSettingsModalBtn = document.getElementById('openSettingsModalBtn');
+    const closeSettingsModalBtn = document.getElementById('closeSettingsModalBtn');
+    const closeSettingsModalCrossBtn = document.getElementById('closeSettingsModalCrossBtn');
+    const settingsUserDisplay = document.getElementById('settingsUserDisplay');
+    const btnSettingsSelfTest = document.getElementById('btnSettingsSelfTest');
+    const settingsSelfTestResult = document.getElementById('settingsSelfTestResult');
+    const btnClearAppDataBtn = document.getElementById('btnClearAppDataBtn');
+
+    if (openSettingsModalBtn) {
+      openSettingsModalBtn.onclick = () => {
+        haptic('light');
+        if (settingsUserDisplay) {
+          const u = tg?.initDataUnsafe?.user;
+          if (u) {
+            const uName = u.username ? ('@' + u.username) : 'Без ника';
+            settingsUserDisplay.innerText = `${u.first_name || 'Игрок'} (${uName})`;
+          } else {
+            settingsUserDisplay.innerText = 'Браузер (вне Telegram)';
+          }
+        }
+        if (settingsSelfTestResult) settingsSelfTestResult.style.display = 'none';
+        settingsModal.classList.add('active');
+      };
     }
 
+    if (closeSettingsModalBtn) closeSettingsModalBtn.onclick = () => settingsModal.classList.remove('active');
+    if (closeSettingsModalCrossBtn) closeSettingsModalCrossBtn.onclick = () => settingsModal.classList.remove('active');
+
+    if (btnSettingsSelfTest) {
+      btnSettingsSelfTest.onclick = async () => {
+        haptic('medium');
+        btnSettingsSelfTest.innerText = 'Отправка теста... ⏳';
+        btnSettingsSelfTest.disabled = true;
+        settingsSelfTestResult.style.display = 'block';
+        settingsSelfTestResult.style.background = 'var(--surface-2)';
+        settingsSelfTestResult.style.border = '1.5px solid var(--border-solid)';
+        settingsSelfTestResult.style.padding = '8px 10px';
+        settingsSelfTestResult.style.borderRadius = '6px';
+        settingsSelfTestResult.style.color = 'var(--text-secondary)';
+        settingsSelfTestResult.innerHTML = '⏳ Отправляем тестовый запрос к серверу бота...';
+
+        const srv = localStorage.getItem('duo_server_url') || DEFAULT_SERVER_URL;
+        const u = tg?.initDataUnsafe?.user;
+        const myId = u?.id || 0;
+        const myUsername = u?.username ? ('@' + u.username) : '';
+
+        if (!myUsername && !myId) {
+          settingsSelfTestResult.innerHTML = '⚠️ Ты открыл сайт в браузере, а не внутри Telegram. Чтобы протестировать доставку, открой приложение через кнопку в @duo_play_date_bot!';
+          btnSettingsSelfTest.innerText = '⚡ Отправить тестовый инвайт себе';
+          btnSettingsSelfTest.disabled = false;
+          return;
+        }
+
+        try {
+          const res = await fetch(`${srv}/api/send_invite`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender_id: myId,
+              sender_name: u?.first_name || 'Я',
+              sender_username: u?.username || '',
+              recipient_username: myUsername || String(myId),
+              place: state.selectedGame?.title || 'DUO Game Date',
+              day: 'Прямо сейчас',
+              time: getFormattedTime(),
+              vibe: '🎮 Тестовая проверка связи',
+              duration: '10 мин',
+              note: 'Тестовый инвайт самому себе'
+            })
+          });
+          const json = await res.json();
+          if (json.delivered) {
+            settingsSelfTestResult.style.background = 'rgba(0, 255, 136, 0.15)';
+            settingsSelfTestResult.style.border = '1.5px solid #00ff88';
+            settingsSelfTestResult.style.color = '#00ff88';
+            settingsSelfTestResult.innerHTML = '🎉 <b>Тест успешен!</b><br>Бот отправил тестовый инвайт с кнопками в твой чат с ботом. Проверь диалог с @duo_play_date_bot!';
+          } else {
+            settingsSelfTestResult.style.background = 'rgba(255, 159, 28, 0.15)';
+            settingsSelfTestResult.style.border = '1.5px solid #ff9f1c';
+            settingsSelfTestResult.style.color = '#ff9f1c';
+            settingsSelfTestResult.innerHTML = `⚠️ <b>Бот не смог отправить ЛС:</b><br>${json.message || 'Ты ещё не нажимал /start в боте'}.<br>👉 Зайди в диалог с @duo_play_date_bot и нажми кнопку <b>«Запустить» (/start)</b>!`;
+          }
+        } catch (err) {
+          settingsSelfTestResult.style.background = 'rgba(255, 92, 138, 0.15)';
+          settingsSelfTestResult.style.border = '1.5px solid #ff5c8a';
+          settingsSelfTestResult.style.color = '#ff5c8a';
+          settingsSelfTestResult.innerHTML = `❌ Ошибка связи с сервером: ${err.message}`;
+        }
+
+        btnSettingsSelfTest.innerText = '⚡ Отправить тестовый инвайт себе';
+        btnSettingsSelfTest.disabled = false;
+      };
+    }
+
+    if (btnClearAppDataBtn) {
+      btnClearAppDataBtn.onclick = () => {
+        if (confirm('Сбросить сохраненные игры и список избранных тиммейтов?')) {
+          localStorage.removeItem('duo_fav_contacts');
+          localStorage.removeItem('duo_custom_games');
+          localStorage.removeItem('duo_active_fav_id');
+          localStorage.removeItem('duo_custom_recipient');
+          location.reload();
+        }
+      };
+    }
+
+    let checkRecipientTimeout = null;
     if (targetRecipientInput) {
       targetRecipientInput.addEventListener('input', (e) => {
         const val = e.target.value.trim();
@@ -2796,32 +3018,16 @@
         if (clearRecipientBtn) {
           clearRecipientBtn.style.display = val ? 'block' : 'none';
         }
-        
-        // Показываем кнопку "⭐ В избранное", если ник введен и еще не сохранен
-        const alreadySaved = favList.some(f => f.username.toLowerCase() === val.toLowerCase() || f.name.toLowerCase() === val.toLowerCase());
-        if (btnQuickSaveFav) {
-          btnQuickSaveFav.style.display = (val.length >= 2 && !alreadySaved) ? 'flex' : 'none';
-        }
 
         activeFavId = 'custom';
         favRibbon.querySelectorAll('.fav-card').forEach(c => c.classList.remove('selected'));
+        updateTargetStatusCard();
         updateTicketPass();
 
         clearTimeout(checkRecipientTimeout);
         checkRecipientTimeout = setTimeout(() => {
           checkRecipientOnlineStatus(val);
         }, 350);
-      });
-    }
-
-    if (btnQuickSaveFav) {
-      btnQuickSaveFav.addEventListener('click', () => {
-        haptic('light');
-        const val = targetRecipientInput.value.trim();
-        favNameInput.value = val.replace('@', '');
-        favUsernameInput.value = val.startsWith('@') ? val : '@' + val;
-        addFavModal.classList.add('active');
-        setTimeout(() => favNameInput.focus(), 200);
       });
     }
 
@@ -2836,10 +3042,9 @@
         state.customRecipientName = '';
         localStorage.removeItem('duo_custom_recipient');
         clearRecipientBtn.style.display = 'none';
-        if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
         activeFavId = 'tg';
         renderFavRibbon();
-        checkRecipientOnlineStatus('');
+        updateTargetStatusCard();
         updateTicketPass();
       });
     }
@@ -2871,10 +3076,9 @@
         localStorage.setItem('duo_custom_recipient', newFav.username);
         if (targetRecipientInput) targetRecipientInput.value = newFav.username;
         if (clearRecipientBtn) clearRecipientBtn.style.display = 'block';
-        if (btnQuickSaveFav) btnQuickSaveFav.style.display = 'none';
 
         renderFavRibbon();
-        checkRecipientOnlineStatus(newFav.username);
+        updateTargetStatusCard();
         updateTicketPass();
         addFavModal.classList.remove('active');
         haptic('success');
