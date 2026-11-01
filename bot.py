@@ -372,35 +372,37 @@ def get_fallback_upload_chat():
     return None
 
 
-async def upload_media_to_telegram(file_path: str, is_photo: bool = False, user_id: int = None, silent: bool = False):
+async def upload_media_to_telegram(file_path: str, is_photo: bool = False, user_id: int = None):
     """
     Загружает медиафайл в Telegram и возвращает file_id.
-    Если silent=True — загружает тихо через fallback_chat и сразу удаляет сообщение,
-    никогда не отправляя ничего пользователю в ЛС.
+    Сначала пробует отправить в ЛС пользователю с disable_notification=True и сразу удалить.
+    Если пользователь не открывал ЛС — пробует кандидатов из базы данных.
     """
     if not file_path or not os.path.exists(file_path):
         return None
 
-    # 1. Если разрешена прямая отправка пользователю (не silent)
-    if not silent and user_id:
-        try:
-            if is_photo:
-                sent = await bot.send_photo(chat_id=user_id, photo=FSInputFile(file_path), disable_notification=True)
-                if sent and sent.photo:
-                    return sent.photo[-1].file_id
-            else:
-                sent = await bot.send_video(chat_id=user_id, video=FSInputFile(file_path), disable_notification=True)
-                if sent and sent.video:
-                    return sent.video.file_id
-        except Exception as e:
-            logging.debug(f"Direct upload to user {user_id} failed: {e}")
+    candidate_chats = []
+    if user_id:
+        candidate_chats.append(user_id)
+    fallback = get_fallback_upload_chat()
+    if fallback and fallback not in candidate_chats:
+        candidate_chats.append(fallback)
 
-    # 2. Fallback / Silent upload: тихая загрузка с мгновенным удалением
-    fallback_chat = get_fallback_upload_chat()
-    if fallback_chat:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users ORDER BY created_at DESC LIMIT 5")
+        for r in cursor.fetchall():
+            if r[0] and int(r[0]) not in candidate_chats:
+                candidate_chats.append(int(r[0]))
+        conn.close()
+    except Exception:
+        pass
+
+    for chat_id in candidate_chats:
         try:
             if is_photo:
-                sent = await bot.send_photo(chat_id=fallback_chat, photo=FSInputFile(file_path), disable_notification=True)
+                sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
                 if sent and sent.photo:
                     f_id = sent.photo[-1].file_id
                     try:
@@ -409,7 +411,7 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, user_
                         pass
                     return f_id
             else:
-                sent = await bot.send_video(chat_id=fallback_chat, video=FSInputFile(file_path), disable_notification=True)
+                sent = await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), disable_notification=True)
                 if sent and sent.video:
                     f_id = sent.video.file_id
                     try:
@@ -418,7 +420,7 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, user_
                         pass
                     return f_id
         except Exception as e:
-            logging.warning(f"Fallback upload failed: {e}")
+            logging.debug(f"Upload attempt to {chat_id} failed: {e}")
 
     return None
 
@@ -1396,29 +1398,76 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
             return
 
-    # 4. Для Instagram, YouTube и др: мгновенный стрим через наш Render сервер!
-    # Запускаем фоновую предзагрузку на диск, чтобы к моменту клика файл уже скачивался
+    # 4. Скачиваем ролик на лету и загружаем в Telegram (стиль SavXBot, ~4-5 секунд)
+    try:
+        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=6.5)
+        if res and res.get("file_path"):
+            is_photo = bool(res.get("is_photo"))
+            f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo, user_id=user_id)
+            if f_id:
+                save_cached_media(
+                    clean_url,
+                    f_id,
+                    "photo" if is_photo else "video",
+                    res.get("title", ""),
+                    res.get("platform", ""),
+                    res.get("author", "")
+                )
+                title_esc = html.escape(res.get("title") or plat_noun)
+                if caption_enabled:
+                    caption = (
+                        f"📸 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
+                        if is_photo else
+                        f"🎬 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
+                    )
+                else:
+                    caption = None
+
+                if is_photo:
+                    single_result = InlineQueryResultCachedPhoto(
+                        id=f"live_p_{abs(hash(f_id))}",
+                        photo_file_id=f_id,
+                        title=f"💌 Поделиться фото из {plat_source}",
+                        caption=caption,
+                        parse_mode="HTML" if caption else None
+                    )
+                else:
+                    single_result = InlineQueryResultCachedVideo(
+                        id=f"live_v_{abs(hash(f_id))}",
+                        video_file_id=f_id,
+                        title=f"💌 Поделиться {plat_noun} из {plat_source}",
+                        caption=caption,
+                        parse_mode="HTML" if caption else None
+                    )
+
+                await inline_query.answer(
+                    results=[single_result],
+                    cache_time=300,
+                    is_personal=True
+                )
+                return
+    except asyncio.TimeoutError:
+        logging.info(f"Inline prefetch timeout for {clean_url}")
+    except Exception as e:
+        logging.warning(f"Inline prefetch error for {clean_url}: {e}")
+
+    # Если ролик скачивается чуть дольше — отдаем карточку ожидания с cache_time=1 (Telegram тут же обновит)
     token = save_dl_token(clean_url)
-    asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
-
-    stream_url = f"{RENDER_EXTERNAL_URL}/stream/{token}.mp4"
-    single_result = InlineQueryResultVideo(
-        id=f"st_{token}",
-        video_url=stream_url,
-        mime_type="video/mp4",
-        thumbnail_url=plat_icon,
-        title=f"💌 Поделиться {plat_noun} из {plat_source}",
-        caption=caption,
-        parse_mode="HTML" if caption else None
-    )
-
-    # Отвечаем МГНОВЕННО (за 0.05 секунды!) — кнопка появляется сразу и отправляет чистое видео!
-    await inline_query.answer(
-        results=[single_result],
-        cache_time=300,
-        is_personal=True
-    )
-    return
+    results = [
+        InlineQueryResultArticle(
+            id=f"wait_{token}",
+            title=f"💌 Поделиться {plat_noun} из {plat_source}",
+            description="⏳ Видео обрабатывается... Нажмите через 2-3 секунды",
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/3074/3074767.png",
+            input_message_content=InputTextMessageContent(
+                message_text=clean_url
+            )
+        )
+    ]
+    try:
+        await inline_query.answer(results=results, cache_time=1, is_personal=True)
+    except Exception as ans_err:
+        logging.error(f"Error answering inline query: {ans_err}")
 
 
 # ==========================================
