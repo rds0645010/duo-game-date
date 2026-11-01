@@ -4,10 +4,14 @@ import sqlite3
 import logging
 import asyncio
 import base64
+import html
+import time
+import shutil
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, CommandObject
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -20,10 +24,27 @@ from aiogram.types import (
     InputTextMessageContent,
     FSInputFile
 )
-from downloader import detect_platform, extract_url, download_video, parse_tiktok_tikwm
+from downloader import detect_platform, extract_url, download_video, parse_tiktok_tikwm, FFMPEG_PATH
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# 📋 ДИАГНОСТИКА И ЛОГИРОВАНИЕ ОШИБОК
+recent_errors = []
+
+def record_error(source: str, error: Exception, details: str = ""):
+    import traceback
+    recent_errors.append({
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "error": str(error),
+        "type": type(error).__name__,
+        "details": details,
+        "traceback": traceback.format_exc()
+    })
+    if len(recent_errors) > 20:
+        recent_errors.pop(0)
+
 
 # ==========================================
 # ⚙️ НАСТРОЙКИ (0 БЮДЖЕТА)
@@ -203,7 +224,8 @@ def get_invite_record(invite_id: int):
 init_db()
 
 # Бот и Диспетчер
-bot = Bot(token=BOT_TOKEN) if (BOT_TOKEN and BOT_TOKEN != "YOUR_BOT_TOKEN_HERE") else None
+bot_session = AiohttpSession(timeout=180.0)
+bot = Bot(token=BOT_TOKEN, session=bot_session) if (BOT_TOKEN and BOT_TOKEN != "YOUR_BOT_TOKEN_HERE") else None
 dp = Dispatcher()
 
 
@@ -218,6 +240,16 @@ def get_app_url():
     return base
 
 
+async def safe_edit_status(msg: types.Message, text: str):
+    """Безопасное обновление статуса без вылета по ошибкам Telegram."""
+    if not msg:
+        return
+    try:
+        await msg.edit_text(text, parse_mode="HTML")
+    except Exception as e:
+        logging.debug(f"Status edit ignored: {e}")
+
+
 async def process_video_download(message: types.Message, url: str):
     clean_url = extract_url(url) or url
     platform = detect_platform(clean_url)
@@ -228,16 +260,17 @@ async def process_video_download(message: types.Message, url: str):
     # 1. Проверяем кэш (если видео уже скачивалось ранее — отдаём МГНОВЕННО)
     cached = get_cached_video(clean_url)
     if cached and cached.get("file_id"):
+        title_esc = html.escape(cached.get("title") or "Видео")
         caption = (
-            f"🎬 **{cached['title'] or 'Видео'}**\n\n"
-            f"📱 Источник: {cached.get('platform', 'Видео').capitalize()}\n"
-            f"✨ Скачано без водяных знаков и рекламы через @duo_play_date_bot (⚡ мгновенно из кэша)"
+            f"🎬 <b>{title_esc}</b>\n\n"
+            f"📱 Источник: {html.escape(cached.get('platform', 'Видео').capitalize())}\n"
+            f"✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы (мгновенно из кэша ⚡)</i>"
         )
         try:
             await message.answer_video(
                 video=cached["file_id"],
                 caption=caption,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
             return
         except Exception as e:
@@ -260,46 +293,49 @@ async def process_video_download(message: types.Message, url: str):
                 waiting_queue_count += 1
                 pos = waiting_queue_count
             status_msg = await message.answer(
-                f"⏳ **В очереди на скачивание...**\n"
-                f"Твоя позиция: {pos}. Ожидаем завершения предыдущих загрузок 🚀"
+                f"⏳ <b>В очереди на скачивание...</b>\n"
+                f"Твоя позиция: {pos}. Ожидаем завершения предыдущих загрузок 🚀",
+                parse_mode="HTML"
             )
         else:
             status_msg = await message.answer(
-                "⚡ **Обрабатываю видео...**\n"
-                "Скачиваем в максимальном качестве без водяных знаков..."
+                "⚡ <b>Обрабатываю видео...</b>\n"
+                "Скачиваем в максимальном качестве без водяных знаков...",
+                parse_mode="HTML"
             )
 
         # VIP пользователи имеют безусловный приоритет
         if is_vip:
             queue_acquired = True
-            await status_msg.edit_text("👑 **VIP приоритет активен!**\nСкачиваю видео вне очереди без ожидания...")
+            await safe_edit_status(status_msg, "👑 <b>VIP приоритет активен!</b>\nСкачиваю видео вне очереди без ожидания...")
         else:
             await download_semaphore.acquire()
             queue_acquired = True
             async with queue_lock:
                 if waiting_queue_count > 0:
                     waiting_queue_count -= 1
-            await status_msg.edit_text("⚡ **Скачиваю видео...**\nОчищаю от водяных знаков и готовлю к отправке...")
+            await safe_edit_status(status_msg, "⚡ <b>Скачиваю видео...</b>\nОчищаю от водяных знаков и готовлю к отправке...")
 
         # Выполняем скачивание
         res = await download_video(clean_url, user_id)
         file_path = res.get("file_path")
 
         if not file_path or not os.path.exists(file_path):
-            await status_msg.edit_text("❌ Не удалось загрузить видео файл. Возможно, видео удалено или автор ограничил доступ.")
+            await safe_edit_status(status_msg, "❌ Не удалось загрузить видео файл. Возможно, видео удалено или автор ограничил доступ.")
             return
 
         # Проверка размера (Telegram Bot API лимит 50 МБ)
         file_size = os.path.getsize(file_path)
         if file_size > 50 * 1024 * 1024:
-            await status_msg.edit_text(
-                f"⚠️ **Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)**\n\n"
+            await safe_edit_status(
+                status_msg,
+                f"⚠️ <b>Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)</b>\n\n"
                 f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
                 f"Попробуй более короткое видео или шортс."
             )
             return
 
-        await status_msg.edit_text("📤 **Отправляю видео в Telegram...**")
+        await safe_edit_status(status_msg, "📤 <b>Отправляю чистое видео в Telegram...</b>")
 
         platform_names = {
             "tiktok": "TikTok",
@@ -308,23 +344,32 @@ async def process_video_download(message: types.Message, url: str):
         }
         plat_str = platform_names.get(res.get("platform"), "Видео")
 
-        caption = (
-            f"🎬 **{res.get('title', 'Видео')}**\n\n"
-            f"📱 Источник: {plat_str}"
-        )
-        if res.get("author"):
-            caption += f" | {res['author']}"
-        caption += "\n✨ Скачано без водяных знаков и рекламы через @duo_play_date_bot"
+        title_raw = (res.get("title") or "Видео")[:200]
+        author_raw = (res.get("author") or "")[:50]
+        title_esc = html.escape(title_raw)
+        author_esc = html.escape(author_raw)
+
+        caption = f"🎬 <b>{title_esc}</b>\n\n📱 <b>Источник:</b> {plat_str}"
+        if author_esc:
+            caption += f" | {author_esc}"
+        caption += "\n✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы</i>"
 
         if res.get("low_quality_notice"):
-            caption += "\n\n*(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)*"
+            caption += "\n\n<i>(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)</i>"
 
         video_input = FSInputFile(file_path)
-        sent = await message.answer_video(
-            video=video_input,
-            caption=caption,
-            parse_mode="Markdown"
-        )
+        try:
+            sent = await message.answer_video(
+                video=video_input,
+                caption=caption,
+                parse_mode="HTML"
+            )
+        except Exception as html_send_err:
+            logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
+            sent = await message.answer_video(
+                video=video_input,
+                caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot"
+            )
 
         # Сохраняем file_id в кэш для мгновенных ответов в будущем
         if sent and sent.video and sent.video.file_id:
@@ -343,6 +388,7 @@ async def process_video_download(message: types.Message, url: str):
             pass
 
     except Exception as e:
+        record_error("process_video_download", e, clean_url)
         logging.error(f"Download processing failed for {clean_url}: {e}", exc_info=True)
         err_text = str(e)
         if "file_too_large" in err_text:
@@ -350,15 +396,15 @@ async def process_video_download(message: types.Message, url: str):
         elif "private" in err_text.lower() or "login" in err_text.lower():
             msg = "🔒 Это приватное видео или требует авторизации в сервисе."
         else:
-            msg = "❌ Не удалось скачать видео. Проверь правильность ссылки или попробуй другое видео."
+            msg = f"❌ Не удалось скачать видео.\n\n⚠️ Ошибка: <code>{html.escape(str(e)[:150])}</code>"
 
         if status_msg:
             try:
-                await status_msg.edit_text(msg)
+                await status_msg.edit_text(msg, parse_mode="HTML")
             except Exception:
-                await message.answer(msg)
+                await message.answer(msg, parse_mode="HTML")
         else:
-            await message.answer(msg)
+            await message.answer(msg, parse_mode="HTML")
 
     finally:
         # Освобождаем семафор
@@ -895,6 +941,40 @@ async def handle_api_send_invite(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+async def handle_api_logs(request):
+    return web.json_response({
+        "status": "ok",
+        "recent_errors": recent_errors,
+        "ffmpeg_path": str(FFMPEG_PATH),
+        "ffmpeg_exists": os.path.exists(FFMPEG_PATH) if FFMPEG_PATH else False,
+        "system_ffmpeg": shutil.which("ffmpeg")
+    })
+
+
+async def handle_api_test_dl(request):
+    url = request.query.get("url", "").strip()
+    if not url:
+        return web.json_response({"error": "missing url query parameter"})
+    try:
+        res = await download_video(url, 9999)
+        fp = res.get("file_path")
+        sz = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
+        return web.json_response({
+            "status": "success",
+            "title": res.get("title"),
+            "platform": res.get("platform"),
+            "file_path": fp,
+            "size_bytes": sz
+        })
+    except Exception as e:
+        import traceback
+        return web.json_response({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, status=500)
+
+
 def create_web_app():
     app = web.Application()
 
@@ -915,6 +995,8 @@ def create_web_app():
     app.middlewares.append(cors_middleware)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/api/logs", handle_api_logs)
+    app.router.add_get("/api/test_dl", handle_api_test_dl)
     app.router.add_get("/api/check_user", handle_api_check_user)
     app.router.add_post("/api/send_invite", handle_api_send_invite)
     return app

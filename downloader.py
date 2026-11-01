@@ -13,7 +13,14 @@ DOWNLOAD_DIR = "temp_downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Path to ffmpeg binary from imageio-ffmpeg
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+try:
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+    if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+        import stat
+        os.chmod(FFMPEG_PATH, os.stat(FFMPEG_PATH).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+except Exception as e:
+    logger.warning(f"FFmpeg init warning: {e}")
+    FFMPEG_PATH = None
 
 # Regex patterns for supported platforms
 TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
@@ -106,26 +113,28 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     """
     out_tmpl = f"{output_prefix}.%(ext)s"
     
-    # Try preferred format (up to height_limit, merged to mp4)
-    format_spec = f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height_limit}][ext=mp4]/best[height<={height_limit}]/best"
+    # Try pre-merged MP4 first (works even without ffmpeg), then bestvideo+bestaudio
+    format_spec = f"best[ext=mp4][height<={height_limit}]/bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height_limit}][ext=mp4]/best[height<={height_limit}]/best"
     
     ydl_opts = {
         'outtmpl': out_tmpl,
         'format': format_spec,
-        'ffmpeg_location': FFMPEG_PATH,
-        'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
         'max_filesize': max_size_bytes,
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }],
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
+
+    if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+        ydl_opts['ffmpeg_location'] = FFMPEG_PATH
+        ydl_opts['merge_output_format'] = 'mp4'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }]
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -183,7 +192,8 @@ async def download_video(url: str, user_id: int):
                     "duration": tikwm_data.get("duration", 0),
                     "platform": "tiktok",
                     "direct_url": tikwm_data["video_url"],
-                    "cover": tikwm_data.get("cover", "")
+                    "cover": tikwm_data.get("cover", ""),
+                    "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
                 }
             except Exception as e:
                 logger.warning(f"TikWM stream download failed: {e}, falling back to yt-dlp...")
