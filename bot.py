@@ -1254,6 +1254,24 @@ def create_web_app():
     return app
 
 
+async def keep_alive_ping():
+    """
+    Каждые 9 минут отправляет внешний HTTP GET запрос на свой собственный /health endpoint.
+    Это сбрасывает 15-минутный счетчик неактивности Render и не даёт серверу уснуть (24/7 бодрствование).
+    """
+    await asyncio.sleep(45)  # ждем полного старта сервера
+    target_url = f"{RENDER_EXTERNAL_URL}/health"
+    logging.info(f"🔄 Фоновый анти-сон запущен: цель {target_url}")
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    logging.info(f"⏰ Anti-sleep keepalive: HTTP {resp.status}")
+        except Exception as e:
+            logging.debug(f"Anti-sleep ping error: {e}")
+        await asyncio.sleep(540)  # каждые 9 минут (Render засыпает через 15)
+
+
 async def main():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("⚠️ ВНИМАНИЕ: BOT_TOKEN не указан в .env файле!")
@@ -1266,6 +1284,9 @@ async def main():
     await site.start()
     logging.info(f"🌐 HTTP API запущен на порту {PORT}")
 
+    # Запускаем фоновый пингер анти-сна
+    asyncio.create_task(keep_alive_ping())
+
     if bot:
         logging.info("🤖 Бот запущен и слушает Telegram (24/7)...")
         await dp.start_polling(bot)
@@ -1273,6 +1294,7 @@ async def main():
         logging.warning("⚠️ Бот не запущен, так как нет BOT_TOKEN. HTTP сервер работает.")
         while True:
             await asyncio.sleep(3600)
+
 
 
 if __name__ == "__main__":
