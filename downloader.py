@@ -119,51 +119,142 @@ async def download_file_from_url(url: str, output_path: str, max_size_bytes: int
     return output_path
 
 
-async def try_download_instagram_photo(shortcode: str, output_path: str):
+def _merge_image_audio_sync(image_path: str, audio_path: str, output_mp4: str) -> bool:
     """
-    Скачивает изображение в высоком разрешении для фотопостов Instagram.
+    Конвертирует статичное фото + аудиодорожку в MP4 видео через FFmpeg.
+    """
+    if not FFMPEG_PATH or not os.path.exists(FFMPEG_PATH):
+        return False
+    import subprocess
+    cmd = [
+        FFMPEG_PATH,
+        "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-i", audio_path,
+        "-c:v", "libx264",
+        "-tune", "stillimage",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-shortest",
+        "-movflags", "+faststart",
+        output_mp4
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
+        return proc.returncode == 0 and os.path.exists(output_mp4) and os.path.getsize(output_mp4) > 1000
+    except Exception as e:
+        logger.warning(f"FFmpeg image+audio merge error: {e}")
+        return False
+
+
+async def try_download_instagram_media(shortcode: str, output_prefix: str):
+    """
+    Скачивает фотопост или карусель (альбом) из Instagram.
+    Если обнаружено несколько слайдов, возвращает список фото для Telegram MediaGroup.
+    Если один слайд с аудио, конвертирует в видео.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     }
-    # 1. Прямой редирект медиа
-    media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(media_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200 and resp.headers.get("Content-Type", "").startswith("image/"):
-                    content = await resp.read()
-                    if len(content) > 1000:
-                        with open(output_path, "wb") as f:
-                            f.write(content)
-                        return output_path
-        except Exception as e:
-            logger.debug(f"Direct media photo failed: {e}")
 
-    # 2. Парсинг превью из embed страницы
     embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    img_urls = []
+    audio_url = None
+
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     html_text = await resp.text()
-                    img_matches = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text)
-                    if not img_matches:
-                        img_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', html_text)
-                    if img_matches:
+                    # Ищем display_url из данных json
+                    raw_urls = re.findall(r'"display_url":\s*"([^"]+)"', html_text)
+                    if not raw_urls:
+                        raw_urls = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text)
+                    if not raw_urls:
+                        raw_urls = re.findall(r'<meta property="og:image" content="([^"]+)"', html_text)
+
+                    # Ищем аудиодорожку, если есть
+                    audio_matches = re.findall(r'"audio_src":\s*"([^"]+)"', html_text)
+                    if audio_matches:
                         import html as py_html
-                        img_url = py_html.unescape(img_matches[0])
-                        async with session.get(img_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as img_resp:
-                            if img_resp.status == 200:
-                                content = await img_resp.read()
-                                with open(output_path, "wb") as f:
-                                    f.write(content)
-                                return output_path
+                        audio_url = py_html.unescape(audio_matches[0])
+
+                    import html as py_html
+                    seen = set()
+                    for u in raw_urls:
+                        cleaned = py_html.unescape(u).replace("\\u0026", "&")
+                        base = cleaned.split("?")[0]
+                        if base not in seen:
+                            seen.add(base)
+                            img_urls.append(cleaned)
         except Exception as e:
-            logger.debug(f"Embed photo parse failed: {e}")
+            logger.debug(f"Embed parse error: {e}")
+
+    # Fallback на прямой media endpoint если ничего не нашлось
+    if not img_urls:
+        media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
+        img_urls = [media_url]
+
+    # Если слайдов больше одного — скачиваем как альбом (карусель)
+    if len(img_urls) > 1:
+        album_photos = []
+        for idx, u in enumerate(img_urls[:10]):
+            dest = f"{output_prefix}_{idx}.jpg"
+            try:
+                await download_file_from_url(u, dest)
+                if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                    album_photos.append(dest)
+            except Exception as e:
+                logger.warning(f"Error downloading album slide {idx}: {e}")
+        if len(album_photos) > 1:
+            return {
+                "is_album": True,
+                "photos": album_photos,
+                "platform": "instagram",
+                "title": "Instagram Альбом",
+                "author": ""
+            }
+
+    # Если слайд один
+    single_dest = f"{output_prefix}.jpg"
+    try:
+        await download_file_from_url(img_urls[0], single_dest)
+        # Если есть аудио, конвертируем в видео MP4
+        if audio_url and FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+            audio_dest = f"{output_prefix}.mp3"
+            mp4_dest = f"{output_prefix}.mp4"
+            try:
+                await download_file_from_url(audio_url, audio_dest)
+                merged = await asyncio.to_thread(_merge_image_audio_sync, single_dest, audio_dest, mp4_dest)
+                if merged and os.path.exists(mp4_dest):
+                    if os.path.exists(audio_dest): os.remove(audio_dest)
+                    if os.path.exists(single_dest): os.remove(single_dest)
+                    return {
+                        "file_path": mp4_dest,
+                        "platform": "instagram",
+                        "title": "Instagram Видео (Фото со звуком)",
+                        "author": "",
+                        "filesize": os.path.getsize(mp4_dest)
+                    }
+            except Exception as e:
+                logger.warning(f"Audio merge failed for IG: {e}")
+
+        return {
+            "file_path": single_dest,
+            "is_photo": True,
+            "platform": "instagram",
+            "title": "Instagram Фото",
+            "author": "",
+            "filesize": os.path.getsize(single_dest) if os.path.exists(single_dest) else 0
+        }
+    except Exception as e:
+        logger.warning(f"Single photo download failed: {e}")
 
     return None
+
 
 
 
@@ -261,9 +352,51 @@ async def download_video(url: str, user_id: int):
                     if os.path.exists(dest_file):
                         os.remove(dest_file)
             elif tikwm_data.get("is_photo") and tikwm_data.get("photo_urls"):
+                photo_urls = tikwm_data["photo_urls"]
+                # Если несколько картинок в слайдшоу TikTok — формируем альбом
+                if len(photo_urls) > 1:
+                    album_photos = []
+                    for idx, img_u in enumerate(photo_urls[:10]):
+                        dest = f"{output_prefix}_{idx}.jpg"
+                        try:
+                            await download_file_from_url(img_u, dest)
+                            if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                                album_photos.append(dest)
+                        except Exception as dl_err:
+                            logger.warning(f"TikTok album slide download error: {dl_err}")
+                    if len(album_photos) > 1:
+                        return {
+                            "is_album": True,
+                            "photos": album_photos,
+                            "platform": "tiktok",
+                            "title": tikwm_data.get("title", "TikTok Слайдшоу"),
+                            "author": tikwm_data.get("author", "TikTok")
+                        }
+
+                # Если одна картинка — пробуем наложить звук
                 dest_file = f"{output_prefix}.jpg"
                 try:
-                    await download_file_from_url(tikwm_data["photo_urls"][0], dest_file)
+                    await download_file_from_url(photo_urls[0], dest_file)
+                    music_url = tikwm_data.get("music")
+                    if music_url and FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+                        audio_file = f"{output_prefix}.mp3"
+                        mp4_file = f"{output_prefix}.mp4"
+                        try:
+                            await download_file_from_url(music_url, audio_file)
+                            merged = await asyncio.to_thread(_merge_image_audio_sync, dest_file, audio_file, mp4_file)
+                            if merged and os.path.exists(mp4_file):
+                                if os.path.exists(audio_file): os.remove(audio_file)
+                                if os.path.exists(dest_file): os.remove(dest_file)
+                                return {
+                                    "file_path": mp4_file,
+                                    "platform": "tiktok",
+                                    "title": tikwm_data.get("title", "TikTok Видео (Фото со звуком)"),
+                                    "author": tikwm_data.get("author", "TikTok"),
+                                    "filesize": os.path.getsize(mp4_file)
+                                }
+                        except Exception as m_err:
+                            logger.warning(f"TikTok music merge error: {m_err}")
+
                     return {
                         "file_path": dest_file,
                         "is_photo": True,
@@ -285,22 +418,14 @@ async def download_video(url: str, user_id: int):
         err_msg = str(e)
         logger.warning(f"Download 720p failed for {clean_url}: {e}")
 
-        # Если в публикации нет видео (это фотопост в Instagram)
+        # Если в публикации нет видео (это фотопост или карусель в Instagram)
         if "no video in this post" in err_msg.lower():
             m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', clean_url)
             if m:
                 shortcode = m.group(1)
-                photo_file = f"{output_prefix}.jpg"
-                photo_res = await try_download_instagram_photo(shortcode, photo_file)
-                if photo_res and os.path.exists(photo_res):
-                    return {
-                        "file_path": photo_res,
-                        "is_photo": True,
-                        "platform": "instagram",
-                        "title": "Instagram Фото",
-                        "author": "",
-                        "filesize": os.path.getsize(photo_res)
-                    }
+                media_res = await try_download_instagram_media(shortcode, output_prefix)
+                if media_res:
+                    return media_res
             raise Exception("is_photo_post")
 
         # If file too large or format error, retry in lower resolution (360p)

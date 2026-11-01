@@ -22,6 +22,7 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
     InputTextMessageContent,
+    InputMediaPhoto,
     FSInputFile
 )
 from downloader import detect_platform, extract_url, download_video, parse_tiktok_tikwm, FFMPEG_PATH, extract_direct_video_info
@@ -431,7 +432,31 @@ async def process_video_download(message: types.Message, url: str):
         title_esc = html.escape(title_raw)
         author_esc = html.escape(author_raw)
 
-        # 📸 Если в посте оказалась фотография, а не видео
+        # 🖼 Если это альбом / карусель из нескольких слайдов
+        if res.get("is_album") and res.get("photos"):
+            photos = res["photos"]
+            album_caption = (
+                f"📸 <b>{title_esc}</b>\n\n"
+                f"📱 <b>Источник:</b> {plat_str} | 🖼 Слайдов: {len(photos)}\n"
+                f"✨ <i>Листай слайды прямо в Telegram 👉</i>\n"
+                f"✨ <i>Скачано через @duo_play_date_bot</i>"
+            )
+            media_group = []
+            for i, p_path in enumerate(photos[:10]):
+                p_file = FSInputFile(p_path)
+                if i == 0:
+                    media_group.append(InputMediaPhoto(media=p_file, caption=album_caption, parse_mode="HTML"))
+                else:
+                    media_group.append(InputMediaPhoto(media=p_file))
+
+            await message.answer_media_group(media=media_group)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            return
+
+        # 📸 Если в посте оказалась одиночная фотография
         if res.get("is_photo"):
             photo_caption = (
                 f"📸 <b>{title_esc}</b>\n\n"
@@ -507,14 +532,24 @@ async def process_video_download(message: types.Message, url: str):
         # Освобождаем семафор
         if queue_acquired and not is_vip:
             download_semaphore.release()
-        # Удаляем временный файл с диска
-        if res and isinstance(res, dict) and res.get("file_path"):
-            fp = res["file_path"]
-            if os.path.exists(fp):
-                try:
-                    os.remove(fp)
-                except Exception as del_err:
-                    logging.warning(f"Could not remove temp file {fp}: {del_err}")
+        # Удаляем временные файлы с диска
+        if res and isinstance(res, dict):
+            # Удаляем фото из альбома
+            if res.get("photos"):
+                for p in res["photos"]:
+                    if p and os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+            # Удаляем одиночный файл
+            if res.get("file_path"):
+                fp = res["file_path"]
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                    except Exception as del_err:
+                        logging.warning(f"Could not remove temp file {fp}: {del_err}")
 
 
 @dp.message(CommandStart())
