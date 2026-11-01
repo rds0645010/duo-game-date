@@ -24,7 +24,7 @@ from aiogram.types import (
     InputTextMessageContent,
     FSInputFile
 )
-from downloader import detect_platform, extract_url, download_video, parse_tiktok_tikwm, FFMPEG_PATH
+from downloader import detect_platform, extract_url, download_video, parse_tiktok_tikwm, FFMPEG_PATH, extract_direct_video_info
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -832,50 +832,50 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=results, cache_time=5, is_personal=True)
         return
 
-    # 2. Если TikTok — получаем прямой MP4 поток через быстрый TikWM API (< 1 сек)
-    if platform == "tiktok":
-        try:
-            tikwm_data = await parse_tiktok_tikwm(clean_url)
-            if tikwm_data and tikwm_data.get("video_url"):
-                title_esc = html.escape(tikwm_data.get("title", "TikTok"))
-                author_esc = html.escape(tikwm_data.get("author", "TikTok"))
-                full_caption = (
-                    f"🎬 <b>{title_esc}</b>\n\n"
-                    f"👤 {author_esc} | ✨ <i>Без водяного знака через @duo_play_date_bot</i>"
-                )
-                cover_url = tikwm_data.get("cover") or "https://cdn-icons-png.flaticon.com/512/3046/3046121.png"
-                clean_res = InlineQueryResultVideo(
-                    id=f"tt_clean_{abs(hash(clean_url))}",
-                    video_url=tikwm_data["video_url"],
-                    mime_type="video/mp4",
-                    thumbnail_url=cover_url,
-                    title="🎬 Чистое видео (без текста)",
-                    description="Только чистый видеоролик без подписи",
-                    caption=None
-                )
-                full_res = InlineQueryResultVideo(
-                    id=f"tt_full_{abs(hash(clean_url))}",
-                    video_url=tikwm_data["video_url"],
-                    mime_type="video/mp4",
-                    thumbnail_url=cover_url,
-                    title=f"📝 {tikwm_data.get('title') or 'TikTok'}",
-                    description=f"👤 {tikwm_data.get('author', 'TikTok')} • С подписью",
-                    caption=full_caption,
-                    parse_mode="HTML"
-                )
-                if caption_enabled:
-                    results.extend([full_res, clean_res])
-                else:
-                    results.extend([clean_res, full_res])
+    # 2. Пробуем извлечь прямой поток (TikTok, Instagram Reels и др.) за < 2.5 сек
+    direct_info = await extract_direct_video_info(clean_url)
+    if direct_info and direct_info.get("video_url"):
+        title_esc = html.escape(direct_info.get("title") or "Видео")
+        author_esc = html.escape(direct_info.get("author") or "")
+        full_caption = (
+            f"🎬 <b>{title_esc}</b>\n\n"
+            f"📱 {html.escape(direct_info.get('platform', 'Видео').capitalize())}"
+        )
+        if author_esc:
+            full_caption += f" | {author_esc}"
+        full_caption += "\n✨ <i>Скачано через @duo_play_date_bot без рекламы</i>"
 
-                await inline_query.answer(results=results, cache_time=5, is_personal=True)
-                return
-        except Exception as e:
-            logging.warning(f"Inline TikWM parse error: {e}")
+        cover_url = direct_info.get("thumbnail") or "https://cdn-icons-png.flaticon.com/512/3046/3046121.png"
 
-    # 3. Для YouTube Shorts, Instagram Reels (или если TikTok не закэширован):
-    # Telegram Inline Query таймаутит через 2-3 секунды, поэтому отдаем интерактивную карточку
-    # с кнопкой 1-клик перехода в бота, которая мгновенно запускает скачивание и сохраняет в кэш
+        clean_res = InlineQueryResultVideo(
+            id=f"dir_clean_{abs(hash(clean_url))}",
+            video_url=direct_info["video_url"],
+            mime_type="video/mp4",
+            thumbnail_url=cover_url,
+            title="🎬 Чистое видео (без текста)",
+            description=f"{direct_info.get('title') or 'Видео'} • Без текста и водяных знаков",
+            caption=None
+        )
+        full_res = InlineQueryResultVideo(
+            id=f"dir_full_{abs(hash(clean_url))}",
+            video_url=direct_info["video_url"],
+            mime_type="video/mp4",
+            thumbnail_url=cover_url,
+            title="📝 С описанием и автором",
+            description=f"🎬 {direct_info.get('title') or 'Видео'}",
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+        if caption_enabled:
+            results.extend([full_res, clean_res])
+        else:
+            results.extend([clean_res, full_res])
+
+        await inline_query.answer(results=results, cache_time=15, is_personal=True)
+        return
+
+    # 3. Если прямого видеопотока нет (например, YouTube Shorts требует склейки звука и видео)
+    # и видео ещё не было закэшировано: отдаем быструю кнопку для загрузки
     raw_b64 = base64.b64encode(clean_url.encode("utf-8")).decode("utf-8")
     dl_link = f"https://t.me/duo_play_date_bot?start=dl_{raw_b64}"
 
@@ -888,16 +888,16 @@ async def inline_query_handler(inline_query: InlineQuery):
     results.append(
         InlineQueryResultArticle(
             id=f"dl_{abs(hash(clean_url))}",
-            title=f"📥 Скачать {plat_title} без рекламы",
-            description="Нажми, чтобы отправить инвайт на скачивание чистого видео",
+            title=f"📥 Скачать {plat_title} в бота",
+            description="YouTube Shorts требует склейки звука и видео (нажми для загрузки)",
             thumbnail_url="https://cdn-icons-png.flaticon.com/512/727/727245.png",
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    f"🎬 **Чистое видео ({plat_title})**\n"
+                    f"🎬 <b>{plat_title}</b>\n"
                     f"🔗 {clean_url}\n\n"
-                    f"Нажми кнопку ниже, чтобы бот прислал готовое видео без водяных знаков 👇"
+                    f"<i>Это видео ещё не закэшировано ботом. Нажмите кнопку ниже, чтобы забрать готовое видео:</i>"
                 ),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -911,7 +911,7 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
         )
     )
-    await inline_query.answer(results=results, cache_time=30, is_personal=True)
+    await inline_query.answer(results=results, cache_time=5, is_personal=True)
 
 
 # ==========================================

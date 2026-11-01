@@ -220,3 +220,68 @@ async def download_video(url: str, user_id: int):
             except Exception as e2:
                 raise Exception(f"file_too_large: {e2}")
         raise e
+
+
+async def extract_direct_video_info(url: str):
+    """
+    Fast metadata extractor for Telegram Inline Query (< 2.5 seconds timeout).
+    Returns direct MP4 streaming URL so Telegram can send the actual video without downloading locally.
+    """
+    platform = detect_platform(url)
+    clean_url = extract_url(url) or url
+
+    # 1. TikTok: instant via TikWM (< 0.5s)
+    if platform == "tiktok":
+        tikwm_data = await parse_tiktok_tikwm(clean_url)
+        if tikwm_data and tikwm_data.get("video_url"):
+            return {
+                "success": True,
+                "platform": "tiktok",
+                "video_url": tikwm_data["video_url"],
+                "title": tikwm_data.get("title") or "TikTok",
+                "author": tikwm_data.get("author") or "TikTok",
+                "thumbnail": tikwm_data.get("cover") or ""
+            }
+
+    # 2. Instagram & other direct streams via fast yt-dlp metadata extract
+    def _fast_extract():
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+            v_url = info.get("url")
+            if not v_url and info.get("formats"):
+                candidates = [
+                    f for f in info["formats"]
+                    if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url")
+                ]
+                if candidates:
+                    v_url = candidates[-1].get("url")
+
+            if v_url:
+                return {
+                    "success": True,
+                    "platform": platform or "video",
+                    "video_url": v_url,
+                    "title": info.get("title") or "Видео",
+                    "author": info.get("uploader") or info.get("channel") or "",
+                    "thumbnail": info.get("thumbnail") or ""
+                }
+            return None
+
+    try:
+        res = await asyncio.wait_for(asyncio.to_thread(_fast_extract), timeout=2.4)
+        if res:
+            return res
+    except Exception as e:
+        logger.warning(f"Fast extract error for {clean_url}: {e}")
+
+    return None
+
