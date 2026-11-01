@@ -78,6 +78,18 @@ async def parse_tiktok_tikwm(url: str):
                                 "cover": d.get("cover", ""),
                                 "duration": d.get("duration", 0)
                             }
+                        # Поддержка фото-слайдшоу TikTok
+                        images = d.get("images") or []
+                        if images:
+                            return {
+                                "success": True,
+                                "platform": "tiktok",
+                                "is_photo": True,
+                                "photo_urls": images,
+                                "title": d.get("title", "TikTok Фото") or "TikTok Фото",
+                                "author": d.get("author", {}).get("nickname", "TikTok"),
+                                "cover": d.get("cover", "")
+                            }
         except Exception as e:
             logger.warning(f"TikWM error for {url}: {e}")
     return None
@@ -105,6 +117,54 @@ async def download_file_from_url(url: str, output_path: str, max_size_bytes: int
                         raise Exception("file_too_large")
                     f.write(chunk)
     return output_path
+
+
+async def try_download_instagram_photo(shortcode: str, output_path: str):
+    """
+    Скачивает изображение в высоком разрешении для фотопостов Instagram.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    }
+    # 1. Прямой редирект медиа
+    media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(media_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200 and resp.headers.get("Content-Type", "").startswith("image/"):
+                    content = await resp.read()
+                    if len(content) > 1000:
+                        with open(output_path, "wb") as f:
+                            f.write(content)
+                        return output_path
+        except Exception as e:
+            logger.debug(f"Direct media photo failed: {e}")
+
+    # 2. Парсинг превью из embed страницы
+    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    html_text = await resp.text()
+                    img_matches = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text)
+                    if not img_matches:
+                        img_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', html_text)
+                    if img_matches:
+                        import html as py_html
+                        img_url = py_html.unescape(img_matches[0])
+                        async with session.get(img_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as img_resp:
+                            if img_resp.status == 200:
+                                content = await img_resp.read()
+                                with open(output_path, "wb") as f:
+                                    f.write(content)
+                                return output_path
+        except Exception as e:
+            logger.debug(f"Embed photo parse failed: {e}")
+
+    return None
+
 
 
 def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024):
@@ -181,24 +241,39 @@ async def download_video(url: str, user_id: int):
     # 1. TIKTOK: Fast TikWM API
     if platform == "tiktok":
         tikwm_data = await parse_tiktok_tikwm(clean_url)
-        if tikwm_data and tikwm_data.get("video_url"):
-            dest_file = f"{output_prefix}.mp4"
-            try:
-                await download_file_from_url(tikwm_data["video_url"], dest_file)
-                return {
-                    "file_path": dest_file,
-                    "title": tikwm_data.get("title", "TikTok"),
-                    "author": tikwm_data.get("author", "TikTok"),
-                    "duration": tikwm_data.get("duration", 0),
-                    "platform": "tiktok",
-                    "direct_url": tikwm_data["video_url"],
-                    "cover": tikwm_data.get("cover", ""),
-                    "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
-                }
-            except Exception as e:
-                logger.warning(f"TikWM stream download failed: {e}, falling back to yt-dlp...")
-                if os.path.exists(dest_file):
-                    os.remove(dest_file)
+        if tikwm_data:
+            if tikwm_data.get("video_url"):
+                dest_file = f"{output_prefix}.mp4"
+                try:
+                    await download_file_from_url(tikwm_data["video_url"], dest_file)
+                    return {
+                        "file_path": dest_file,
+                        "title": tikwm_data.get("title", "TikTok"),
+                        "author": tikwm_data.get("author", "TikTok"),
+                        "duration": tikwm_data.get("duration", 0),
+                        "platform": "tiktok",
+                        "direct_url": tikwm_data["video_url"],
+                        "cover": tikwm_data.get("cover", ""),
+                        "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
+                    }
+                except Exception as e:
+                    logger.warning(f"TikWM stream download failed: {e}, falling back to yt-dlp...")
+                    if os.path.exists(dest_file):
+                        os.remove(dest_file)
+            elif tikwm_data.get("is_photo") and tikwm_data.get("photo_urls"):
+                dest_file = f"{output_prefix}.jpg"
+                try:
+                    await download_file_from_url(tikwm_data["photo_urls"][0], dest_file)
+                    return {
+                        "file_path": dest_file,
+                        "is_photo": True,
+                        "title": tikwm_data.get("title", "TikTok Фото"),
+                        "author": tikwm_data.get("author", "TikTok"),
+                        "platform": "tiktok",
+                        "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
+                    }
+                except Exception as e:
+                    logger.warning(f"TikTok photo download failed: {e}")
 
     # 2. YOUTUBE SHORTS / INSTAGRAM REELS / TIKTOK FALLBACK
     # First attempt: 720p
@@ -209,6 +284,25 @@ async def download_video(url: str, user_id: int):
     except Exception as e:
         err_msg = str(e)
         logger.warning(f"Download 720p failed for {clean_url}: {e}")
+
+        # Если в публикации нет видео (это фотопост в Instagram)
+        if "no video in this post" in err_msg.lower():
+            m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', clean_url)
+            if m:
+                shortcode = m.group(1)
+                photo_file = f"{output_prefix}.jpg"
+                photo_res = await try_download_instagram_photo(shortcode, photo_file)
+                if photo_res and os.path.exists(photo_res):
+                    return {
+                        "file_path": photo_res,
+                        "is_photo": True,
+                        "platform": "instagram",
+                        "title": "Instagram Фото",
+                        "author": "",
+                        "filesize": os.path.getsize(photo_res)
+                    }
+            raise Exception("is_photo_post")
+
         # If file too large or format error, retry in lower resolution (360p)
         if "max_filesize" in err_msg or "too large" in err_msg.lower():
             try:

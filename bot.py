@@ -287,6 +287,51 @@ async def safe_edit_status(msg: types.Message, text: str):
         logging.debug(f"Status edit ignored: {e}")
 
 
+def format_friendly_error(e: Exception) -> str:
+    """Преобразует любые технические ошибки в понятные объяснения для пользователя."""
+    err_text = str(e).lower()
+    if "is_photo_post" in err_text or "no video in this post" in err_text:
+        return (
+            "📸 <b>В этой публикации находится фотография, а не видео.</b>\n\n"
+            "Бот специализируется на загрузке видеороликов из <b>Reels, TikTok и YouTube Shorts</b>. "
+            "Если автор опубликовал статичную картинку или фото-карусель, видео в ней отсутствует."
+        )
+    elif "private" in err_text or "login" in err_text or "401" in err_text or "403" in err_text:
+        return (
+            "🔒 <b>Это видео из закрытого (приватного) профиля.</b>\n\n"
+            "Telegram не может получить доступ к закрытым профилям без пароля. "
+            "Скачивать можно только видео из открытых публичных аккаунтов."
+        )
+    elif "confirm your age" in err_text or "age-restricted" in err_text:
+        return (
+            "🔞 <b>Видео имеет возрастное ограничение (18+).</b>\n\n"
+            "Сервис требует подтверждения возраста в аккаунте, поэтому бот не может скачать его автоматически."
+        )
+    elif "file_too_large" in err_text or "too large" in err_text:
+        return (
+            "⚠️ <b>Файл превышает 50 МБ (лимит Telegram).</b>\n\n"
+            "Telegram Bot API запрещает ботам отправлять файлы больше 50 МБ. Попробуй более короткий ролик."
+        )
+    elif "live event" in err_text or "live stream" in err_text:
+        return (
+            "🔴 <b>Это ссылка на прямой эфир (стрим).</b>\n\n"
+            "Бот может скачивать только завершенные опубликованные видео, а не идущую трансляцию."
+        )
+    elif "unavailable" in err_text or "not found" in err_text or "404" in err_text:
+        return (
+            "🗑 <b>Видео не найдено или было удалено автором.</b>\n\n"
+            "Проверь, открывается ли ссылка в обычном браузере."
+        )
+    elif "timed out" in err_text or "timeout" in err_text:
+        return (
+            "⏱ <b>Сервер источника не ответил вовремя.</b>\n\n"
+            "Возможно, временный сбой на стороне платформы. Попробуй еще раз через минуту."
+        )
+    else:
+        return f"❌ <b>Не удалось скачать видео.</b>\n\n⚠️ Детали: <code>{html.escape(str(e)[:150])}</code>"
+
+
+
 async def process_video_download(message: types.Message, url: str):
     clean_url = extract_url(url) or url
     platform = detect_platform(clean_url)
@@ -386,6 +431,26 @@ async def process_video_download(message: types.Message, url: str):
         title_esc = html.escape(title_raw)
         author_esc = html.escape(author_raw)
 
+        # 📸 Если в посте оказалась фотография, а не видео
+        if res.get("is_photo"):
+            photo_caption = (
+                f"📸 <b>{title_esc}</b>\n\n"
+                f"📱 <b>Источник:</b> {plat_str}\n"
+                f"ℹ️ <i>(В публикации было фото, а не видео — сохранено в исходном качестве)</i>\n"
+                f"✨ <i>Скачано через @duo_play_date_bot</i>"
+            )
+            photo_input = FSInputFile(file_path)
+            await message.answer_photo(
+                photo=photo_input,
+                caption=photo_caption,
+                parse_mode="HTML"
+            )
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            return
+
         caption = f"🎬 <b>{title_esc}</b>\n\n📱 <b>Источник:</b> {plat_str}"
         if author_esc:
             caption += f" | {author_esc}"
@@ -427,13 +492,7 @@ async def process_video_download(message: types.Message, url: str):
     except Exception as e:
         record_error("process_video_download", e, clean_url)
         logging.error(f"Download processing failed for {clean_url}: {e}", exc_info=True)
-        err_text = str(e)
-        if "file_too_large" in err_text:
-            msg = "⚠️ Видео превышает 50 МБ (лимит Telegram). Мы не можем его загрузить."
-        elif "private" in err_text.lower() or "login" in err_text.lower():
-            msg = "🔒 Это приватное видео или требует авторизации в сервисе."
-        else:
-            msg = f"❌ Не удалось скачать видео.\n\n⚠️ Ошибка: <code>{html.escape(str(e)[:150])}</code>"
+        msg = format_friendly_error(e)
 
         if status_msg:
             try:
@@ -442,6 +501,7 @@ async def process_video_download(message: types.Message, url: str):
                 await message.answer(msg, parse_mode="HTML")
         else:
             await message.answer(msg, parse_mode="HTML")
+
 
     finally:
         # Освобождаем семафор
