@@ -129,6 +129,23 @@ def init_db():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            url TEXT,
+            canonical_key TEXT,
+            file_id TEXT,
+            media_type TEXT DEFAULT 'video',
+            title TEXT,
+            platform TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id, created_at DESC)")
+    except Exception:
+        pass
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id INTEGER PRIMARY KEY,
             inline_caption INTEGER DEFAULT 0,
@@ -137,6 +154,58 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+
+def record_user_download(user_id: int, url: str, file_id: str, media_type: str, title: str, platform: str):
+    """Сохраняет загрузку в личную историю пользователя (для мгновенной отправки через @ как в SaveBox)"""
+    if not user_id or not file_id:
+        return
+    canon_k = get_canonical_media_key(url)
+    clean_u = url.split("?")[0].strip().rstrip("/")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM user_downloads WHERE user_id = ? AND (canonical_key = ? OR url = ?)", (user_id, canon_k, clean_u))
+        cursor.execute("""
+            INSERT INTO user_downloads (user_id, url, canonical_key, file_id, media_type, title, platform)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, clean_u, canon_k, file_id, media_type, title, platform))
+        conn.commit()
+    except Exception as e:
+        logging.warning(f"Could not record user download: {e}")
+    finally:
+        conn.close()
+
+
+def get_user_recent_downloads(user_id: int, limit: int = 15):
+    """Возвращает недавние загрузки пользователя для инлайн-режима"""
+    if not user_id:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    items = []
+    try:
+        cursor.execute("""
+            SELECT file_id, media_type, title, platform, url 
+            FROM user_downloads 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        """, (user_id, limit))
+        rows = cursor.fetchall()
+        for r in rows:
+            items.append({
+                "file_id": r[0],
+                "media_type": r[1] or "video",
+                "title": r[2] or "Медиа",
+                "platform": r[3] or "video",
+                "url": r[4]
+            })
+    except Exception as e:
+        logging.warning(f"Could not get user recent downloads: {e}")
+    finally:
+        conn.close()
+    return items
 
 
 def save_dl_token(url: str) -> str:
@@ -506,11 +575,27 @@ async def process_video_download(message: types.Message, url: str):
         return
 
     # 1. Проверяем кэш (если видео/фото уже скачивалось ранее — отдаём МГНОВЕННО)
+    user_id = message.from_user.id
+    share_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="↗️ Отправить в чат через @",
+                    switch_inline_query=clean_url
+                )
+            ]
+        ]
+    )
+
     cached = get_cached_media(clean_url)
     if cached and cached.get("file_id"):
         title_esc = html.escape(cached.get("title") or "Медиа")
         plat_esc = html.escape(cached.get('platform', 'Медиа').capitalize())
-        if cached.get("media_type") == "photo":
+        f_id = cached["file_id"]
+        m_type = cached.get("media_type", "video")
+        record_user_download(user_id, clean_url, f_id, m_type, cached.get("title", ""), cached.get("platform", ""))
+
+        if m_type == "photo":
             caption = (
                 f"📸 <b>{title_esc}</b>\n\n"
                 f"📱 Источник: {plat_esc}\n"
@@ -518,13 +603,14 @@ async def process_video_download(message: types.Message, url: str):
             )
             try:
                 await message.answer_photo(
-                    photo=cached["file_id"],
+                    photo=f_id,
                     caption=caption,
+                    reply_markup=share_kb,
                     parse_mode="HTML"
                 )
                 return
             except Exception as e:
-                logging.warning(f"Failed to send cached photo file_id {cached['file_id']}: {e}")
+                logging.warning(f"Failed to send cached photo file_id {f_id}: {e}")
         else:
             caption = (
                 f"🎬 <b>{title_esc}</b>\n\n"
@@ -533,16 +619,16 @@ async def process_video_download(message: types.Message, url: str):
             )
             try:
                 await message.answer_video(
-                    video=cached["file_id"],
+                    video=f_id,
                     caption=caption,
+                    reply_markup=share_kb,
                     parse_mode="HTML"
                 )
                 return
             except Exception as e:
-                logging.warning(f"Failed to send cached video file_id {cached['file_id']}: {e}")
+                logging.warning(f"Failed to send cached video file_id {f_id}: {e}")
             # Если Telegram удалил file_id или ошибка — скачиваем заново
 
-    user_id = message.from_user.id
     is_vip = str(user_id) in ADMIN_IDS
 
     global active_download_count, waiting_queue_count
@@ -633,13 +719,22 @@ async def process_video_download(message: types.Message, url: str):
 
             sent_msgs = await message.answer_media_group(media=media_group)
             if sent_msgs and len(sent_msgs) > 0 and sent_msgs[0].photo:
+                f_id = sent_msgs[0].photo[-1].file_id
                 save_cached_media(
                     clean_url,
-                    sent_msgs[0].photo[-1].file_id,
+                    f_id,
                     "photo",
                     res.get("title", ""),
                     res.get("platform", ""),
                     res.get("author", "")
+                )
+                record_user_download(
+                    user_id,
+                    clean_url,
+                    f_id,
+                    "photo",
+                    res.get("title", ""),
+                    res.get("platform", "")
                 )
             try:
                 await status_msg.delete()
@@ -659,16 +754,26 @@ async def process_video_download(message: types.Message, url: str):
             sent = await message.answer_photo(
                 photo=photo_input,
                 caption=photo_caption,
+                reply_markup=share_kb,
                 parse_mode="HTML"
             )
             if sent and sent.photo:
+                f_id = sent.photo[-1].file_id
                 save_cached_media(
                     clean_url,
-                    sent.photo[-1].file_id,
+                    f_id,
                     "photo",
                     res.get("title", ""),
                     res.get("platform", ""),
                     res.get("author", "")
+                )
+                record_user_download(
+                    user_id,
+                    clean_url,
+                    f_id,
+                    "photo",
+                    res.get("title", ""),
+                    res.get("platform", "")
                 )
             try:
                 await status_msg.delete()
@@ -689,24 +794,35 @@ async def process_video_download(message: types.Message, url: str):
             sent = await message.answer_video(
                 video=video_input,
                 caption=caption,
+                reply_markup=share_kb,
                 parse_mode="HTML"
             )
         except Exception as html_send_err:
             logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
             sent = await message.answer_video(
                 video=video_input,
-                caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot"
+                caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
+                reply_markup=share_kb
             )
 
         # Сохраняем file_id в кэш для мгновенных ответов в будущем
         if sent and sent.video and sent.video.file_id:
+            v_id = sent.video.file_id
             save_cached_media(
                 clean_url,
-                sent.video.file_id,
+                v_id,
                 "video",
                 res.get("title", ""),
                 res.get("platform", ""),
                 res.get("author", "")
+            )
+            record_user_download(
+                user_id,
+                clean_url,
+                v_id,
+                "video",
+                res.get("title", ""),
+                res.get("platform", "")
             )
 
         # Удаляем сервисное сообщение со статусом
@@ -1125,24 +1241,97 @@ async def background_cache_media(clean_url: str, user_id: int):
 @dp.inline_query()
 async def inline_query_handler(inline_query: InlineQuery):
     query = inline_query.query.strip()
+    user_id = inline_query.from_user.id
+    caption_enabled = get_user_inline_caption(user_id)
 
+    # 1. Если запрос ПУСТОЙ (пользователь ввёл @duo_play_date_bot в чате):
+    # Показываем список его последних скачанных видео/фото (КАК В SAVEBOX)!
     if not query:
+        recents = get_user_recent_downloads(user_id, limit=15)
+        if recents:
+            results = []
+            for item in recents:
+                title_esc = html.escape(item["title"])
+                plat_esc = html.escape(item["platform"].capitalize())
+                f_id = item["file_id"]
+                if item["media_type"] == "photo":
+                    full_caption = (
+                        f"📸 <b>{title_esc}</b>\n\n"
+                        f"📱 {plat_esc} | ✨ <i>Скачано через @duo_play_date_bot</i>"
+                    )
+                    clean_res = InlineQueryResultCachedPhoto(
+                        id=f"rec_cp_{abs(hash(f_id))}",
+                        photo_file_id=f_id,
+                        title=f"📸 {item['title'][:40]}",
+                        description=f"Недавнее фото ({plat_esc}) • Без текста",
+                        caption=None
+                    )
+                    full_res = InlineQueryResultCachedPhoto(
+                        id=f"rec_fp_{abs(hash(f_id))}",
+                        photo_file_id=f_id,
+                        title=f"📝 {item['title'][:40]}",
+                        description=f"С описанием: {plat_esc}",
+                        caption=full_caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    full_caption = (
+                        f"🎬 <b>{title_esc}</b>\n\n"
+                        f"📱 {plat_esc} | ✨ <i>Скачано через @duo_play_date_bot без рекламы</i>"
+                    )
+                    clean_res = InlineQueryResultCachedVideo(
+                        id=f"rec_cv_{abs(hash(f_id))}",
+                        video_file_id=f_id,
+                        title=f"🎬 {item['title'][:40]}",
+                        description=f"Недавнее видео ({plat_esc}) • Чистое",
+                        caption=None
+                    )
+                    full_res = InlineQueryResultCachedVideo(
+                        id=f"rec_fv_{abs(hash(f_id))}",
+                        video_file_id=f_id,
+                        title=f"📝 {item['title'][:40]}",
+                        description=f"С описанием: {plat_esc}",
+                        caption=full_caption,
+                        parse_mode="HTML"
+                    )
+
+                if caption_enabled:
+                    results.extend([full_res, clean_res])
+                else:
+                    results.extend([clean_res, full_res])
+
+            await inline_query.answer(
+                results=results,
+                cache_time=5,
+                is_personal=True,
+                switch_pm_text="📥 Скачать новое видео в боте",
+                switch_pm_parameter="help"
+            )
+            return
+
         results = [
             InlineQueryResultArticle(
                 id="hint_empty",
-                title="📥 Вставь ссылку на видео или фото",
-                description="TikTok, YouTube Shorts или Instagram Reels/Фото",
+                title="📥 Здесь появятся твои недавние видео",
+                description="Отправь ссылку боту в ЛС, и видео появится здесь для отправки в 1 клик!",
                 thumbnail_url="https://cdn-icons-png.flaticon.com/512/3074/3074767.png",
                 input_message_content=InputTextMessageContent(
                     message_text=(
-                        "💡 **Как скачать видео без водяных знаков и рекламы:**\n\n"
-                        "Введи `@duo_play_date_bot <ссылка>` в любом чате или отправь ссылку боту в личные сообщения!"
+                        "💡 **Как отправлять видео через @duo_play_date_bot:**\n\n"
+                        "1. Отправь ссылку на TikTok, Reels или Shorts боту в ЛС.\n"
+                        "2. В любом чате напиши `@duo_play_date_bot ` — и отправляй видео в один клик!"
                     ),
                     parse_mode="Markdown"
                 )
             )
         ]
-        await inline_query.answer(results=results, cache_time=10, is_personal=True)
+        await inline_query.answer(
+            results=results,
+            cache_time=5,
+            is_personal=True,
+            switch_pm_text="🚀 Открыть бота и скачать видео",
+            switch_pm_parameter="help"
+        )
         return
 
     clean_url = extract_url(query)
@@ -1163,10 +1352,8 @@ async def inline_query_handler(inline_query: InlineQuery):
         return
 
     results = []
-    user_id = inline_query.from_user.id
-    caption_enabled = get_user_inline_caption(user_id)
 
-    # 1. Проверяем кэш бота: если медиа уже в кэше Telegram — отдаем файл мгновенно!
+    # 2. Проверяем кэш бота: если медиа уже скачивалось — отдаем файл мгновенно!
     cached = get_cached_media(clean_url)
     if cached and cached.get("file_id"):
         title_esc = html.escape(cached.get("title") or "Медиа")
@@ -1221,74 +1408,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=results, cache_time=300, is_personal=True)
         return
 
-    # 2. Если медиа ещё нет в кэше: пробуем быстро скачать и загрузить в Telegram (< 2.2 сек)
-    # Для Instagram и TikTok это занимает всего 0.4 - 0.9 сек!
-    try:
-        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=2.2)
-        if res:
-            f_path = res.get("file_path")
-            is_photo = bool(res.get("is_photo") or (f_path and f_path.endswith((".jpg", ".jpeg", ".png"))))
-
-            # Если это альбом (карусель) — берем первое фото
-            if res.get("is_album") and res.get("photos"):
-                f_path = res["photos"][0]
-                is_photo = True
-
-            if f_path and os.path.exists(f_path):
-                file_id = await upload_media_to_telegram(f_path, is_photo, user_id)
-                if file_id:
-                    m_type = "photo" if is_photo else "video"
-                    save_cached_media(clean_url, file_id, m_type, res.get("title", ""), res.get("platform", ""), res.get("author", ""))
-
-                    title_esc = html.escape(res.get("title") or ("Фото" if is_photo else "Видео"))
-                    plat_esc = html.escape(res.get("platform", "Медиа").capitalize())
-
-                    if is_photo:
-                        clean_res = InlineQueryResultCachedPhoto(
-                            id=f"live_cp_{abs(hash(file_id))}",
-                            photo_file_id=file_id,
-                            title="📸 Чистое фото (без текста)",
-                            description=f"{res.get('title') or 'Фото'} • Без текста",
-                            caption=None
-                        )
-                        full_res = InlineQueryResultCachedPhoto(
-                            id=f"live_fp_{abs(hash(file_id))}",
-                            photo_file_id=file_id,
-                            title=f"📝 {res.get('title') or 'Фото'}",
-                            description=f"С описанием: {plat_esc}",
-                            caption=f"📸 <b>{title_esc}</b>\n\n📱 {plat_esc} | ✨ <i>Скачано через @duo_play_date_bot</i>",
-                            parse_mode="HTML"
-                        )
-                    else:
-                        clean_res = InlineQueryResultCachedVideo(
-                            id=f"live_cv_{abs(hash(file_id))}",
-                            video_file_id=file_id,
-                            title="🎬 Чистое видео (без текста)",
-                            description=f"{res.get('title') or 'Видео'} • Без текста и водяных знаков",
-                            caption=None
-                        )
-                        full_res = InlineQueryResultCachedVideo(
-                            id=f"live_fv_{abs(hash(file_id))}",
-                            video_file_id=file_id,
-                            title=f"📝 {res.get('title') or 'Видео'}",
-                            description=f"С описанием: {plat_esc}",
-                            caption=f"🎬 <b>{title_esc}</b>\n\n📱 {plat_esc} | ✨ <i>Скачано через @duo_play_date_bot без рекламы</i>",
-                            parse_mode="HTML"
-                        )
-
-                    if caption_enabled:
-                        results.extend([full_res, clean_res])
-                    else:
-                        results.extend([clean_res, full_res])
-
-                    await inline_query.answer(results=results, cache_time=300, is_personal=True)
-                    return
-    except asyncio.TimeoutError:
-        logging.info(f"Fast inline download timed out for {clean_url}, switching to background...")
-    except Exception as e:
-        logging.warning(f"Fast inline download failed for {clean_url}: {e}")
-
-    # 2.1 Для TikTok: мгновенный прямой поток через TikWM API (если локально не успели)
+    # 3. Для TikTok: если есть быстрый прямой поток без вотермарки через TikWM
     if platform == "tiktok":
         direct_info = await extract_direct_video_info(clean_url)
         if direct_info and direct_info.get("video_url"):
@@ -1320,8 +1440,7 @@ async def inline_query_handler(inline_query: InlineQuery):
             await inline_query.answer(results=results, cache_time=60, is_personal=True)
             return
 
-    # 3. Если прямого видеопотока нет (YouTube Shorts требует склейки на сервере):
-    # Фоново запускаем загрузку в кэш Telegram
+    # 4. Если медиа ещё не скачано — запускаем фоновое кэширование
     asyncio.create_task(background_cache_media(clean_url, user_id))
 
     token = save_dl_token(clean_url)
@@ -1331,13 +1450,12 @@ async def inline_query_handler(inline_query: InlineQuery):
         "tiktok": "TikTok"
     }.get(platform, "Видео")
 
-    # В результатах отдаем только чистую ссылку (никаких навязчивых текстов с кнопками в чужие чаты!)
-    # А вверху показываем нативную кнопку перехода в бота
+    # Предлагаем нативно перейти в бота (стиль SaveBox)
     results.append(
         InlineQueryResultArticle(
-            id=f"clean_link_{abs(hash(clean_url))}",
-            title=f"⏳ {plat_title}: нажмите кнопку вверху",
-            description=f"Или нажмите для отправки ссылки (видео обрабатывается)",
+            id=f"dl_{abs(hash(clean_url))}",
+            title=f"⚡ Скачать {plat_title} в боте",
+            description="Нажми кнопку вверху или здесь, чтобы бот прислал файл в ЛС",
             thumbnail_url="https://cdn-icons-png.flaticon.com/512/727/727245.png",
             input_message_content=InputTextMessageContent(
                 message_text=clean_url
@@ -1349,7 +1467,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         results=results,
         cache_time=2,
         is_personal=True,
-        switch_pm_text=f"⚡ Загрузить {plat_title} в боте",
+        switch_pm_text=f"⚡ Скачать {plat_title} в боте",
         switch_pm_parameter=f"dl_{token}"
     )
 
