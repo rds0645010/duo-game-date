@@ -3,6 +3,7 @@ import json
 import sqlite3
 import logging
 import asyncio
+import base64
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
@@ -11,8 +12,15 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     WebAppInfo,
-    MenuButtonWebApp
+    MenuButtonWebApp,
+    InlineQuery,
+    InlineQueryResultVideo,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedVideo,
+    InputTextMessageContent,
+    FSInputFile
 )
+from downloader import detect_platform, extract_url, download_video, parse_tiktok_tikwm
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -25,6 +33,16 @@ WEBAPP_URL = os.getenv("WEBAPP_URL", "https://rds0645010.github.io/duo-game-date
 ORGANIZER_CHAT_ID = os.getenv("ORGANIZER_CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", 8080))
 DB_PATH = "users.db"
+
+# 👑 ПРИОРИТЕТ И ОЧЕРЕДИ СКАЧИВАНИЯ
+ADMIN_ID_RAW = os.getenv("ADMIN_ID", "").strip()
+ADMIN_IDS = set([x.strip() for x in ADMIN_ID_RAW.split(",") if x.strip()])
+
+MAX_CONCURRENT_DOWNLOADS = 2
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+active_download_count = 0
+waiting_queue_count = 0
+queue_lock = asyncio.Lock()
 
 
 def init_db():
@@ -56,6 +74,50 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS video_cache (
+            url TEXT PRIMARY KEY,
+            file_id TEXT,
+            title TEXT,
+            platform TEXT,
+            author TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_cached_video(url: str):
+    if not url:
+        return None
+    clean_u = url.split("?")[0].strip().rstrip("/")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_id, title, platform, author FROM video_cache WHERE url = ?", (clean_u,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"file_id": row[0], "title": row[1], "platform": row[2], "author": row[3]}
+    return None
+
+
+def save_cached_video(url: str, file_id: str, title: str, platform: str, author: str = ""):
+    if not url or not file_id:
+        return
+    clean_u = url.split("?")[0].strip().rstrip("/")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO video_cache (url, file_id, title, platform, author)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+            file_id = excluded.file_id,
+            title = excluded.title,
+            platform = excluded.platform,
+            author = excluded.author,
+            created_at = CURRENT_TIMESTAMP
+    """, (clean_u, file_id, title, platform, author))
     conn.commit()
     conn.close()
 
@@ -156,6 +218,162 @@ def get_app_url():
     return base
 
 
+async def process_video_download(message: types.Message, url: str):
+    clean_url = extract_url(url) or url
+    platform = detect_platform(clean_url)
+    if not platform:
+        await message.answer("⚠️ Не удалось определить платформу. Поддерживаются: TikTok, YouTube Shorts, Reels.")
+        return
+
+    # 1. Проверяем кэш (если видео уже скачивалось ранее — отдаём МГНОВЕННО)
+    cached = get_cached_video(clean_url)
+    if cached and cached.get("file_id"):
+        caption = (
+            f"🎬 **{cached['title'] or 'Видео'}**\n\n"
+            f"📱 Источник: {cached.get('platform', 'Видео').capitalize()}\n"
+            f"✨ Скачано без водяных знаков и рекламы через @duo_play_date_bot (⚡ мгновенно из кэша)"
+        )
+        try:
+            await message.answer_video(
+                video=cached["file_id"],
+                caption=caption,
+                parse_mode="Markdown"
+            )
+            return
+        except Exception as e:
+            logging.warning(f"Failed to send cached file_id {cached['file_id']}: {e}")
+            # Если Telegram удалил file_id или ошибка — скачиваем заново
+
+    user_id = message.from_user.id
+    is_vip = str(user_id) in ADMIN_IDS
+
+    global active_download_count, waiting_queue_count
+
+    status_msg = None
+    queue_acquired = False
+    res = None
+
+    try:
+        # Проверяем занятость слотов
+        if download_semaphore.locked() and not is_vip:
+            async with queue_lock:
+                waiting_queue_count += 1
+                pos = waiting_queue_count
+            status_msg = await message.answer(
+                f"⏳ **В очереди на скачивание...**\n"
+                f"Твоя позиция: {pos}. Ожидаем завершения предыдущих загрузок 🚀"
+            )
+        else:
+            status_msg = await message.answer(
+                "⚡ **Обрабатываю видео...**\n"
+                "Скачиваем в максимальном качестве без водяных знаков..."
+            )
+
+        # VIP пользователи имеют безусловный приоритет
+        if is_vip:
+            queue_acquired = True
+            await status_msg.edit_text("👑 **VIP приоритет активен!**\nСкачиваю видео вне очереди без ожидания...")
+        else:
+            await download_semaphore.acquire()
+            queue_acquired = True
+            async with queue_lock:
+                if waiting_queue_count > 0:
+                    waiting_queue_count -= 1
+            await status_msg.edit_text("⚡ **Скачиваю видео...**\nОчищаю от водяных знаков и готовлю к отправке...")
+
+        # Выполняем скачивание
+        res = await download_video(clean_url, user_id)
+        file_path = res.get("file_path")
+
+        if not file_path or not os.path.exists(file_path):
+            await status_msg.edit_text("❌ Не удалось загрузить видео файл. Возможно, видео удалено или автор ограничил доступ.")
+            return
+
+        # Проверка размера (Telegram Bot API лимит 50 МБ)
+        file_size = os.path.getsize(file_path)
+        if file_size > 50 * 1024 * 1024:
+            await status_msg.edit_text(
+                f"⚠️ **Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)**\n\n"
+                f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
+                f"Попробуй более короткое видео или шортс."
+            )
+            return
+
+        await status_msg.edit_text("📤 **Отправляю видео в Telegram...**")
+
+        platform_names = {
+            "tiktok": "TikTok",
+            "youtube": "YouTube Shorts",
+            "instagram": "Instagram Reels"
+        }
+        plat_str = platform_names.get(res.get("platform"), "Видео")
+
+        caption = (
+            f"🎬 **{res.get('title', 'Видео')}**\n\n"
+            f"📱 Источник: {plat_str}"
+        )
+        if res.get("author"):
+            caption += f" | {res['author']}"
+        caption += "\n✨ Скачано без водяных знаков и рекламы через @duo_play_date_bot"
+
+        if res.get("low_quality_notice"):
+            caption += "\n\n*(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)*"
+
+        video_input = FSInputFile(file_path)
+        sent = await message.answer_video(
+            video=video_input,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+
+        # Сохраняем file_id в кэш для мгновенных ответов в будущем
+        if sent and sent.video and sent.video.file_id:
+            save_cached_video(
+                clean_url,
+                sent.video.file_id,
+                res.get("title", ""),
+                res.get("platform", ""),
+                res.get("author", "")
+            )
+
+        # Удаляем сервисное сообщение со статусом
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logging.error(f"Download processing failed for {clean_url}: {e}", exc_info=True)
+        err_text = str(e)
+        if "file_too_large" in err_text:
+            msg = "⚠️ Видео превышает 50 МБ (лимит Telegram). Мы не можем его загрузить."
+        elif "private" in err_text.lower() or "login" in err_text.lower():
+            msg = "🔒 Это приватное видео или требует авторизации в сервисе."
+        else:
+            msg = "❌ Не удалось скачать видео. Проверь правильность ссылки или попробуй другое видео."
+
+        if status_msg:
+            try:
+                await status_msg.edit_text(msg)
+            except Exception:
+                await message.answer(msg)
+        else:
+            await message.answer(msg)
+
+    finally:
+        # Освобождаем семафор
+        if queue_acquired and not is_vip:
+            download_semaphore.release()
+        # Удаляем временный файл с диска
+        if res and isinstance(res, dict) and res.get("file_path"):
+            fp = res["file_path"]
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except Exception as del_err:
+                    logging.warning(f"Could not remove temp file {fp}: {del_err}")
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject = None):
     user = message.from_user
@@ -166,6 +384,20 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
     )
 
     app_link = get_app_url()
+
+    # 🔗 Обработка перехода по ссылке на быстрое скачивание (?start=dl_...)
+    if command and command.args and command.args.startswith("dl_"):
+        try:
+            raw_b64 = command.args.replace("dl_", "").strip()
+            missing_padding = len(raw_b64) % 4
+            if missing_padding:
+                raw_b64 += '=' * (4 - missing_padding)
+            target_url = base64.b64decode(raw_b64).decode('utf-8')
+            if detect_platform(target_url):
+                await process_video_download(message, target_url)
+                return
+        except Exception as e:
+            logging.error(f"Error handling dl_ start: {e}")
 
     # 🔗 Обработка перехода по умной вирусной ссылке (?start=inv_123)
     if command and command.args and command.args.startswith("inv_"):
@@ -223,21 +455,24 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
             logging.error(f"Error handling deep link invite: {e}")
 
     welcome_text = (
-        f"👾 **DUO — ТВОЙ ХАБ ДЛЯ СОВМЕСТНЫХ ИГР** 🎮\n"
+        f"👾 **DUO — ИГРЫ И ЗАГРУЗЧИК ВИДЕО БЕЗ РЕКЛАМЫ** 🎮\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"Привет, {user.first_name}! 👋\n\n"
-        f"✨ **Зови тиммейтов** в любимые игры за 2 клика.\n"
-        f"🔔 **Получай инвайты** с кнопками прямо сюда в ЛС.\n"
-        f"📅 **Назначай тайминги** и собирай дуэты без долгих споров.\n"
+        f"✨ **Совместные игры в DUO:**\n"
+        f"• Зови тиммейтов в любимые игры за 2 клика\n"
+        f"• Назначай тайминги и собирай дуэты\n\n"
+        f"📥 **Загрузка видео без рекламы и водяных знаков:**\n"
+        f"• Отправь сюда любую ссылку на **TikTok, YouTube Shorts или Reels**\n"
+        f"• В чатах с друзьями пиши: `@duo_play_date_bot <ссылка>`, чтобы сразу переслать видео напарнику!\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Нажми кнопку ниже, чтобы открыть лобби и создать приглашение 👇"
+        f"Открой лобби игр ниже или скинь ссылку на видео прямо в чат 👇"
     )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🎮 Открыть DUO ✨",
+                    text="🎮 Открыть лобби DUO ✨",
                     web_app=WebAppInfo(url=app_link)
                 )
             ]
@@ -342,6 +577,170 @@ async def handle_decline(callback: types.CallbackQuery):
             )
         except Exception as e:
             logging.warning(f"Could not notify sender: {e}")
+
+
+# ==========================================
+# 📥 ИНЛАЙН РЕЖИМ (@duo_play_date_bot <ссылка>)
+# ==========================================
+@dp.inline_query()
+async def inline_query_handler(inline_query: InlineQuery):
+    query = inline_query.query.strip()
+
+    if not query:
+        results = [
+            InlineQueryResultArticle(
+                id="hint_empty",
+                title="📥 Вставь ссылку на видео",
+                description="TikTok (без вотермарки), YouTube Shorts или Instagram Reels",
+                thumbnail_url="https://cdn-icons-png.flaticon.com/512/3074/3074767.png",
+                input_message_content=InputTextMessageContent(
+                    message_text=(
+                        "💡 **Как скачать видео без водяных знаков и рекламы:**\n\n"
+                        "Введи `@duo_play_date_bot <ссылка>` в любом чате или отправь ссылку боту в личные сообщения!"
+                    ),
+                    parse_mode="Markdown"
+                )
+            )
+        ]
+        await inline_query.answer(results=results, cache_time=10, is_personal=True)
+        return
+
+    clean_url = extract_url(query)
+    platform = detect_platform(clean_url) if clean_url else None
+
+    if not platform or not clean_url:
+        results = [
+            InlineQueryResultArticle(
+                id="hint_unsupported",
+                title="⚠️ Ссылка не распознана",
+                description="Поддерживаются: TikTok, YouTube Shorts, Instagram Reels",
+                input_message_content=InputTextMessageContent(
+                    message_text="⚠️ Отправьте прямую ссылку на TikTok, YouTube Shorts или Instagram Reels!"
+                )
+            )
+        ]
+        await inline_query.answer(results=results, cache_time=10, is_personal=True)
+        return
+
+    results = []
+
+    # 1. Проверяем кэш бота: если видео уже в кэше Telegram — отдаем файл мгновенно!
+    cached = get_cached_video(clean_url)
+    if cached and cached.get("file_id"):
+        caption = (
+            f"🎬 **{cached['title'] or 'Видео'}**\n\n"
+            f"📱 {cached.get('platform', 'Видео').capitalize()} | ✨ Скачано через @duo_play_date_bot без водяных знаков и рекламы"
+        )
+        results.append(
+            InlineQueryResultCachedVideo(
+                id=f"cached_{abs(hash(cached['file_id']))}",
+                video_file_id=cached["file_id"],
+                title=f"🎬 {cached['title'] or 'Готовое видео'}",
+                description="⚡ Готово к отправке чистого видео прямо в чат!",
+                caption=caption,
+                parse_mode="Markdown"
+            )
+        )
+        await inline_query.answer(results=results, cache_time=300, is_personal=False)
+        return
+
+    # 2. Если TikTok — получаем прямой MP4 поток через быстрый TikWM API (< 1 сек)
+    if platform == "tiktok":
+        try:
+            tikwm_data = await parse_tiktok_tikwm(clean_url)
+            if tikwm_data and tikwm_data.get("video_url"):
+                caption = (
+                    f"🎬 **{tikwm_data.get('title', 'TikTok')}**\n\n"
+                    f"👤 {tikwm_data.get('author', 'TikTok')} | ✨ Без водяного знака через @duo_play_date_bot"
+                )
+                results.append(
+                    InlineQueryResultVideo(
+                        id=f"tt_{abs(hash(clean_url))}",
+                        video_url=tikwm_data["video_url"],
+                        mime_type="video/mp4",
+                        thumbnail_url=tikwm_data.get("cover") or "https://cdn-icons-png.flaticon.com/512/3046/3046121.png",
+                        title=f"🎬 {tikwm_data.get('title') or 'TikTok без водяного знака'}",
+                        description=f"👤 {tikwm_data.get('author', 'TikTok')} • Нажми для отправки чистого видео",
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
+                )
+                await inline_query.answer(results=results, cache_time=300, is_personal=False)
+                return
+        except Exception as e:
+            logging.warning(f"Inline TikWM parse error: {e}")
+
+    # 3. Для YouTube Shorts, Instagram Reels (или если TikTok не закэширован):
+    # Telegram Inline Query таймаутит через 2-3 секунды, поэтому отдаем интерактивную карточку
+    # с кнопкой 1-клик перехода в бота, которая мгновенно запускает скачивание и сохраняет в кэш
+    raw_b64 = base64.b64encode(clean_url.encode("utf-8")).decode("utf-8")
+    dl_link = f"https://t.me/duo_play_date_bot?start=dl_{raw_b64}"
+
+    plat_title = {
+        "youtube": "YouTube Shorts",
+        "instagram": "Instagram Reels",
+        "tiktok": "TikTok"
+    }.get(platform, "Видео")
+
+    results.append(
+        InlineQueryResultArticle(
+            id=f"dl_{abs(hash(clean_url))}",
+            title=f"📥 Скачать {plat_title} без рекламы",
+            description="Нажми, чтобы отправить инвайт на скачивание чистого видео",
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/727/727245.png",
+            input_message_content=InputTextMessageContent(
+                message_text=(
+                    f"🎬 **Чистое видео ({plat_title})**\n"
+                    f"🔗 {clean_url}\n\n"
+                    f"Нажми кнопку ниже, чтобы бот прислал готовое видео без водяных знаков 👇"
+                ),
+                parse_mode="Markdown"
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🚀 Скачать чистое видео в ЛС",
+                            url=dl_link
+                        )
+                    ]
+                ]
+            )
+        )
+    )
+    await inline_query.answer(results=results, cache_time=30, is_personal=True)
+
+
+# ==========================================
+# 💬 ОБРАБОТЧИК СООБЩЕНИЙ В ЛС БОТА
+# ==========================================
+@dp.message(F.text)
+async def handle_text_messages(message: types.Message):
+    # Проверяем наличие ссылок на видео
+    url = extract_url(message.text)
+    if url and detect_platform(url):
+        await process_video_download(message, url)
+        return
+
+    # Если обычное текстовое сообщение
+    app_link = get_app_url()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎮 Открыть лобби DUO ✨",
+                    web_app=WebAppInfo(url=app_link)
+                )
+            ]
+        ]
+    )
+    await message.answer(
+        "👾 **Я умею две вещи:**\n\n"
+        "1. 📥 **Скачивать видео без водяных знаков и рекламы** — просто отправь мне ссылку на **TikTok, YouTube Shorts или Instagram Reels**!\n\n"
+        "2. 🎮 **Организовывать совместные игры в DUO** — открой лобби по кнопке ниже и пригласи напарника в пару кликов!",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
 
 
 # ==========================================

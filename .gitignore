@@ -27,6 +27,7 @@ wheels/
 .env
 *.db
 users.db
+temp_downloads/
 
 # IDE & Editor
 .vscode/
