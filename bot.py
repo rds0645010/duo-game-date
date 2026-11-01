@@ -673,9 +673,10 @@ async def inline_query_handler(inline_query: InlineQuery):
     # 1. Проверяем кэш бота: если видео уже в кэше Telegram — отдаем файл мгновенно!
     cached = get_cached_video(clean_url)
     if cached and cached.get("file_id"):
+        title_esc = html.escape(cached.get("title") or "Видео")
         caption = (
-            f"🎬 **{cached['title'] or 'Видео'}**\n\n"
-            f"📱 {cached.get('platform', 'Видео').capitalize()} | ✨ Скачано через @duo_play_date_bot без водяных знаков и рекламы"
+            f"🎬 <b>{title_esc}</b>\n\n"
+            f"📱 {html.escape(cached.get('platform', 'Видео').capitalize())} | ✨ <i>Скачано через @duo_play_date_bot без рекламы</i>"
         )
         results.append(
             InlineQueryResultCachedVideo(
@@ -684,7 +685,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                 title=f"🎬 {cached['title'] or 'Готовое видео'}",
                 description="⚡ Готово к отправке чистого видео прямо в чат!",
                 caption=caption,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         )
         await inline_query.answer(results=results, cache_time=300, is_personal=False)
@@ -695,9 +696,11 @@ async def inline_query_handler(inline_query: InlineQuery):
         try:
             tikwm_data = await parse_tiktok_tikwm(clean_url)
             if tikwm_data and tikwm_data.get("video_url"):
+                title_esc = html.escape(tikwm_data.get("title", "TikTok"))
+                author_esc = html.escape(tikwm_data.get("author", "TikTok"))
                 caption = (
-                    f"🎬 **{tikwm_data.get('title', 'TikTok')}**\n\n"
-                    f"👤 {tikwm_data.get('author', 'TikTok')} | ✨ Без водяного знака через @duo_play_date_bot"
+                    f"🎬 <b>{title_esc}</b>\n\n"
+                    f"👤 {author_esc} | ✨ <i>Без водяного знака через @duo_play_date_bot</i>"
                 )
                 results.append(
                     InlineQueryResultVideo(
@@ -708,7 +711,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                         title=f"🎬 {tikwm_data.get('title') or 'TikTok без водяного знака'}",
                         description=f"👤 {tikwm_data.get('author', 'TikTok')} • Нажми для отправки чистого видео",
                         caption=caption,
-                        parse_mode="Markdown"
+                        parse_mode="HTML"
                     )
                 )
                 await inline_query.answer(results=results, cache_time=300, is_personal=False)
