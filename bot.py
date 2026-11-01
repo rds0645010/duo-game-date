@@ -33,6 +33,7 @@ from downloader import (
     download_video,
     parse_tiktok_tikwm,
     FFMPEG_PATH,
+    DOWNLOAD_DIR,
     extract_direct_video_info,
     parse_instagram_embed
 )
@@ -1181,38 +1182,76 @@ async def handle_decline(callback: types.CallbackQuery):
             logging.warning(f"Could not notify sender: {e}")
 
 
-_currently_caching = set()
+_stream_files = {}   # token -> local_file_path
+_stream_locks = {}   # token -> asyncio.Lock
 
-async def background_cache_media(clean_url: str):
+async def pre_cache_video_to_disk(clean_url: str, token: str):
     """
-    Фоновая тихая загрузка и кэширование медиа при инлайн-запросе.
-    Кэширует Telegram file_id и НИКОГДА не беспокоит пользователя сообщениями в ЛС!
+    Фоновая предварительная загрузка видео на диск в temp_downloads,
+    чтобы оно было готово к моменту запроса серверами Telegram.
     """
-    if clean_url in _currently_caching:
+    if token in _stream_files and os.path.exists(_stream_files[token]):
         return
-    _currently_caching.add(clean_url)
-    try:
-        res = await download_video(clean_url, 0)
-        if not res:
+    lock = _stream_locks.setdefault(token, asyncio.Lock())
+    async with lock:
+        if token in _stream_files and os.path.exists(_stream_files[token]):
             return
+        output_prefix = os.path.join(DOWNLOAD_DIR, f"dl_{token}")
+        try:
+            res = await download_video(clean_url, 0)
+            if res and res.get("file_path") and os.path.exists(res["file_path"]):
+                _stream_files[token] = res["file_path"]
+        except Exception as e:
+            logging.warning(f"Pre-cache error for {clean_url}: {e}")
 
-        is_photo = bool(res.get("is_photo"))
-        f_path = res.get("file_path")
-        if f_path and os.path.exists(f_path):
-            f_id = await upload_media_to_telegram(f_path, is_photo=is_photo, silent=True)
-            if f_id:
-                save_cached_media(
-                    clean_url,
-                    f_id,
-                    "photo" if is_photo else "video",
-                    res.get("title", ""),
-                    res.get("platform", ""),
-                    res.get("author", "")
-                )
-    except Exception as e:
-        logging.warning(f"Background cache error for {clean_url}: {e}")
-    finally:
-        _currently_caching.discard(clean_url)
+
+async def handle_stream_video(request: web.Request) -> web.StreamResponse:
+    """
+    HTTP endpoint для отдачи видео напрямую серверам Telegram (RFC 7233 Range requests).
+    Когда пользователь отправляет InlineQueryResultVideo в чат, Telegram скачивает MP4 отсюда.
+    """
+    media_key = request.match_info.get("media_key", "")
+    token = media_key.replace(".mp4", "").strip()
+
+    target_url = get_dl_token_url(token)
+    if not target_url:
+        return web.Response(text="Token not found or expired", status=404)
+
+    file_path = _stream_files.get(token)
+    if not file_path or not os.path.exists(file_path):
+        for fname in os.listdir(DOWNLOAD_DIR):
+            if fname.startswith(f"dl_{token}") and (fname.endswith(".mp4") or fname.endswith(".jpg")):
+                cand = os.path.join(DOWNLOAD_DIR, fname)
+                if os.path.exists(cand) and os.path.getsize(cand) > 500:
+                    file_path = cand
+                    _stream_files[token] = file_path
+                    break
+
+    if not file_path or not os.path.exists(file_path):
+        lock = _stream_locks.setdefault(token, asyncio.Lock())
+        async with lock:
+            file_path = _stream_files.get(token)
+            if not file_path or not os.path.exists(file_path):
+                try:
+                    res = await download_video(target_url, 0)
+                    if res and res.get("file_path") and os.path.exists(res["file_path"]):
+                        file_path = res["file_path"]
+                        _stream_files[token] = file_path
+                except Exception as e:
+                    logging.error(f"Stream handler download error: {e}")
+                    return web.Response(text=f"Download error: {e}", status=502)
+
+    if file_path and os.path.exists(file_path):
+        content_type = "video/mp4" if file_path.endswith(".mp4") else "image/jpeg"
+        return web.FileResponse(
+            file_path,
+            headers={
+                "Content-Type": content_type,
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "public, max-age=86400"
+            }
+        )
+    return web.Response(text="File not found", status=404)
 
 
 # ==========================================
@@ -1357,104 +1396,29 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
             return
 
-    # 4. Если ещё нет в кэше — пробуем быстрый префетч за 4.0 секунды
-    try:
-        res = await asyncio.wait_for(download_video(clean_url, 0), timeout=4.0)
-        if res and res.get("file_path"):
-            is_photo = bool(res.get("is_photo"))
-            f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo, silent=True)
-            if f_id:
-                save_cached_media(
-                    clean_url,
-                    f_id,
-                    "photo" if is_photo else "video",
-                    res.get("title", ""),
-                    res.get("platform", ""),
-                    res.get("author", "")
-                )
-                title_esc = html.escape(res.get("title") or plat_noun)
-                if caption_enabled:
-                    caption = (
-                        f"📸 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                        if is_photo else
-                        f"🎬 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                    )
-                else:
-                    caption = None
+    # 4. Для Instagram, YouTube и др: мгновенный стрим через наш Render сервер!
+    # Запускаем фоновую предзагрузку на диск, чтобы к моменту клика файл уже скачивался
+    token = save_dl_token(clean_url)
+    asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
 
-                if is_photo:
-                    single_result = InlineQueryResultCachedPhoto(
-                        id=f"f_p_{abs(hash(f_id))}",
-                        photo_file_id=f_id,
-                        title=f"💌 Поделиться фото из {plat_source}",
-                        caption=caption,
-                        parse_mode="HTML" if caption else None
-                    )
-                else:
-                    single_result = InlineQueryResultCachedVideo(
-                        id=f"f_v_{abs(hash(f_id))}",
-                        video_file_id=f_id,
-                        title=f"💌 Поделиться {plat_noun} из {plat_source}",
-                        caption=caption,
-                        parse_mode="HTML" if caption else None
-                    )
+    stream_url = f"{RENDER_EXTERNAL_URL}/stream/{token}.mp4"
+    single_result = InlineQueryResultVideo(
+        id=f"st_{token}",
+        video_url=stream_url,
+        mime_type="video/mp4",
+        thumbnail_url=plat_icon,
+        title=f"💌 Поделиться {plat_noun} из {plat_source}",
+        caption=caption,
+        parse_mode="HTML" if caption else None
+    )
 
-                await inline_query.answer(
-                    results=[single_result],
-                    cache_time=300,
-                    is_personal=True
-                )
-                return
-    except asyncio.TimeoutError:
-        # Видео скачивается дольше 4 секунд — продолжаем в фоне
-        asyncio.create_task(background_cache_media(clean_url))
-        results = [
-            InlineQueryResultArticle(
-                id=f"wait_{abs(hash(clean_url))}",
-                title=f"⏳ {plat_noun.capitalize()} из {plat_source} загружается...",
-                description="Подождите пару секунд и нажмите снова, или отправьте ссылку",
-                thumbnail_url=plat_icon,
-                input_message_content=InputTextMessageContent(
-                    message_text=clean_url
-                )
-            )
-        ]
-        await inline_query.answer(
-            results=results,
-            cache_time=1,
-            is_personal=True
-        )
-        return
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "age_restricted" in err_msg or "available to everyone" in err_msg or "certain audiences" in err_msg:
-            err_title = "🔞 Ролик 18+ (ограничение в Instagram)"
-            err_desc = "Instagram скрыл ролик от гостей (нажмите для инфо)"
-        elif "private" in err_msg or "login" in err_msg:
-            err_title = "🔒 Профиль закрыт"
-            err_desc = "Видео из приватного аккаунта (нажмите для инфо)"
-        else:
-            err_title = f"⚠️ Не удалось загрузить {plat_noun}"
-            err_desc = "Видео недоступно или удалено"
-
-        results = [
-            InlineQueryResultArticle(
-                id=f"err_{abs(hash(clean_url))}",
-                title=err_title,
-                description=err_desc,
-                thumbnail_url="https://cdn-icons-png.flaticon.com/512/1000/1000966.png",
-                input_message_content=InputTextMessageContent(
-                    message_text=format_friendly_error(e),
-                    parse_mode="HTML"
-                )
-            )
-        ]
-        await inline_query.answer(
-            results=results,
-            cache_time=10,
-            is_personal=True
-        )
-        return
+    # Отвечаем МГНОВЕННО (за 0.05 секунды!) — кнопка появляется сразу и отправляет чистое видео!
+    await inline_query.answer(
+        results=[single_result],
+        cache_time=300,
+        is_personal=True
+    )
+    return
 
 
 # ==========================================
@@ -1695,6 +1659,7 @@ def create_web_app():
     app.middlewares.append(cors_middleware)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/stream/{media_key}", handle_stream_video)
     app.router.add_get("/api/logs", handle_api_logs)
     app.router.add_get("/api/test_dl", handle_api_test_dl)
     app.router.add_get("/api/check_user", handle_api_check_user)
