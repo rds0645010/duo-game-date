@@ -544,10 +544,11 @@ def format_friendly_error(e: Exception) -> str:
             "Telegram не может получить доступ к закрытым профилям без пароля. "
             "Скачивать можно только видео из открытых публичных аккаунтов."
         )
-    elif "confirm your age" in err_text or "age-restricted" in err_text:
+    elif "confirm your age" in err_text or "age-restricted" in err_text or "instagram_age_restricted" in err_text or "available to everyone" in err_text or "certain audiences" in err_text:
         return (
-            "🔞 <b>Видео имеет возрастное ограничение (18+).</b>\n\n"
-            "Сервис требует подтверждения возраста в аккаунте, поэтому бот не может скачать его автоматически."
+            "🔞 <b>Это видео имеет возрастное ограничение (18+) в Instagram.</b>\n\n"
+            "Instagram закрыл доступ к этому ролику для гостей и требует подтверждения возраста.\n\n"
+            "💡 <i>Администратор может указать cookies аккаунта (INSTAGRAM_COOKIES) в настройках хостинга, чтобы бот мог загружать контент 18+.</i>"
         )
     elif "file_too_large" in err_text or "too large" in err_text:
         return (
@@ -1356,9 +1357,9 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
             return
 
-    # 4. Если ещё нет в кэше — пробуем быстрый префетч за 2.2 секунды
+    # 4. Если ещё нет в кэше — пробуем быстрый префетч за 4.0 секунды
     try:
-        res = await asyncio.wait_for(download_video(clean_url, 0), timeout=2.2)
+        res = await asyncio.wait_for(download_video(clean_url, 0), timeout=4.0)
         if res and res.get("file_path"):
             is_photo = bool(res.get("is_photo"))
             f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo, silent=True)
@@ -1404,31 +1405,56 @@ async def inline_query_handler(inline_query: InlineQuery):
                     is_personal=True
                 )
                 return
-    except Exception as e:
-        logging.debug(f"Fast prefetch inline timeout or error: {e}")
-
-    # 5. Если за 2.2 сек не успело — запускаем фоновое тихое кэширование (без ЛС!)
-    asyncio.create_task(background_cache_media(clean_url))
-
-    # И отдаем одну кнопку загрузки с логотипом платформы (стиль SavXBot, без switch_pm_text)
-    # cache_time=1 означает, что Telegram обновит результат, как только юзер подождет секунду!
-    results = [
-        InlineQueryResultArticle(
-            id=f"load_{abs(hash(clean_url))}",
-            title=f"💌 Поделиться {plat_noun} из {plat_source}",
-            description="⏳ Видео загружается... Нажмите через 2-3 секунды",
-            thumbnail_url=plat_icon,
-            input_message_content=InputTextMessageContent(
-                message_text=f"🎬 <b>{plat_noun.capitalize()} из {plat_source}</b>\n\n⏳ <i>Видео обрабатывается сервером... Отправьте его ещё раз через секунду!</i>",
-                parse_mode="HTML"
+    except asyncio.TimeoutError:
+        # Видео скачивается дольше 4 секунд — продолжаем в фоне
+        asyncio.create_task(background_cache_media(clean_url))
+        results = [
+            InlineQueryResultArticle(
+                id=f"wait_{abs(hash(clean_url))}",
+                title=f"⏳ {plat_noun.capitalize()} из {plat_source} загружается...",
+                description="Подождите пару секунд и нажмите снова, или отправьте ссылку",
+                thumbnail_url=plat_icon,
+                input_message_content=InputTextMessageContent(
+                    message_text=clean_url
+                )
             )
+        ]
+        await inline_query.answer(
+            results=results,
+            cache_time=1,
+            is_personal=True
         )
-    ]
-    await inline_query.answer(
-        results=results,
-        cache_time=1,
-        is_personal=True
-    )
+        return
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "age_restricted" in err_msg or "available to everyone" in err_msg or "certain audiences" in err_msg:
+            err_title = "🔞 Ролик 18+ (ограничение в Instagram)"
+            err_desc = "Instagram скрыл ролик от гостей (нажмите для инфо)"
+        elif "private" in err_msg or "login" in err_msg:
+            err_title = "🔒 Профиль закрыт"
+            err_desc = "Видео из приватного аккаунта (нажмите для инфо)"
+        else:
+            err_title = f"⚠️ Не удалось загрузить {plat_noun}"
+            err_desc = "Видео недоступно или удалено"
+
+        results = [
+            InlineQueryResultArticle(
+                id=f"err_{abs(hash(clean_url))}",
+                title=err_title,
+                description=err_desc,
+                thumbnail_url="https://cdn-icons-png.flaticon.com/512/1000/1000966.png",
+                input_message_content=InputTextMessageContent(
+                    message_text=format_friendly_error(e),
+                    parse_mode="HTML"
+                )
+            )
+        ]
+        await inline_query.answer(
+            results=results,
+            cache_time=10,
+            is_personal=True
+        )
+        return
 
 
 # ==========================================

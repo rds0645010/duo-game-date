@@ -396,6 +396,20 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     # Try pre-merged MP4 first (works even without ffmpeg), then bestvideo+bestaudio
     format_spec = f"best[ext=mp4][height<={height_limit}]/bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height_limit}][ext=mp4]/best[height<={height_limit}]/best"
     
+    # Cookies support for age-restricted / 18+ content (Instagram session or cookies.txt)
+    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    raw_cookies = os.environ.get("INSTAGRAM_COOKIES", "").strip()
+    if raw_cookies and not os.path.exists(cookies_path):
+        try:
+            with open(cookies_path, "w", encoding="utf-8") as cf:
+                cf.write("# Netscape HTTP Cookie File\n")
+                for part in raw_cookies.split(";"):
+                    if "=" in part:
+                        k, v = part.strip().split("=", 1)
+                        cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+        except Exception as ce:
+            logger.warning(f"Could not write cookies.txt: {ce}")
+
     ydl_opts = {
         'outtmpl': out_tmpl,
         'format': format_spec,
@@ -407,6 +421,9 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
+
+    if os.path.exists(cookies_path):
+        ydl_opts['cookiefile'] = cookies_path
 
     if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
@@ -547,14 +564,21 @@ async def download_video(url: str, user_id: int):
         err_msg = str(e)
         logger.warning(f"Download 720p failed for {clean_url}: {e}")
 
-        # Если в публикации нет видео (это фотопост или карусель в Instagram)
-        if "no video in this post" in err_msg.lower():
+        # Для Instagram: пробуем embed/альбомный парсер при ЛЮБОЙ ошибке yt-dlp
+        if platform == "instagram":
             m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', clean_url)
             if m:
                 shortcode = m.group(1)
-                media_res = await try_download_instagram_media(shortcode, output_prefix)
-                if media_res:
-                    return media_res
+                try:
+                    logger.info(f"Attempting Instagram embed/photo fallback for {shortcode}...")
+                    media_res = await try_download_instagram_media(shortcode, output_prefix)
+                    if media_res:
+                        return media_res
+                except Exception as fb_err:
+                    logger.warning(f"Instagram fallback failed: {fb_err}")
+
+        # Если в публикации нет видео (это фотопост или карусель в Instagram)
+        if "no video in this post" in err_msg.lower():
             raise Exception("is_photo_post")
 
         # If file too large or format error, retry in lower resolution (360p)
@@ -567,6 +591,11 @@ async def download_video(url: str, user_id: int):
                 return res
             except Exception as e2:
                 raise Exception(f"file_too_large: {e2}")
+
+        # Если это возрастное ограничение (18+) или закрытая аудитория в Instagram
+        if "available to everyone" in err_msg.lower() or "certain audiences" in err_msg.lower():
+            raise Exception("instagram_age_restricted")
+
         raise e
 
 
