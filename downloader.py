@@ -149,9 +149,100 @@ def _merge_image_audio_sync(image_path: str, audio_path: str, output_mp4: str) -
         return False
 
 
+async def parse_instagram_embed(url: str):
+    """
+    Быстро извлекает прямой URL видео или фото из публичного Instagram embed (< 1.5 сек).
+    Работает без авторизации и cookies.
+    """
+    m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
+    if not m:
+        return None
+    shortcode = m.group(1)
+    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    import html as py_html
+
+                    # 1. Извлекаем автора
+                    author = ""
+                    owner_match = re.search(r'"username":\s*"([^"]+)"', text)
+                    if not owner_match:
+                        owner_match = re.search(r'class="OwnerUsername[^"]*">([^<]+)<', text)
+                    if owner_match:
+                        author = py_html.unescape(owner_match.group(1)).strip()
+
+                    # 2. Извлекаем заголовок/описание
+                    title = ""
+                    cap_match = re.search(r'class="Caption"[^>]*>.*?<div[^>]*>([^<]+)<', text, re.DOTALL)
+                    if not cap_match:
+                        cap_match = re.search(r'<title>([^<]+)</title>', text)
+                    if cap_match:
+                        title = py_html.unescape(cap_match.group(1)).strip()
+
+                    # 3. Ищем прямое видео
+                    video_matches = re.findall(r'"video_url":\s*"([^"]+)"', text)
+                    if video_matches:
+                        v_url = py_html.unescape(video_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
+                        thumb = ""
+                        disp_matches = re.findall(r'"display_url":\s*"([^"]+)"', text)
+                        if disp_matches:
+                            thumb = py_html.unescape(disp_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
+                        return {
+                            "success": True,
+                            "platform": "instagram",
+                            "is_video": True,
+                            "video_url": v_url,
+                            "title": title or "Instagram Reels",
+                            "author": author or "Instagram",
+                            "thumbnail": thumb or f"https://www.instagram.com/p/{shortcode}/media/?size=l"
+                        }
+
+                    # 4. Ищем прямое фото (если видео нет)
+                    photo_matches = re.findall(r'"display_url":\s*"([^"]+)"', text)
+                    if not photo_matches:
+                        photo_matches = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', text)
+                    if not photo_matches:
+                        photo_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', text)
+
+                    if photo_matches:
+                        p_url = py_html.unescape(photo_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
+                        return {
+                            "success": True,
+                            "platform": "instagram",
+                            "is_photo": True,
+                            "photo_url": p_url,
+                            "title": title or "Instagram Фото",
+                            "author": author or "Instagram",
+                            "thumbnail": p_url
+                        }
+    except Exception as e:
+        logger.debug(f"Instagram embed fast parse failed: {e}")
+
+    # Fallback на официальный публичный медиа-редирект
+    media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
+    return {
+        "success": True,
+        "platform": "instagram",
+        "is_photo": True,
+        "photo_url": media_url,
+        "title": "Instagram Фото",
+        "author": "Instagram",
+        "thumbnail": media_url
+    }
+
+
 async def try_download_instagram_media(shortcode: str, output_prefix: str):
     """
-    Скачивает фотопост или карусель (альбом) из Instagram.
+    Скачивает видео, фотопост или карусель (альбом) из Instagram.
+    Если обнаружено видео в embed, скачивает его напрямую.
     Если обнаружено несколько слайдов, возвращает список фото для Telegram MediaGroup.
     Если один слайд с аудио, конвертирует в видео.
     """
@@ -163,12 +254,36 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
     embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
     img_urls = []
     audio_url = None
+    direct_video_url = None
+    title = ""
+    author = ""
 
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     html_text = await resp.text()
+                    import html as py_html
+
+                    # Ищем автора
+                    owner_match = re.search(r'"username":\s*"([^"]+)"', html_text)
+                    if not owner_match:
+                        owner_match = re.search(r'class="OwnerUsername[^"]*">([^<]+)<', html_text)
+                    if owner_match:
+                        author = py_html.unescape(owner_match.group(1)).strip()
+
+                    # Ищем заголовок
+                    cap_match = re.search(r'class="Caption"[^>]*>.*?<div[^>]*>([^<]+)<', html_text, re.DOTALL)
+                    if not cap_match:
+                        cap_match = re.search(r'<title>([^<]+)</title>', html_text)
+                    if cap_match:
+                        title = py_html.unescape(cap_match.group(1)).strip()
+
+                    # Проверяем, есть ли прямое видео
+                    video_matches = re.findall(r'"video_url":\s*"([^"]+)"', html_text)
+                    if video_matches:
+                        direct_video_url = py_html.unescape(video_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
+
                     # Ищем display_url из данных json
                     raw_urls = re.findall(r'"display_url":\s*"([^"]+)"', html_text)
                     if not raw_urls:
@@ -179,19 +294,33 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
                     # Ищем аудиодорожку, если есть
                     audio_matches = re.findall(r'"audio_src":\s*"([^"]+)"', html_text)
                     if audio_matches:
-                        import html as py_html
-                        audio_url = py_html.unescape(audio_matches[0])
+                        audio_url = py_html.unescape(audio_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
 
-                    import html as py_html
                     seen = set()
                     for u in raw_urls:
-                        cleaned = py_html.unescape(u).replace("\\u0026", "&")
+                        cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
                         base = cleaned.split("?")[0]
                         if base not in seen:
                             seen.add(base)
                             img_urls.append(cleaned)
         except Exception as e:
             logger.debug(f"Embed parse error: {e}")
+
+    # Если в embed нашлось прямое видео — скачиваем его как видео MP4
+    if direct_video_url:
+        dest_video = f"{output_prefix}.mp4"
+        try:
+            await download_file_from_url(direct_video_url, dest_video)
+            if os.path.exists(dest_video) and os.path.getsize(dest_video) > 1000:
+                return {
+                    "file_path": dest_video,
+                    "platform": "instagram",
+                    "title": title or "Instagram Reels",
+                    "author": author or "Instagram",
+                    "filesize": os.path.getsize(dest_video)
+                }
+        except Exception as e:
+            logger.warning(f"Direct embed video download failed: {e}")
 
     # Fallback на прямой media endpoint если ничего не нашлось
     if not img_urls:
@@ -214,8 +343,8 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
                 "is_album": True,
                 "photos": album_photos,
                 "platform": "instagram",
-                "title": "Instagram Альбом",
-                "author": ""
+                "title": title or "Instagram Альбом",
+                "author": author or "Instagram"
             }
 
     # Если слайд один
@@ -235,8 +364,8 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
                     return {
                         "file_path": mp4_dest,
                         "platform": "instagram",
-                        "title": "Instagram Видео (Фото со звуком)",
-                        "author": "",
+                        "title": title or "Instagram Видео (Фото со звуком)",
+                        "author": author or "Instagram",
                         "filesize": os.path.getsize(mp4_dest)
                     }
             except Exception as e:
@@ -246,8 +375,8 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
             "file_path": single_dest,
             "is_photo": True,
             "platform": "instagram",
-            "title": "Instagram Фото",
-            "author": "",
+            "title": title or "Instagram Фото",
+            "author": author or "Instagram",
             "filesize": os.path.getsize(single_dest) if os.path.exists(single_dest) else 0
         }
     except Exception as e:
@@ -444,7 +573,8 @@ async def download_video(url: str, user_id: int):
 async def extract_direct_video_info(url: str):
     """
     Fast metadata extractor for Telegram Inline Query (< 2.5 seconds timeout).
-    Returns direct MP4 streaming URL so Telegram can send the actual video without downloading locally.
+    Returns direct MP4 streaming URL or direct JPG photo URL so Telegram can send
+    the actual video or photo without downloading locally.
     """
     platform = detect_platform(url)
     clean_url = extract_url(url) or url
@@ -452,17 +582,35 @@ async def extract_direct_video_info(url: str):
     # 1. TikTok: instant via TikWM (< 0.5s)
     if platform == "tiktok":
         tikwm_data = await parse_tiktok_tikwm(clean_url)
-        if tikwm_data and tikwm_data.get("video_url"):
-            return {
-                "success": True,
-                "platform": "tiktok",
-                "video_url": tikwm_data["video_url"],
-                "title": tikwm_data.get("title") or "TikTok",
-                "author": tikwm_data.get("author") or "TikTok",
-                "thumbnail": tikwm_data.get("cover") or ""
-            }
+        if tikwm_data:
+            if tikwm_data.get("video_url"):
+                return {
+                    "success": True,
+                    "platform": "tiktok",
+                    "is_video": True,
+                    "video_url": tikwm_data["video_url"],
+                    "title": tikwm_data.get("title") or "TikTok",
+                    "author": tikwm_data.get("author") or "TikTok",
+                    "thumbnail": tikwm_data.get("cover") or ""
+                }
+            elif tikwm_data.get("is_photo") and tikwm_data.get("photo_urls"):
+                return {
+                    "success": True,
+                    "platform": "tiktok",
+                    "is_photo": True,
+                    "photo_url": tikwm_data["photo_urls"][0],
+                    "title": tikwm_data.get("title") or "TikTok Фото",
+                    "author": tikwm_data.get("author") or "TikTok",
+                    "thumbnail": tikwm_data.get("cover") or tikwm_data["photo_urls"][0]
+                }
 
-    # 2. Instagram & other direct streams via fast yt-dlp metadata extract
+    # 2. Instagram: instant via public embed (< 1.2s)
+    if platform == "instagram":
+        ig_data = await parse_instagram_embed(clean_url)
+        if ig_data:
+            return ig_data
+
+    # 3. YouTube Shorts & other direct streams via fast yt-dlp metadata extract
     def _fast_extract():
         ydl_opts = {
             'quiet': True,
@@ -488,6 +636,7 @@ async def extract_direct_video_info(url: str):
                 return {
                     "success": True,
                     "platform": platform or "video",
+                    "is_video": True,
                     "video_url": v_url,
                     "title": info.get("title") or "Видео",
                     "author": info.get("uploader") or info.get("channel") or "",
