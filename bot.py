@@ -10,7 +10,7 @@ import shutil
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -105,8 +105,45 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            inline_caption INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
+
+
+def get_user_inline_caption(user_id: int) -> bool:
+    if not user_id:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT inline_caption FROM user_settings WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row is not None:
+        return bool(row[0])
+    return False  # По умолчанию выключена: чистое видео без текста!
+
+
+def set_user_inline_caption(user_id: int, enabled: bool):
+    if not user_id:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_settings (user_id, inline_caption)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            inline_caption = excluded.inline_caption,
+            updated_at = CURRENT_TIMESTAMP
+    """, (user_id, 1 if enabled else 0))
+    conn.commit()
+    conn.close()
+
 
 
 def get_cached_video(url: str):
@@ -521,6 +558,12 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
                     text="🎮 Открыть лобби DUO ✨",
                     web_app=WebAppInfo(url=app_link)
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Настройки подписи в чатах",
+                    callback_data="open_settings"
+                )
             ]
         ]
     )
@@ -537,6 +580,92 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
         logging.warning(f"Menu button warning: {e}")
 
     await message.answer(welcome_text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+def get_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    is_enabled = get_user_inline_caption(user_id)
+    btn_text = "🟢 Подпись: Включена" if is_enabled else "⚪ Подпись: Выключена"
+    toggle_val = "0" if is_enabled else "1"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{btn_text} (нажми для смены)",
+                    callback_data=f"toggle_caption_{toggle_val}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎮 Открыть лобби DUO ✨",
+                    web_app=WebAppInfo(url=get_app_url())
+                )
+            ]
+        ]
+    )
+
+
+def get_settings_text(user_id: int) -> str:
+    is_enabled = get_user_inline_caption(user_id)
+    mode_descr = (
+        "🟢 <b>Включена</b> — под видео будет автор, название и ссылка"
+        if is_enabled else
+        "⚪ <b>Выключена (по умолчанию)</b> — видео отправляется абсолютно чистым, без текста"
+    )
+    return (
+        "⚙️ <b>НАСТРОЙКИ ЗАГРУЗЧИКА И DUO</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+        "💬 <b>Подпись к видео при отправке через @ в чатах:</b>\n\n"
+        f"Текущий режим: {mode_descr}\n\n"
+        "<i>Нажми на кнопку ниже, чтобы переключить режим:</i>"
+    )
+
+
+@dp.message(Command("settings"))
+@dp.message(F.text == "/settings")
+@dp.message(F.text == "⚙️ Настройки")
+async def cmd_settings(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(
+        get_settings_text(user_id),
+        reply_markup=get_settings_keyboard(user_id),
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "open_settings")
+async def handle_open_settings(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            get_settings_text(user_id),
+            reply_markup=get_settings_keyboard(user_id),
+            parse_mode="HTML"
+        )
+    except Exception:
+        await callback.message.answer(
+            get_settings_text(user_id),
+            reply_markup=get_settings_keyboard(user_id),
+            parse_mode="HTML"
+        )
+
+
+@dp.callback_query(F.data.startswith("toggle_caption_"))
+async def callback_toggle_caption(callback: types.CallbackQuery):
+    new_val = callback.data.replace("toggle_caption_", "") == "1"
+    set_user_inline_caption(callback.from_user.id, new_val)
+
+    tip = "🟢 Подпись к видео включена!" if new_val else "⚪ Чистый режим активирован (без текста)!"
+    await callback.answer(tip)
+    try:
+        await callback.message.edit_text(
+            get_settings_text(callback.from_user.id),
+            reply_markup=get_settings_keyboard(callback.from_user.id),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
 
 
 @dp.callback_query(F.data.startswith("accept_"))
@@ -669,26 +798,38 @@ async def inline_query_handler(inline_query: InlineQuery):
         return
 
     results = []
+    user_id = inline_query.from_user.id
+    caption_enabled = get_user_inline_caption(user_id)
 
     # 1. Проверяем кэш бота: если видео уже в кэше Telegram — отдаем файл мгновенно!
     cached = get_cached_video(clean_url)
     if cached and cached.get("file_id"):
         title_esc = html.escape(cached.get("title") or "Видео")
-        caption = (
+        full_caption = (
             f"🎬 <b>{title_esc}</b>\n\n"
             f"📱 {html.escape(cached.get('platform', 'Видео').capitalize())} | ✨ <i>Скачано через @duo_play_date_bot без рекламы</i>"
         )
-        results.append(
-            InlineQueryResultCachedVideo(
-                id=f"cached_{abs(hash(cached['file_id']))}",
-                video_file_id=cached["file_id"],
-                title=f"🎬 {cached['title'] or 'Готовое видео'}",
-                description="⚡ Готово к отправке чистого видео прямо в чат!",
-                caption=caption,
-                parse_mode="HTML"
-            )
+        clean_res = InlineQueryResultCachedVideo(
+            id=f"clean_{abs(hash(cached['file_id']))}",
+            video_file_id=cached["file_id"],
+            title="🎬 Чистое видео (без текста)",
+            description=f"{cached['title'] or 'Видео'} • Без текста и подписей",
+            caption=None
         )
-        await inline_query.answer(results=results, cache_time=300, is_personal=False)
+        full_res = InlineQueryResultCachedVideo(
+            id=f"full_{abs(hash(cached['file_id']))}",
+            video_file_id=cached["file_id"],
+            title=f"📝 {cached['title'] or 'Видео'}",
+            description=f"С описанием: {cached.get('platform', '').capitalize()}",
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+        if caption_enabled:
+            results.extend([full_res, clean_res])
+        else:
+            results.extend([clean_res, full_res])
+
+        await inline_query.answer(results=results, cache_time=5, is_personal=True)
         return
 
     # 2. Если TikTok — получаем прямой MP4 поток через быстрый TikWM API (< 1 сек)
@@ -698,23 +839,36 @@ async def inline_query_handler(inline_query: InlineQuery):
             if tikwm_data and tikwm_data.get("video_url"):
                 title_esc = html.escape(tikwm_data.get("title", "TikTok"))
                 author_esc = html.escape(tikwm_data.get("author", "TikTok"))
-                caption = (
+                full_caption = (
                     f"🎬 <b>{title_esc}</b>\n\n"
                     f"👤 {author_esc} | ✨ <i>Без водяного знака через @duo_play_date_bot</i>"
                 )
-                results.append(
-                    InlineQueryResultVideo(
-                        id=f"tt_{abs(hash(clean_url))}",
-                        video_url=tikwm_data["video_url"],
-                        mime_type="video/mp4",
-                        thumbnail_url=tikwm_data.get("cover") or "https://cdn-icons-png.flaticon.com/512/3046/3046121.png",
-                        title=f"🎬 {tikwm_data.get('title') or 'TikTok без водяного знака'}",
-                        description=f"👤 {tikwm_data.get('author', 'TikTok')} • Нажми для отправки чистого видео",
-                        caption=caption,
-                        parse_mode="HTML"
-                    )
+                cover_url = tikwm_data.get("cover") or "https://cdn-icons-png.flaticon.com/512/3046/3046121.png"
+                clean_res = InlineQueryResultVideo(
+                    id=f"tt_clean_{abs(hash(clean_url))}",
+                    video_url=tikwm_data["video_url"],
+                    mime_type="video/mp4",
+                    thumbnail_url=cover_url,
+                    title="🎬 Чистое видео (без текста)",
+                    description="Только чистый видеоролик без подписи",
+                    caption=None
                 )
-                await inline_query.answer(results=results, cache_time=300, is_personal=False)
+                full_res = InlineQueryResultVideo(
+                    id=f"tt_full_{abs(hash(clean_url))}",
+                    video_url=tikwm_data["video_url"],
+                    mime_type="video/mp4",
+                    thumbnail_url=cover_url,
+                    title=f"📝 {tikwm_data.get('title') or 'TikTok'}",
+                    description=f"👤 {tikwm_data.get('author', 'TikTok')} • С подписью",
+                    caption=full_caption,
+                    parse_mode="HTML"
+                )
+                if caption_enabled:
+                    results.extend([full_res, clean_res])
+                else:
+                    results.extend([clean_res, full_res])
+
+                await inline_query.answer(results=results, cache_time=5, is_personal=True)
                 return
         except Exception as e:
             logging.warning(f"Inline TikWM parse error: {e}")
