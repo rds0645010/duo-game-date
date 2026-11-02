@@ -390,41 +390,61 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
 def setup_cookies_file():
     """
     Создает файл cookies.txt для yt-dlp из переменных окружения
-    INSTAGRAM_COOKIES и YOUTUBE_COOKIES. Поддерживает как стандартный
-    формат Netscape, так и строковый заголовок Cookie (key=val; key2=val2).
+    INSTAGRAM_COOKIES и YOUTUBE_COOKIES, либо автоматически генерирует
+    анонимную гостевую сессию (Guest Session) с YouTube, не требующую аккаунта.
     """
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
     raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
     raw_yt = os.environ.get("YOUTUBE_COOKIES", "").strip()
 
-    if not raw_ig and not raw_yt:
+    if raw_ig or raw_yt:
+        try:
+            with open(cookies_path, "w", encoding="utf-8") as cf:
+                cf.write("# Netscape HTTP Cookie File\n")
+                if raw_yt:
+                    if "\t" in raw_yt:
+                        cf.write(raw_yt.strip() + "\n")
+                    else:
+                        for part in raw_yt.replace("Cookie:", "").split(";"):
+                            if "=" in part:
+                                k, v = part.strip().split("=", 1)
+                                cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+                if raw_ig:
+                    if "\t" in raw_ig:
+                        cf.write(raw_ig.strip() + "\n")
+                    else:
+                        for part in raw_ig.replace("Cookie:", "").split(";"):
+                            if "=" in part:
+                                k, v = part.strip().split("=", 1)
+                                cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+            return cookies_path
+        except Exception as ce:
+            logger.warning(f"Could not setup cookies file: {ce}")
+
+    if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 10:
+        return cookies_path
+
+    # Автоматическая генерация анонимных гостевых cookies без входа в аккаунт
+    import http.cookiejar
+    import urllib.request
+    try:
+        cj = http.cookiejar.MozillaCookieJar(cookies_path)
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        req = urllib.request.Request(
+            'https://www.youtube.com',
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        )
+        opener.open(req, timeout=4)
+        cj.save(ignore_discard=True, ignore_expires=True)
         if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 10:
             return cookies_path
-        return None
+    except Exception as ge:
+        logger.debug(f"Guest cookie auto-generation skipped: {ge}")
 
-    try:
-        with open(cookies_path, "w", encoding="utf-8") as cf:
-            cf.write("# Netscape HTTP Cookie File\n")
-            if raw_yt:
-                if "\t" in raw_yt:
-                    cf.write(raw_yt.strip() + "\n")
-                else:
-                    for part in raw_yt.replace("Cookie:", "").split(";"):
-                        if "=" in part:
-                            k, v = part.strip().split("=", 1)
-                            cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-            if raw_ig:
-                if "\t" in raw_ig:
-                    cf.write(raw_ig.strip() + "\n")
-                else:
-                    for part in raw_ig.replace("Cookie:", "").split(";"):
-                        if "=" in part:
-                            k, v = part.strip().split("=", 1)
-                            cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-        return cookies_path
-    except Exception as ce:
-        logger.warning(f"Could not setup cookies file: {ce}")
-        return None
+    return None
 
 
 def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None):
@@ -448,6 +468,11 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
+        'extractor_args': extractor_args or {
+            'youtube': {
+                'player_client': ['tv_samsung', 'visionos', 'web']
+            }
+        },
         'js_runtimes': {
             'node': {},
             'deno': {},
@@ -455,9 +480,6 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         },
         'remote_components': {'ejs:github'},
     }
-
-    if extractor_args:
-        ydl_opts['extractor_args'] = extractor_args
 
     if cookie_file and os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
@@ -699,6 +721,11 @@ async def extract_direct_video_info(url: str):
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['tv_samsung', 'visionos', 'web']
+                }
             },
             'js_runtimes': {
                 'node': {},

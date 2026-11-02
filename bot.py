@@ -530,13 +530,9 @@ def format_friendly_error(e: Exception) -> str:
         )
     elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
         return (
-            "🤖 <b>YouTube запросил проверку капчи для облачного сервера.</b>\n\n"
-            "Сервер хостинга (Render) находится в дата-центре, поэтому YouTube периодически блокирует запросы.\n\n"
-            "💡 <b>Как решить это навсегда:</b>\n"
-            "1. Установи расширение <i>Get cookies.txt LOCALLY</i> в Chrome/Яндекс.Браузере.\n"
-            "2. Зайди на youtube.com и скопируй текст cookies.\n"
-            "3. Вставь его в переменную <code>YOUTUBE_COOKIES</code> в панели управления Render.\n\n"
-            "После этого бот сможет загружать абсолютно любые видео и Shorts без ограничений!"
+            "🤖 <b>YouTube временно запросил проверку капчи для облачного IP-адреса.</b>\n\n"
+            "Бот уже запустил анонимную гостевую сессию для обхода защиты. "
+            "Попробуй повторить запрос через пару секунд или отправить другое видео/Shorts."
         )
     elif "file_too_large" in err_text or "too large" in err_text:
         return (

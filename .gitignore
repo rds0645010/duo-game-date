@@ -28,6 +28,7 @@ wheels/
 *.db
 users.db
 temp_downloads/
+cookies.txt
 
 # IDE & Editor
 .vscode/
