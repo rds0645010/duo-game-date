@@ -165,6 +165,127 @@ async def parse_tiktok_tikwm(url: str):
     return None
 
 
+def is_valid_mp4_file(file_path: str) -> bool:
+    """
+    Проверяет, что скачанный файл действительно является бинарным медиафайлом (MP4/WebM/MKV),
+    а не HTML/JSON страницей с ошибкой 403/502 от прокси.
+    Исключает появление плашки 'Unknown Track' в Telegram.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False
+    size = os.path.getsize(file_path)
+    if size < 16 * 1024:  # Меньше 16 КБ — гарантированно не видео
+        return False
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(32)
+        if b"ftyp" in header or header.startswith(b"\x1a\x45\xdf\xa3"):
+            return True
+        if header.lstrip().startswith((b"<", b"{", b"[", b"Error", b"HTTP")):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def extract_youtube_id(url: str):
+    m = re.search(r'(?:youtu\.be/|youtube\.com/(?:shorts/|watch\?v=|embed/|v/))([A-Za-z0-9_-]{11})', url)
+    return m.group(1) if m else None
+
+
+DEFAULT_INVIDIOUS_INSTANCES = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://invidious.privacyredirect.com",
+    "https://yewtu.be",
+    "https://yt.chocolatemoo53.com",
+    "https://invidious.tiekoetter.com"
+]
+
+DEFAULT_PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.tokhmi.xyz",
+    "https://pipedapi.drgns.space"
+]
+
+
+async def _try_invidious_fallback(session: aiohttp.ClientSession, video_id: str, dest_path: str):
+    """Уровень 1: Invidious API с local=true (проксирует трафик через себя, обходя блокировку Render)."""
+    instances = os.getenv("INVIDIOUS_URLS", "").split(",") if os.getenv("INVIDIOUS_URLS") else DEFAULT_INVIDIOUS_INSTANCES
+    for base_url in [u.strip().rstrip("/") for u in instances if u.strip()]:
+        api_url = f"{base_url}/api/v1/videos/{video_id}?local=true"
+        try:
+            async with session.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    continue
+                data = await resp.json()
+                title = data.get("title", "YouTube Video")
+                duration = int(data.get("lengthSeconds", 0))
+                format_streams = data.get("formatStreams") or []
+                candidate_urls = []
+                for stream in reversed(format_streams):
+                    if "video/mp4" in stream.get("type", ""):
+                        raw_url = stream.get("url", "")
+                        if raw_url.startswith("/"):
+                            candidate_urls.append(f"{base_url}{raw_url}")
+                        elif raw_url:
+                            candidate_urls.append(raw_url)
+                candidate_urls.append(f"{base_url}/latest_version?id={video_id}&itag=18&local=true")
+                for dl_url in candidate_urls:
+                    try:
+                        await download_file_from_url(dl_url, dest_path)
+                        if is_valid_mp4_file(dest_path):
+                            logger.info(f"✅ [YouTube] Downloaded via Invidious ({base_url})")
+                            return {
+                                "file_path": dest_path,
+                                "title": title,
+                                "duration": duration,
+                                "filesize": os.path.getsize(dest_path),
+                                "platform": "youtube"
+                            }
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    return None
+
+
+async def _try_piped_fallback(session: aiohttp.ClientSession, video_id: str, dest_path: str):
+    """Уровень 2: Piped API с проксированными потоками pipedproxy."""
+    instances = os.getenv("PIPED_URLS", "").split(",") if os.getenv("PIPED_URLS") else DEFAULT_PIPED_INSTANCES
+    for base_url in [u.strip().rstrip("/") for u in instances if u.strip()]:
+        api_url = f"{base_url}/streams/{video_id}"
+        try:
+            async with session.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    continue
+                data = await resp.json()
+                title = data.get("title", "YouTube Video")
+                duration = int(data.get("duration", 0))
+                video_streams = data.get("videoStreams") or []
+                muxed_streams = [
+                    s for s in video_streams
+                    if not s.get("videoOnly", True) and s.get("format") == "MPEG_4" and s.get("url")
+                ]
+                for stream in muxed_streams:
+                    try:
+                        await download_file_from_url(stream["url"], dest_path)
+                        if is_valid_mp4_file(dest_path):
+                            logger.info(f"✅ [YouTube] Downloaded via Piped ({base_url})")
+                            return {
+                                "file_path": dest_path,
+                                "title": title,
+                                "duration": duration,
+                                "filesize": os.path.getsize(dest_path),
+                                "platform": "youtube"
+                            }
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    return None
+
+
 async def download_file_from_url(url: str, output_path: str, max_size_bytes: int = 50 * 1024 * 1024):
     """
     Streams a direct video URL to output_path while enforcing max size.
@@ -531,7 +652,8 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     # 3. Best video + best audio merged into MP4
     # 4. Best single pre-merged MP4 stream
     format_spec = (
-        f"bestvideo[protocol^=m3u8][height<={height_limit}]+bestaudio[protocol^=m3u8]/"
+        f"best[protocol^=m3u8][height<={height_limit}]/"
+        f"bestvideo[protocol^=m3u8][height<={height_limit}]+bestaudio/"
         f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
         f"bestvideo[height<={height_limit}]+bestaudio/"
         f"best[height<={height_limit}][ext=mp4]/"
@@ -547,6 +669,8 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         'quiet': True,
         'no_warnings': True,
         'max_filesize': max_size_bytes,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -583,7 +707,7 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         # Find created file
         for ext in ['mp4', 'mkv', 'webm']:
             cand = f"{output_prefix}.{ext}"
-            if os.path.exists(cand):
+            if is_valid_mp4_file(cand):
                 return {
                     "file_path": cand,
                     "title": info.get("title", "Video"),
@@ -593,16 +717,17 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
                 }
         # Fallback if filename differed
         files = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith(os.path.basename(output_prefix))]
-        if files:
-            p = os.path.join(DOWNLOAD_DIR, files[0])
-            return {
-                "file_path": p,
-                "title": info.get("title", "Video"),
-                "duration": info.get("duration", 0),
-                "author": info.get("uploader", "") or "Creator",
-                "filesize": os.path.getsize(p)
-            }
-        raise Exception("Downloaded file not found on disk")
+        for f in files:
+            p = os.path.join(DOWNLOAD_DIR, f)
+            if is_valid_mp4_file(p):
+                return {
+                    "file_path": p,
+                    "title": info.get("title", "Video"),
+                    "duration": info.get("duration", 0),
+                    "author": info.get("uploader", "") or "Creator",
+                    "filesize": os.path.getsize(p)
+                }
+        raise Exception("Downloaded file not valid or not found on disk")
 
 
 async def download_video(url: str, user_id: int):
@@ -699,65 +824,50 @@ async def download_video(url: str, user_id: int):
                 except Exception as e:
                     logger.warning(f"TikTok photo download failed: {e}")
 
-    # 2. YOUTUBE SHORTS / INSTAGRAM REELS / TIKTOK FALLBACK
-    # First attempt: 720p (with visionos & android_vr priority for YouTube)
-    try:
-        yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}} if platform == "youtube" else None
-        res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
-        res["platform"] = platform
-        return res
-    except Exception as e:
-        err_msg = str(e)
-        logger.warning(f"Download 720p failed for {clean_url}: {e}")
-
-        # Для Instagram: пробуем embed/альбомный парсер при ЛЮБОЙ ошибке yt-dlp
-        if platform == "instagram":
-            m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', clean_url)
-            if m:
-                shortcode = m.group(1)
+    # 2. YOUTUBE SHORTS / Обычные видео: Мульти-провайдерный каскад (Invidious -> Piped -> yt-dlp)
+    if platform == "youtube":
+        vid_id = extract_youtube_id(clean_url)
+        dest_path = f"{output_prefix}.mp4"
+        async with aiohttp.ClientSession() as session:
+            # 1. Invidious proxy (?local=true) — обход блокировки дата-центров
+            if vid_id:
                 try:
-                    logger.info(f"Attempting Instagram embed/photo fallback for {shortcode}...")
-                    media_res = await try_download_instagram_media(shortcode, output_prefix)
-                    if media_res:
-                        return media_res
-                except Exception as fb_err:
-                    logger.warning(f"Instagram fallback failed: {fb_err}")
+                    inv_res = await _try_invidious_fallback(session, vid_id, dest_path)
+                    if inv_res and is_valid_mp4_file(inv_res.get("file_path")):
+                        return inv_res
+                except Exception as e:
+                    logger.debug(f"Invidious stage notice: {e}")
 
-        # Если в публикации нет видео (это фотопост или карусель в Instagram)
-        if "no video in this post" in err_msg.lower():
-            raise Exception("is_photo_post")
+            # 2. Piped proxy — проксированные потоки pipedproxy
+            if vid_id:
+                try:
+                    piped_res = await _try_piped_fallback(session, vid_id, dest_path)
+                    if piped_res and is_valid_mp4_file(piped_res.get("file_path")):
+                        return piped_res
+                except Exception as e:
+                    logger.debug(f"Piped stage notice: {e}")
 
-        # Если YouTube: пробуем fallback 480p/360p с visionos/android_vr
-        if platform == "youtube":
+        # 3. yt-dlp с клиентом VisionOS / Android VR HLS (локальное скачивание)
+        try:
+            yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
+            res["platform"] = "youtube"
+            return res
+        except Exception as yt_err:
+            logger.warning(f"yt-dlp 720p failed for YouTube {clean_url}: {yt_err}")
             try:
-                logger.info(f"Retrying YouTube with 480p lower resolution fallback for {clean_url}...")
-                yt_fb_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=yt_fb_args)
-                res["platform"] = platform
+                tv_args = {'youtube': {'player_client': ['tv', 'mweb', 'android_vr']}}
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args)
+                res["platform"] = "youtube"
                 res["low_quality_notice"] = True
                 return res
-            except Exception as yt_err:
-                logger.warning(f"YouTube 480p fallback failed: {yt_err}")
-                if "sign in to confirm" in str(yt_err).lower() or "confirm you're not a bot" in str(yt_err).lower():
+            except Exception as fb_err:
+                logger.error(f"All YouTube download methods failed: {fb_err}")
+                if "sign in to confirm" in str(fb_err).lower() or "bot" in str(fb_err).lower():
                     raise Exception("youtube_bot_detection")
+                raise fb_err
 
-        # If file too large, retry in lower resolution (360p)
-        if "max_filesize" in err_msg or "too large" in err_msg.lower():
-            try:
-                logger.info(f"Retrying in lower resolution (360p) for {clean_url}...")
-                yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}} if platform == "youtube" else None
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 360, extractor_args=yt_args)
-                res["platform"] = platform
-                res["low_quality_notice"] = True
-                return res
-            except Exception as e2:
-                raise Exception(f"file_too_large: {e2}")
-
-        # Если это возрастное ограничение (18+) или закрытая аудитория в Instagram
-        if "available to everyone" in err_msg.lower() or "certain audiences" in err_msg.lower():
-            raise Exception("instagram_age_restricted")
-
-        raise e
+    # 3. INSTAGRAM REELS / TIKTOK FALLBACK
 
 
 async def extract_direct_video_info(url: str):

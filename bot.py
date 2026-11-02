@@ -407,37 +407,22 @@ def get_fallback_upload_chat():
     return None
 
 
+OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or "0")
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "").strip()
 
 
 async def upload_media_to_telegram(file_path: str, is_photo: bool = False, target_user_id: int = None, title: str = "", platform: str = ""):
     """
     Загружает медиафайл в Telegram для генерации постоянного CDN file_id.
-    1. Если указан STORAGE_CHANNEL_ID — отправляет в приватный канал.
-    2. Если нет — отправляет в ЛС пользователя (сохраняя ролик у бота в личке).
-    3. Если ЛС недоступно — отправляет администратору бота.
+    1. Если указан target_user_id — пробует отправить в ЛС пользователя (сохраняя как личный архив).
+    2. Если пользователь не запускал бота (Forbidden) — отправляет владельцу бота (OWNER_USER_ID) и сразу удаляет.
+    3. Если и это недоступно — отправляет в STORAGE_CHANNEL_ID или fallback chat.
     """
     if not file_path or not os.path.exists(file_path):
         return None
 
-    dest_chat = None
-    if STORAGE_CHANNEL_ID:
-        try:
-            dest_chat = int(STORAGE_CHANNEL_ID)
-        except Exception:
-            pass
-
-    if not dest_chat and target_user_id:
-        dest_chat = target_user_id
-
-    if not dest_chat:
-        dest_chat = get_fallback_upload_chat()
-
-    if not dest_chat:
-        return None
-
     caption_text = None
-    if dest_chat == target_user_id:
+    if target_user_id:
         t_clean = html.escape((title or "Видео")[:150])
         p_clean = html.escape((platform or "Медиа").capitalize())
         caption_text = (
@@ -446,43 +431,62 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
             f"✨ <i>Сохранено при отправке через @duo_play_date_bot</i>"
         )
 
-    try:
-        if is_photo:
-            sent = await bot.send_photo(
-                chat_id=dest_chat,
-                photo=FSInputFile(file_path),
-                caption=caption_text,
-                parse_mode="HTML" if caption_text else None,
-                disable_notification=True
-            )
-            if sent and sent.photo:
-                return sent.photo[-1].file_id
-        else:
-            sent = await bot.send_video(
-                chat_id=dest_chat,
-                video=FSInputFile(file_path),
-                caption=caption_text,
-                parse_mode="HTML" if caption_text else None,
-                supports_streaming=True,
-                disable_notification=True
-            )
-            if sent and sent.video:
-                return sent.video.file_id
-    except Exception as e:
-        logging.warning(f"Upload to primary chat {dest_chat} failed: {e}")
-        fallback = get_fallback_upload_chat()
-        if fallback and fallback != dest_chat:
-            try:
-                if is_photo:
-                    sent = await bot.send_photo(chat_id=fallback, photo=FSInputFile(file_path), disable_notification=True)
-                    if sent and sent.photo:
-                        return sent.photo[-1].file_id
-                else:
-                    sent = await bot.send_video(chat_id=fallback, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True)
-                    if sent and sent.video:
-                        return sent.video.file_id
-            except Exception as fb_err:
-                logging.warning(f"Upload to fallback chat {fallback} failed: {fb_err}")
+    # 1. Пробуем отправить в ЛС пользователя
+    if target_user_id:
+        try:
+            if is_photo:
+                sent = await bot.send_photo(
+                    chat_id=target_user_id,
+                    photo=FSInputFile(file_path),
+                    caption=caption_text,
+                    parse_mode="HTML" if caption_text else None,
+                    disable_notification=True
+                )
+                if sent and sent.photo:
+                    return sent.photo[-1].file_id
+            else:
+                sent = await bot.send_video(
+                    chat_id=target_user_id,
+                    video=FSInputFile(file_path),
+                    caption=caption_text,
+                    parse_mode="HTML" if caption_text else None,
+                    supports_streaming=True,
+                    disable_notification=True
+                )
+                if sent and sent.video:
+                    return sent.video.file_id
+        except Exception as u_err:
+            logging.info(f"Target user {target_user_id} upload failed ({u_err}), trying silent fallback...")
+
+    # 2. Бесшумный fallback: OWNER_USER_ID или fallback chat с мгновенным удалением
+    fallbacks = []
+    if OWNER_USER_ID and OWNER_USER_ID != target_user_id:
+        fallbacks.append(OWNER_USER_ID)
+    if STORAGE_CHANNEL_ID:
+        try: fallbacks.append(int(STORAGE_CHANNEL_ID))
+        except Exception: pass
+    fb_chat = get_fallback_upload_chat()
+    if fb_chat and fb_chat not in fallbacks and fb_chat != target_user_id:
+        fallbacks.append(fb_chat)
+
+    for chat_id in fallbacks:
+        try:
+            if is_photo:
+                sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
+                if sent and sent.photo:
+                    f_id = sent.photo[-1].file_id
+                    try: await bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                    except Exception: pass
+                    return f_id
+            else:
+                sent = await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True)
+                if sent and sent.video:
+                    f_id = sent.video.file_id
+                    try: await bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                    except Exception: pass
+                    return f_id
+        except Exception as fb_err:
+            logging.debug(f"Fallback upload chat {chat_id} error: {fb_err}")
 
     return None
 
@@ -1495,7 +1499,7 @@ async def inline_query_handler(inline_query: InlineQuery):
     )
 
     article_result = InlineQueryResultArticle(
-        id=f"tok_{token}",
+        id=f"ytv2_{token}",
         title=inline_title,
         description="Нажми, чтобы чистое видео улетело прямо в чат",
         thumbnail_url=plat_icon,
@@ -1518,25 +1522,20 @@ async def inline_query_handler(inline_query: InlineQuery):
 # ==========================================
 # 🔄 ОБРАБОТКА ВЫБОРА ИНЛАЙН-РЕЗУЛЬТАТА (SavXBot паттерн)
 # ==========================================
-@dp.chosen_inline_result()
-async def handle_chosen_inline_result(chosen: ChosenInlineResult):
-    """
-    Срабатывает сразу после того, как пользователь нажал на кнопку в инлайне.
-    Бот скачивает видео, загружает его в Telegram и подменяет текстовую плашку
-    'Загружаю видео...' на готовое чистое видео!
-    """
-    if not chosen.inline_message_id:
-        return
-
-    token = chosen.result_id.replace("tok_", "").strip()
+async def execute_inline_delivery(inline_message_id: str, token: str, user_id: int):
+    """Единая функция выполнения скачивания и подмены сообщения в инлайне."""
     url = get_dl_token_url(token)
     if not url:
+        try:
+            await bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text="⚠️ <b>Ссылка устарела.</b> Пожалуйста, вызовите бота заново через инлайн.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
         return
 
-    user_id = chosen.from_user.id
-    logging.info(f"Chosen inline result triggered for url {url} by user {user_id}")
-
-    # 1. Проверяем кэш (вдруг уже готово)
     cached = get_cached_media(url)
     file_id = cached.get("file_id") if cached else None
     is_photo = (cached.get("media_type") == "photo") if cached else False
@@ -1561,20 +1560,23 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
                         res.get("platform", ""),
                         res.get("author", "")
                     )
-                # Удаляем локальный файл после загрузки
                 try:
                     if os.path.exists(res["file_path"]):
                         os.remove(res["file_path"])
                 except Exception:
                     pass
         except Exception as e:
-            logging.error(f"Chosen inline download error for {url}: {e}")
+            logging.error(f"Inline download error for {url}: {e}")
             err_text = format_friendly_error(e)
+            retry_kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")]]
+            )
             try:
                 await bot.edit_message_text(
-                    inline_message_id=chosen.inline_message_id,
-                    text=err_text,
-                    parse_mode="HTML"
+                    inline_message_id=inline_message_id,
+                    text=f"{err_text}\n\n<i>Нажмите кнопку ниже для повторной попытки 👇</i>",
+                    parse_mode="HTML",
+                    reply_markup=retry_kb
                 )
             except Exception:
                 pass
@@ -1593,18 +1595,53 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
                 else InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
             )
             await bot.edit_message_media(
-                inline_message_id=chosen.inline_message_id,
+                inline_message_id=inline_message_id,
                 media=media_obj,
                 reply_markup=None
             )
-            logging.info(f"Successfully replaced inline message {chosen.inline_message_id} with media!")
+            logging.info(f"Successfully replaced inline message {inline_message_id} with media!")
         except Exception as edit_err:
             logging.error(f"Failed to edit_message_media: {edit_err}")
+
+
+@dp.chosen_inline_result()
+async def handle_chosen_inline_result(chosen: ChosenInlineResult):
+    """
+    Срабатывает сразу после того, как пользователь нажал на кнопку в инлайне.
+    Бот скачивает видео, загружает его в Telegram и подменяет текстовую плашку
+    'Загружаю видео...' на готовое чистое видео!
+    """
+    if not chosen.inline_message_id:
+        return
+
+    token = chosen.result_id.replace("ytv2_", "").replace("tok_", "").strip()
+    await execute_inline_delivery(chosen.inline_message_id, token, chosen.from_user.id)
 
 
 @dp.callback_query(F.data == "noop")
 async def handle_noop_callback(callback: CallbackQuery):
     await callback.answer("⏳ Видео обрабатывается и появится в этом сообщении через пару секунд!", show_alert=False)
+
+
+@dp.callback_query(F.data.startswith("retry_dl:"))
+async def handle_retry_callback(callback: CallbackQuery):
+    if not callback.inline_message_id:
+        await callback.answer()
+        return
+    token = callback.data.split(":", 1)[1]
+    await callback.answer("🔄 Перезапускаю загрузку...")
+    try:
+        await bot.edit_message_text(
+            inline_message_id=callback.inline_message_id,
+            text="⏳ <b>Повторная загрузка видео...</b>\n<i>Пожалуйста, подождите ✨</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data="noop")]]
+            )
+        )
+    except Exception:
+        pass
+    await execute_inline_delivery(callback.inline_message_id, token, callback.from_user.id)
 
 
 # ==========================================
