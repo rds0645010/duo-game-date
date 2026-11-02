@@ -372,55 +372,30 @@ def get_fallback_upload_chat():
     return None
 
 
-async def upload_media_to_telegram(file_path: str, is_photo: bool = False, user_id: int = None):
+STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "").strip()
+
+
+async def upload_media_to_telegram(file_path: str, is_photo: bool = False):
     """
-    Загружает медиафайл в Telegram и возвращает file_id.
-    Сначала пробует отправить в ЛС пользователю с disable_notification=True и сразу удалить.
-    Если пользователь не открывал ЛС — пробует кандидатов из базы данных.
+    Загружает медиафайл в специальный приватный канал хранения (STORAGE_CHANNEL_ID),
+    если он указан в настройках. Никогда не отправляет и не удаляет сообщения в ЛС
+    пользователей, чтобы не ломать CDN file_id в Telegram.
     """
-    if not file_path or not os.path.exists(file_path):
+    if not file_path or not os.path.exists(file_path) or not STORAGE_CHANNEL_ID:
         return None
 
-    candidate_chats = []
-    if user_id:
-        candidate_chats.append(user_id)
-    fallback = get_fallback_upload_chat()
-    if fallback and fallback not in candidate_chats:
-        candidate_chats.append(fallback)
-
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users ORDER BY created_at DESC LIMIT 5")
-        for r in cursor.fetchall():
-            if r[0] and int(r[0]) not in candidate_chats:
-                candidate_chats.append(int(r[0]))
-        conn.close()
-    except Exception:
-        pass
-
-    for chat_id in candidate_chats:
-        try:
-            if is_photo:
-                sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
-                if sent and sent.photo:
-                    f_id = sent.photo[-1].file_id
-                    try:
-                        await sent.delete()
-                    except Exception:
-                        pass
-                    return f_id
-            else:
-                sent = await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), disable_notification=True)
-                if sent and sent.video:
-                    f_id = sent.video.file_id
-                    try:
-                        await sent.delete()
-                    except Exception:
-                        pass
-                    return f_id
-        except Exception as e:
-            logging.debug(f"Upload attempt to {chat_id} failed: {e}")
+        chan_id = int(STORAGE_CHANNEL_ID)
+        if is_photo:
+            sent = await bot.send_photo(chat_id=chan_id, photo=FSInputFile(file_path), disable_notification=True)
+            if sent and sent.photo:
+                return sent.photo[-1].file_id
+        else:
+            sent = await bot.send_video(chat_id=chan_id, video=FSInputFile(file_path), disable_notification=True)
+            if sent and sent.video:
+                return sent.video.file_id
+    except Exception as e:
+        logging.debug(f"Storage channel upload to {STORAGE_CHANNEL_ID} failed: {e}")
 
     return None
 
@@ -553,10 +528,15 @@ def format_friendly_error(e: Exception) -> str:
             "Instagram закрыл доступ к этому ролику для гостей и требует подтверждения возраста.\n\n"
             "💡 <i>Администратор может указать cookies аккаунта (INSTAGRAM_COOKIES) в настройках хостинга, чтобы бот мог загружать контент 18+.</i>"
         )
-    elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text:
+    elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
         return (
-            "🤖 <b>YouTube временно запросил проверку капчи для этого ролика.</b>\n\n"
-            "Попробуй ещё раз через пару секунд или отправь другой Shorts/видео."
+            "🤖 <b>YouTube запросил проверку капчи для облачного сервера.</b>\n\n"
+            "Сервер хостинга (Render) находится в дата-центре, поэтому YouTube периодически блокирует запросы.\n\n"
+            "💡 <b>Как решить это навсегда:</b>\n"
+            "1. Установи расширение <i>Get cookies.txt LOCALLY</i> в Chrome/Яндекс.Браузере.\n"
+            "2. Зайди на youtube.com и скопируй текст cookies.\n"
+            "3. Вставь его в переменную <code>YOUTUBE_COOKIES</code> в панели управления Render.\n\n"
+            "После этого бот сможет загружать абсолютно любые видео и Shorts без ограничений!"
         )
     elif "file_too_large" in err_text or "too large" in err_text:
         return (
@@ -1319,19 +1299,19 @@ async def inline_query_handler(inline_query: InlineQuery):
     if platform == "instagram":
         plat_noun = "Reel"
         plat_source = "Instagram"
-        plat_icon = "https://cdn-icons-png.flaticon.com/512/2111/2111463.png"
+        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/instagram.png"
     elif platform == "tiktok":
         plat_noun = "видео"
         plat_source = "TikTok"
-        plat_icon = "https://cdn-icons-png.flaticon.com/512/3046/3046121.png"
+        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tiktok.png"
     elif platform == "youtube":
         plat_noun = "Shorts"
         plat_source = "YouTube"
-        plat_icon = "https://cdn-icons-png.flaticon.com/512/1384/1384060.png"
+        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
     else:
         plat_noun = "видео"
         plat_source = "Видео"
-        plat_icon = "https://cdn-icons-png.flaticon.com/512/3074/3074767.png"
+        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
 
     # 2. Проверяем кэш бота: если видео уже скачано ранее — отдаем файл МГНОВЕННО!
     cached = get_cached_media(clean_url)
@@ -1378,6 +1358,9 @@ async def inline_query_handler(inline_query: InlineQuery):
         )
         return
 
+    token = save_dl_token(clean_url)
+    stream_url = f"{RENDER_EXTERNAL_URL}/stream/{token}.mp4"
+
     # 3. Для TikTok: быстрый прямой поток без водяного знака через TikWM API
     if platform == "tiktok":
         direct_info = await parse_tiktok_tikwm(clean_url)
@@ -1403,12 +1386,21 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
             return
 
-    # 4. Скачиваем ролик на лету и загружаем в Telegram (стиль SavXBot, ~4-5 секунд)
+    # 4. Скачиваем ролик на сервере
     try:
-        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=6.5)
+        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=6.0)
         if res and res.get("file_path"):
+            _stream_files[token] = res["file_path"]
             is_photo = bool(res.get("is_photo"))
-            f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo, user_id=user_id)
+            title_esc = html.escape(res.get("title") or plat_noun)
+            caption = (
+                f"📸 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
+                if is_photo else
+                f"🎬 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
+            ) if caption_enabled else None
+
+            # Если настроен канал постоянного хранения — получаем постоянный file_id
+            f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo)
             if f_id:
                 save_cached_media(
                     clean_url,
@@ -1418,16 +1410,6 @@ async def inline_query_handler(inline_query: InlineQuery):
                     res.get("platform", ""),
                     res.get("author", "")
                 )
-                title_esc = html.escape(res.get("title") or plat_noun)
-                if caption_enabled:
-                    caption = (
-                        f"📸 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                        if is_photo else
-                        f"🎬 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                    )
-                else:
-                    caption = None
-
                 if is_photo:
                     single_result = InlineQueryResultCachedPhoto(
                         id=f"live_p_{abs(hash(f_id))}",
@@ -1444,33 +1426,57 @@ async def inline_query_handler(inline_query: InlineQuery):
                         caption=caption,
                         parse_mode="HTML" if caption else None
                     )
+            else:
+                if is_photo:
+                    single_result = InlineQueryResultPhoto(
+                        id=f"p_{token}",
+                        photo_url=f"{RENDER_EXTERNAL_URL}/stream/{token}.jpg",
+                        thumbnail_url=plat_icon,
+                        title=f"💌 Поделиться фото из {plat_source}",
+                        caption=caption,
+                        parse_mode="HTML" if caption else None
+                    )
+                else:
+                    single_result = InlineQueryResultVideo(
+                        id=f"v_{token}",
+                        video_url=stream_url,
+                        mime_type="video/mp4",
+                        thumbnail_url=plat_icon,
+                        title=f"💌 Поделиться {plat_noun} из {plat_source}",
+                        caption=caption,
+                        parse_mode="HTML" if caption else None
+                    )
 
-                await inline_query.answer(
-                    results=[single_result],
-                    cache_time=300,
-                    is_personal=True
-                )
-                return
+            await inline_query.answer(
+                results=[single_result],
+                cache_time=300,
+                is_personal=True
+            )
+            return
+
     except asyncio.TimeoutError:
-        logging.info(f"Inline prefetch timeout for {clean_url}")
+        logging.info(f"Inline prefetch timeout for {clean_url}, serving via direct streaming endpoint")
+        asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
     except Exception as e:
         logging.warning(f"Inline prefetch error for {clean_url}: {e}")
 
-    # Если ролик скачивается чуть дольше — отдаем карточку ожидания с cache_time=1 (Telegram тут же обновит)
-    token = save_dl_token(clean_url)
-    results = [
-        InlineQueryResultArticle(
-            id=f"wait_{token}",
-            title=f"💌 Поделиться {plat_noun} из {plat_source}",
-            description="⏳ Видео обрабатывается... Нажмите через 2-3 секунды",
-            thumbnail_url="https://cdn-icons-png.flaticon.com/512/3074/3074767.png",
-            input_message_content=InputTextMessageContent(
-                message_text=clean_url
-            )
-        )
-    ]
+    # Если ролик загружается — отдаем видео-карточку со ссылкой на стрим!
+    # Telegram при клике подключится к stream_url, сервер отдаст MP4.
+    # Никаких текстовых сообщений в чат!
+    single_result = InlineQueryResultVideo(
+        id=f"v_{token}",
+        video_url=stream_url,
+        mime_type="video/mp4",
+        thumbnail_url=plat_icon,
+        title=f"💌 Поделиться {plat_noun} из {plat_source}",
+        caption=(
+            f"🎬 <b>{plat_noun}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
+            if caption_enabled else None
+        ),
+        parse_mode="HTML" if caption else None
+    )
     try:
-        await inline_query.answer(results=results, cache_time=1, is_personal=True)
+        await inline_query.answer(results=[single_result], cache_time=2, is_personal=True)
     except Exception as ans_err:
         logging.error(f"Error answering inline query: {ans_err}")
 

@@ -387,7 +387,47 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
 
 
 
-def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024):
+def setup_cookies_file():
+    """
+    Создает файл cookies.txt для yt-dlp из переменных окружения
+    INSTAGRAM_COOKIES и YOUTUBE_COOKIES. Поддерживает как стандартный
+    формат Netscape, так и строковый заголовок Cookie (key=val; key2=val2).
+    """
+    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
+    raw_yt = os.environ.get("YOUTUBE_COOKIES", "").strip()
+
+    if not raw_ig and not raw_yt:
+        if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 10:
+            return cookies_path
+        return None
+
+    try:
+        with open(cookies_path, "w", encoding="utf-8") as cf:
+            cf.write("# Netscape HTTP Cookie File\n")
+            if raw_yt:
+                if "\t" in raw_yt:
+                    cf.write(raw_yt.strip() + "\n")
+                else:
+                    for part in raw_yt.replace("Cookie:", "").split(";"):
+                        if "=" in part:
+                            k, v = part.strip().split("=", 1)
+                            cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+            if raw_ig:
+                if "\t" in raw_ig:
+                    cf.write(raw_ig.strip() + "\n")
+                else:
+                    for part in raw_ig.replace("Cookie:", "").split(";"):
+                        if "=" in part:
+                            k, v = part.strip().split("=", 1)
+                            cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+        return cookies_path
+    except Exception as ce:
+        logger.warning(f"Could not setup cookies file: {ce}")
+        return None
+
+
+def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None):
     """
     Synchronous yt-dlp execution run inside asyncio.to_thread.
     """
@@ -396,19 +436,7 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     # Try pre-merged MP4 first (works even without ffmpeg), then bestvideo+bestaudio
     format_spec = f"best[ext=mp4][height<={height_limit}]/bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height_limit}][ext=mp4]/best[height<={height_limit}]/best"
     
-    # Cookies support for age-restricted / 18+ content (Instagram session or cookies.txt)
-    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-    raw_cookies = os.environ.get("INSTAGRAM_COOKIES", "").strip()
-    if raw_cookies and not os.path.exists(cookies_path):
-        try:
-            with open(cookies_path, "w", encoding="utf-8") as cf:
-                cf.write("# Netscape HTTP Cookie File\n")
-                for part in raw_cookies.split(";"):
-                    if "=" in part:
-                        k, v = part.strip().split("=", 1)
-                        cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-        except Exception as ce:
-            logger.warning(f"Could not write cookies.txt: {ce}")
+    cookie_file = setup_cookies_file()
 
     ydl_opts = {
         'outtmpl': out_tmpl,
@@ -420,15 +448,19 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'mweb']
-            }
-        }
+        'js_runtimes': {
+            'node': {},
+            'deno': {},
+            'quickjs': {}
+        },
+        'remote_components': {'ejs:github'},
     }
 
-    if os.path.exists(cookies_path):
-        ydl_opts['cookiefile'] = cookies_path
+    if extractor_args:
+        ydl_opts['extractor_args'] = extractor_args
+
+    if cookie_file and os.path.exists(cookie_file):
+        ydl_opts['cookiefile'] = cookie_file
 
     if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
@@ -586,6 +618,19 @@ async def download_video(url: str, user_id: int):
         if "no video in this post" in err_msg.lower():
             raise Exception("is_photo_post")
 
+        # Если YouTube запросил капчу или вход с аккаунта
+        if platform == "youtube" and ("sign in to confirm" in err_msg.lower() or "confirm you're not a bot" in err_msg.lower() or "bot" in err_msg.lower()):
+            # Пробуем fallback через ТВ-клиенты YouTube
+            try:
+                logger.info(f"Retrying YouTube with tv player_client fallback for {clean_url}...")
+                tv_args = {'youtube': {'player_client': ['tv_simply', 'tv_downgraded', 'tv']}}
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=tv_args)
+                res["platform"] = platform
+                return res
+            except Exception as tv_err:
+                logger.warning(f"YouTube TV fallback failed: {tv_err}")
+                raise Exception("youtube_bot_detection")
+
         # If file too large or format error, retry in lower resolution (360p)
         if "max_filesize" in err_msg or "too large" in err_msg.lower():
             try:
@@ -646,6 +691,7 @@ async def extract_direct_video_info(url: str):
 
     # 3. YouTube Shorts & other direct streams via fast yt-dlp metadata extract
     def _fast_extract():
+        cookie_file = setup_cookies_file()
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -654,12 +700,16 @@ async def extract_direct_video_info(url: str):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
             },
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios', 'mweb']
-                }
-            }
+            'js_runtimes': {
+                'node': {},
+                'deno': {},
+                'quickjs': {}
+            },
+            'remote_components': {'ejs:github'},
         }
+        if cookie_file and os.path.exists(cookie_file):
+            ydl_opts['cookiefile'] = cookie_file
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
             v_url = info.get("url")
