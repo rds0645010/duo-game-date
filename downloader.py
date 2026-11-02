@@ -669,7 +669,7 @@ def setup_cookies_file(platform: str = None):
         return None
 
 
-def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None, platform: str = None):
+def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None, platform: str = None, use_cookies: bool = True):
     """
     Synchronous yt-dlp execution run inside asyncio.to_thread.
     """
@@ -690,7 +690,7 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     )
     
     plat = platform or detect_platform(url)
-    cookie_file = setup_cookies_file(plat)
+    cookie_file = setup_cookies_file(plat) if use_cookies else None
 
     # Прокси используется ИСКЛЮЧИТЕЛЬНО для YouTube (чтобы не тратить трафик и не тормозить TikTok/Instagram)
     proxy = None
@@ -718,24 +718,24 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     if proxy:
         ydl_opts['proxy'] = proxy
 
-    has_cookies = bool(cookie_file and os.path.exists(cookie_file))
+    has_cookies = bool(cookie_file and os.path.exists(cookie_file)) and use_cookies
     if has_cookies:
         ydl_opts['cookiefile'] = cookie_file
 
     if extractor_args:
         ydl_opts['extractor_args'] = extractor_args
     elif plat == "youtube":
-        # Проверенные мобильные клиенты Innertube (обходят блокировку облачных IP и работают стабильно)
+        # Проверенные клиенты: если сессия с куки — web_embedded; если анонимно — android/ios
         if has_cookies:
             ydl_opts['extractor_args'] = {
                 'youtube': {
-                    'player_client': ['android', 'ios', 'web', 'mweb']
+                    'player_client': ['web_embedded', 'tv_samsung', 'web']
                 }
             }
         else:
             ydl_opts['extractor_args'] = {
                 'youtube': {
-                    'player_client': ['android', 'ios', 'mweb']
+                    'player_client': ['android', 'ios']
                 }
             }
 
@@ -875,32 +875,45 @@ async def download_video(url: str, user_id: int):
     # 2. YOUTUBE SHORTS / Обычные видео:
     if platform == "youtube":
         has_cookies = bool(os.getenv("YOUTUBE_COOKIES") or os.getenv("YTDLP_COOKIES"))
-        yt_clients = ['android', 'ios', 'web', 'mweb'] if has_cookies else ['android', 'ios', 'mweb']
-        yt_args = {'youtube': {'player_client': yt_clients}}
 
-        # Попытка 1: Оптимизированная загрузка 720p через мобильные клиенты (android, ios, mweb)
+        # Попытка 1: Анонимные мобильные клиенты (android, ios) без cookies!
+        # ВАЖНО: при передаче cookies yt-dlp исключает android и ios ("Skipping client since it does not support cookies").
+        # Чистый мобильный клиент обходит блокировку облачных IP Render и скачивает MP4 напрямую!
         try:
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
+            mobile_args = {'youtube': {'player_client': ['android', 'ios']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=mobile_args, use_cookies=False)
             if res and is_valid_mp4_file(res.get("file_path")):
                 res["platform"] = "youtube"
                 return res
         except Exception as yt_err:
-            logger.warning(f"yt-dlp youtube mobile 720p failed for {clean_url}: {yt_err}")
+            logger.warning(f"yt-dlp youtube anonymous mobile 720p failed for {clean_url}: {yt_err}")
 
-        # Попытка 2: Fallback на 480p / 360p через мобильные клиенты
+        # Попытка 2: Fallback на 480p / 360p через мобильные клиенты без cookies
         try:
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=yt_args)
+            mobile_args = {'youtube': {'player_client': ['android', 'ios']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=mobile_args, use_cookies=False)
             if res and is_valid_mp4_file(res.get("file_path")):
                 res["platform"] = "youtube"
                 res["low_quality_notice"] = True
                 return res
         except Exception as yt_err2:
-            logger.warning(f"yt-dlp youtube mobile 480p failed for {clean_url}: {yt_err2}")
+            logger.warning(f"yt-dlp youtube anonymous mobile 480p failed for {clean_url}: {yt_err2}")
 
-        # Попытка 3: Fallback с ТВ-клиентами (tv_samsung, visionos)
+        # Попытка 3: Если есть cookies — пробуем авторизованные клиенты (web_embedded, tv_samsung, web)
+        if has_cookies:
+            try:
+                auth_args = {'youtube': {'player_client': ['web_embedded', 'tv_samsung', 'web']}}
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=auth_args, use_cookies=True)
+                if res and is_valid_mp4_file(res.get("file_path")):
+                    res["platform"] = "youtube"
+                    return res
+            except Exception as yt_auth_err:
+                logger.warning(f"yt-dlp youtube authenticated clients failed for {clean_url}: {yt_auth_err}")
+
+        # Попытка 4: Fallback с ТВ-клиентами (tv_samsung, tv)
         try:
-            tv_args = {'youtube': {'player_client': ['tv_samsung', 'visionos']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args)
+            tv_args = {'youtube': {'player_client': ['tv_samsung', 'tv']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args, use_cookies=False)
             if res and is_valid_mp4_file(res.get("file_path")):
                 res["platform"] = "youtube"
                 res["low_quality_notice"] = True
@@ -908,7 +921,7 @@ async def download_video(url: str, user_id: int):
         except Exception as yt_err3:
             logger.warning(f"yt-dlp youtube TV fallback failed for {clean_url}: {yt_err3}")
 
-        # Попытка 4: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
+        # Попытка 5: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
         vid_id = extract_youtube_id(clean_url)
         dest_path = f"{output_prefix}.mp4"
         if vid_id:
@@ -1018,7 +1031,6 @@ async def extract_direct_video_info(url: str):
 
     # 3. YouTube Shorts & other direct streams via fast yt-dlp metadata extract
     def _fast_extract():
-        cookie_file = setup_cookies_file()
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -1029,7 +1041,7 @@ async def extract_direct_video_info(url: str):
             },
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios', 'mweb']
+                    'player_client': ['android', 'ios']
                 }
             },
             'js_runtimes': {
@@ -1037,8 +1049,6 @@ async def extract_direct_video_info(url: str):
                 'node': {},
             },
         }
-        if cookie_file and os.path.exists(cookie_file):
-            ydl_opts['cookiefile'] = cookie_file
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
