@@ -3,3 +3,6 @@ aiohttp>=3.9.0
 python-dotenv>=1.0.0
 yt-dlp>=2024.10.0
 imageio-ffmpeg>=0.5.1
+bgutil-ytdlp-pot-provider>=2.0.2
+nodeenv>=1.9.0
+

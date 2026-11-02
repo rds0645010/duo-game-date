@@ -22,6 +22,76 @@ except Exception as e:
     logger.warning(f"FFmpeg init warning: {e}")
     FFMPEG_PATH = None
 
+
+def ensure_js_runtime():
+    """
+    Гарантирует наличие JavaScript runtime (Node.js или Deno) для yt-dlp.
+    Без JS runtime YouTube блокирует запросы из облачных дата-центров (Render).
+    """
+    import shutil
+    import subprocess
+    import platform
+
+    # 1. Проверяем node в PATH
+    node_path = shutil.which("node")
+    if node_path:
+        try:
+            out = subprocess.check_output([node_path, "--version"], text=True, timeout=3).strip()
+            logger.info(f"JS Runtime: Node.js detected at {node_path} ({out})")
+            return "node", node_path
+        except Exception as e:
+            logger.debug(f"Node.js check error: {e}")
+
+    # 2. Проверяем deno в PATH
+    deno_path = shutil.which("deno")
+    if deno_path:
+        try:
+            out = subprocess.check_output([deno_path, "--version"], text=True, timeout=3).strip().splitlines()[0]
+            logger.info(f"JS Runtime: Deno detected at {deno_path} ({out})")
+            return "deno", deno_path
+        except Exception as e:
+            logger.debug(f"Deno check error: {e}")
+
+    # 3. Проверяем локальную папку bin/
+    bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    local_deno = os.path.join(bin_dir, "deno" if os.name != "nt" else "deno.exe")
+    if os.path.exists(local_deno) and os.path.getsize(local_deno) > 1000:
+        if bin_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+        logger.info(f"JS Runtime: Local Deno found at {local_deno}")
+        return "deno", local_deno
+
+    # 4. Если на Linux (Render) — автоматически скачиваем standalone Deno v2.9.8
+    if platform.system() == "Linux":
+        logger.info("⚡ Скачивание standalone Deno runtime для обхода защиты YouTube на Render...")
+        import urllib.request
+        import zipfile
+        import io
+        deno_url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip"
+        try:
+            req = urllib.request.Request(deno_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                data = resp.read()
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    zf.extract("deno", path=bin_dir)
+            import stat
+            os.chmod(local_deno, os.stat(local_deno).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH | stat.S_IRUSR | stat.S_IWUSR)
+            if bin_dir not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"✅ Deno успешно установлен в {local_deno} и добавлен в PATH")
+            return "deno", local_deno
+        except Exception as dl_err:
+            logger.warning(f"Не удалось скачать Deno: {dl_err}")
+
+    return None, None
+
+# Автоматическая инициализация JS runtime при импорте модуля
+try:
+    ensure_js_runtime()
+except Exception as _js_e:
+    logger.debug(f"JS runtime init notice: {_js_e}")
+
 # Regex patterns for supported platforms
 TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
 YOUTUBE_REGEX = re.compile(r'https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)[^\s]+')
@@ -470,7 +540,7 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         },
         'extractor_args': extractor_args or {
             'youtube': {
-                'player_client': ['tv_samsung', 'visionos', 'web']
+                'player_client': ['tv_samsung', 'visionos', 'web', 'android_vr']
             }
         },
         'js_runtimes': {
@@ -642,15 +712,15 @@ async def download_video(url: str, user_id: int):
 
         # Если YouTube запросил капчу или вход с аккаунта
         if platform == "youtube" and ("sign in to confirm" in err_msg.lower() or "confirm you're not a bot" in err_msg.lower() or "bot" in err_msg.lower()):
-            # Пробуем fallback через ТВ-клиенты YouTube
+            # Пробуем fallback через visionos / android_vr клиенты YouTube
             try:
-                logger.info(f"Retrying YouTube with tv player_client fallback for {clean_url}...")
-                tv_args = {'youtube': {'player_client': ['tv_simply', 'tv_downgraded', 'tv']}}
+                logger.info(f"Retrying YouTube with visionos/android_vr player_client fallback for {clean_url}...")
+                tv_args = {'youtube': {'player_client': ['visionos', 'android_vr', 'tv_samsung']}}
                 res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=tv_args)
                 res["platform"] = platform
                 return res
             except Exception as tv_err:
-                logger.warning(f"YouTube TV fallback failed: {tv_err}")
+                logger.warning(f"YouTube player client fallback failed: {tv_err}")
                 raise Exception("youtube_bot_detection")
 
         # If file too large or format error, retry in lower resolution (360p)
@@ -724,7 +794,7 @@ async def extract_direct_video_info(url: str):
             },
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['tv_samsung', 'visionos', 'web']
+                    'player_client': ['tv_samsung', 'visionos', 'web', 'android_vr']
                 }
             },
             'js_runtimes': {

@@ -126,9 +126,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS dl_tokens (
             token TEXT PRIMARY KEY,
             url TEXT,
+            file_path TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE dl_tokens ADD COLUMN file_path TEXT")
+    except Exception:
+        pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_downloads (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,31 +214,58 @@ def get_user_recent_downloads(user_id: int, limit: int = 15):
     return items
 
 
-def save_dl_token(url: str) -> str:
-    """Сохраняет URL для безопасного deep-link /start dl_{token} (до 64 символов)"""
+def save_dl_token(url: str, file_path: str = None) -> str:
+    """Сохраняет URL и путь к файлу для прямого стриминга /stream/{token}.mp4"""
     if not url:
         return ""
     import uuid
     token = str(uuid.uuid4()).replace("-", "")[:12]
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO dl_tokens (token, url) VALUES (?, ?)", (token, url))
+    cursor.execute("INSERT OR REPLACE INTO dl_tokens (token, url, file_path) VALUES (?, ?, ?)", (token, url, file_path))
     conn.commit()
     conn.close()
     return token
 
 
+def update_dl_token_file(token: str, file_path: str):
+    if not token or not file_path:
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE dl_tokens SET file_path = ? WHERE token = ?", (file_path, token))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.debug(f"update_dl_token_file error: {e}")
+
+
 def get_dl_token_url(token: str):
     if not token:
         return None
+    url, _ = get_dl_token_info(token)
+    return url
+
+
+def get_dl_token_info(token: str):
+    if not token:
+        return None, None
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT url FROM dl_tokens WHERE token = ?", (token.strip(),))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return row[0]
-    return None
+    try:
+        cursor.execute("SELECT url, file_path FROM dl_tokens WHERE token = ?", (token.strip(),))
+        row = cursor.fetchone()
+        if row:
+            return row[0], row[1]
+    except Exception:
+        cursor.execute("SELECT url FROM dl_tokens WHERE token = ?", (token.strip(),))
+        row = cursor.fetchone()
+        if row:
+            return row[0], None
+    finally:
+        conn.close()
+    return None, None
 
 
 def get_user_inline_caption(user_id: int) -> bool:
@@ -1194,16 +1226,16 @@ async def handle_stream_video(request: web.Request) -> web.StreamResponse:
     Когда пользователь отправляет InlineQueryResultVideo в чат, Telegram скачивает MP4 отсюда.
     """
     media_key = request.match_info.get("media_key", "")
-    token = media_key.replace(".mp4", "").strip()
+    token = media_key.replace(".mp4", "").replace(".jpg", "").strip()
 
-    target_url = get_dl_token_url(token)
-    if not target_url:
+    target_url, db_file_path = get_dl_token_info(token)
+    if not target_url and not db_file_path:
         return web.Response(text="Token not found or expired", status=404)
 
-    file_path = _stream_files.get(token)
+    file_path = _stream_files.get(token) or db_file_path
     if not file_path or not os.path.exists(file_path):
         for fname in os.listdir(DOWNLOAD_DIR):
-            if fname.startswith(f"dl_{token}") and (fname.endswith(".mp4") or fname.endswith(".jpg")):
+            if token in fname and (fname.endswith(".mp4") or fname.endswith(".jpg")):
                 cand = os.path.join(DOWNLOAD_DIR, fname)
                 if os.path.exists(cand) and os.path.getsize(cand) > 500:
                     file_path = cand
@@ -1220,6 +1252,7 @@ async def handle_stream_video(request: web.Request) -> web.StreamResponse:
                     if res and res.get("file_path") and os.path.exists(res["file_path"]):
                         file_path = res["file_path"]
                         _stream_files[token] = file_path
+                        update_dl_token_file(token, file_path)
                 except Exception as e:
                     logging.error(f"Stream handler download error: {e}")
                     return web.Response(text=f"Download error: {e}", status=502)
@@ -1402,6 +1435,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=12.0)
         if res and res.get("file_path"):
             _stream_files[token] = res["file_path"]
+            update_dl_token_file(token, res["file_path"])
             is_photo = bool(res.get("is_photo"))
             cap = _make_caption(res.get("title"), is_photo=is_photo)
 
@@ -1468,8 +1502,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         video_url=stream_url,
         mime_type="video/mp4",
         thumbnail_url=plat_icon,
-        title=f"⏳ Загружаю {plat_noun} из {plat_source}...",
-        description="Видео загружается на сервер, нажми чтобы отправить",
+        title=inline_title,
         caption=cap,
         parse_mode="HTML" if cap else None
     )
