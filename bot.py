@@ -677,9 +677,12 @@ def format_friendly_error(e: Exception) -> str:
         )
     elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
         return (
-            "🤖 <b>YouTube временно запросил проверку капчи для облачного IP-адреса.</b>\n\n"
-            "Бот уже запустил анонимную гостевую сессию для обхода защиты. "
-            "Попробуй повторить запрос через пару секунд или отправить другое видео/Shorts."
+            "🤖 <b>YouTube заблокировал облачный IP-адрес хостинга (Render).</b>\n\n"
+            "Хостинг Render работает на серверах Google Cloud, и YouTube блокирует попытки прямого скачивания по IP дата-центра.\n\n"
+            "💡 <b>Как это исправить:</b>\n"
+            "1. В настройках хостинга Render добавить переменную <code>YOUTUBE_PROXY</code> (бесплатный прокси, например с webshare.io).\n"
+            "2. Либо указать cookies гостевого аккаунта в <code>YOUTUBE_COOKIES</code>.\n\n"
+            "<i>(Reels из Instagram и ролики из TikTok работают без ограничений!)</i>"
         )
     elif "file_too_large" in err_text or "too large" in err_text:
         return (
