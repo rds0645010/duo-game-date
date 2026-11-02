@@ -2,7 +2,7 @@ services:
   - type: web
     name: duo-game-date-bot
     env: python
-    buildCommand: pip install -r requirements.txt && python -c "import downloader; downloader.ensure_js_runtime()"
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     plan: free
     autoDeploy: true

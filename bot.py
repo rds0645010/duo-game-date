@@ -1440,12 +1440,12 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=[single_result], cache_time=300, is_personal=True)
         return
 
-    # ─── 3. БЫСТРЫЙ ПРЯМОЙ ПОТОК (TikTok / Instagram) ───
-    # Для этих платформ можно получить прямой URL за <1.5 сек — Telegram скачает сам
+    # ─── 3. БЫСТРЫЙ ПРЯМОЙ ПОТОК (Только для TikTok) ───
+    # Для TikTok CDN отдает видео серверам Telegram без блокировок.
+    # Для Instagram и YouTube прямые CDN-ссылки НЕЛЬЗЯ отдавать в InlineQueryResultVideo,
+    # так как CDN Instagram и YouTube блокируют серверы Telegram (403), вызывая восклицательный знак (!).
     direct_video_url = None
     direct_title = None
-    direct_is_photo = False
-    direct_photo_url = None
 
     if platform == "tiktok":
         try:
@@ -1456,24 +1456,10 @@ async def inline_query_handler(inline_query: InlineQuery):
         except Exception as e:
             logging.debug(f"TikTok direct parse failed: {e}")
 
-    elif platform == "instagram":
-        try:
-            ig_info = await asyncio.wait_for(parse_instagram_embed(clean_url), timeout=4.0)
-            if ig_info and ig_info.get("success"):
-                if ig_info.get("is_video") and ig_info.get("video_url"):
-                    direct_video_url = ig_info["video_url"]
-                    direct_title = ig_info.get("title")
-                elif ig_info.get("is_photo") and ig_info.get("photo_url"):
-                    direct_photo_url = ig_info["photo_url"]
-                    direct_title = ig_info.get("title")
-                    direct_is_photo = True
-        except Exception as e:
-            logging.debug(f"Instagram direct parse failed: {e}")
-
     if direct_video_url:
         cap = _make_caption(direct_title)
         single_result = InlineQueryResultVideo(
-            id=f"dir_{platform[:2]}_{abs(hash(clean_url))}",
+            id=f"dir_tt_{abs(hash(clean_url))}",
             video_url=direct_video_url,
             mime_type="video/mp4",
             thumbnail_url=plat_icon,
@@ -1481,27 +1467,16 @@ async def inline_query_handler(inline_query: InlineQuery):
             caption=cap,
             parse_mode="HTML" if cap else None
         )
-        await inline_query.answer(results=[single_result], cache_time=120, is_personal=True)
+        await inline_query.answer(results=[single_result], cache_time=30, is_personal=True)
         return
 
-    if direct_photo_url:
-        cap = _make_caption(direct_title, is_photo=True)
-        single_result = InlineQueryResultPhoto(
-            id=f"dir_ph_{abs(hash(clean_url))}",
-            photo_url=direct_photo_url,
-            thumbnail_url=direct_photo_url,
-            title=inline_title,
-            caption=cap,
-            parse_mode="HTML" if cap else None
-        )
-        await inline_query.answer(results=[single_result], cache_time=120, is_personal=True)
-        return
-
-    # ─── 4. ДВУХФАЗНАЯ ПОДМЕНА (Стиль SavXBot: 100% надежно, без "Unknown Track") ───
+    # ─── 4. ДВУХФАЗНАЯ ПОДМЕНА (Стиль SavXBot: 100% надежно для Instagram и YouTube) ───
     # Если ролик ещё не в кэше — отдаём аккуратную карточку с кнопкой-индикатором.
-    # При клике Telegram отправляет ChosenInlineResult, бот скачивает видео и подменяет
-    # сообщение на чистое нативное видео через edit_message_media!
+    # При клике Telegram отправляет ChosenInlineResult (или юзер жмет кнопку), бот скачивает видео
+    # и подменяет сообщение на чистое нативное видео через edit_message_media без битых ссылок!
     token = save_dl_token(clean_url)
+    import uuid
+    fresh_id = f"art_v4_{token}_{uuid.uuid4().hex[:6]}"
 
     loading_kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1510,9 +1485,9 @@ async def inline_query_handler(inline_query: InlineQuery):
     )
 
     article_result = InlineQueryResultArticle(
-        id=f"ytv2_{token}",
+        id=fresh_id,
         title=inline_title,
-        description="Нажми, чтобы чистое видео улетело прямо в чат",
+        description="Нажми, чтобы чистое видео улетело прямо в чат ✨",
         thumbnail_url=plat_icon,
         input_message_content=InputTextMessageContent(
             message_text=f"⏳ <b>Загружаю {plat_noun} из {plat_source}...</b>\n<i>Скоро появится в этом сообщении ✨</i>",
@@ -1525,7 +1500,7 @@ async def inline_query_handler(inline_query: InlineQuery):
     asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
 
     try:
-        await inline_query.answer(results=[article_result], cache_time=1, is_personal=True)
+        await inline_query.answer(results=[article_result], cache_time=0, is_personal=True)
     except Exception as ans_err:
         logging.error(f"Error answering inline query: {ans_err}")
 
@@ -1647,7 +1622,12 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
     if not chosen.inline_message_id:
         return
 
-    token = chosen.result_id.replace("ytv2_", "").replace("tok_", "").strip()
+    rid = chosen.result_id
+    if rid.startswith("art_v4_"):
+        parts = rid.split("_")
+        token = parts[2]
+    else:
+        token = rid.replace("ytv2_", "").replace("tok_", "").strip()
     await execute_inline_delivery(chosen.inline_message_id, token, chosen.from_user.id)
 
 

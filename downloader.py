@@ -668,7 +668,7 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         },
         'extractor_args': extractor_args or {
             'youtube': {
-                'player_client': ['visionos', 'android_vr']
+                'player_client': ['android', 'android_creator']
             }
         },
         'js_runtimes': {
@@ -817,28 +817,39 @@ async def download_video(url: str, user_id: int):
 
     # 2. YOUTUBE SHORTS / Обычные видео:
     if platform == "youtube":
-        # Шаг 1: Быстрый локальный yt-dlp с клиентом VisionOS / Android VR HLS (< 3 сек)
+        # Шаг 1: Быстрый локальный yt-dlp с клиентом Android (< 2 сек, без блокировок)
         try:
-            yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
+            yt_args = {'youtube': {'player_client': ['android', 'android_creator']}}
             res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
             if res and is_valid_mp4_file(res.get("file_path")):
                 res["platform"] = "youtube"
                 return res
         except Exception as yt_err:
-            logger.warning(f"yt-dlp visionos 720p failed for {clean_url}: {yt_err}")
+            logger.warning(f"yt-dlp android 720p failed for {clean_url}: {yt_err}")
 
-        # Шаг 2: yt-dlp fallback 480p с альтернативными клиентами
+        # Шаг 2: yt-dlp fallback с mweb + android
         try:
-            tv_args = {'youtube': {'player_client': ['tv', 'mweb', 'android_vr']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args)
+            mweb_args = {'youtube': {'player_client': ['mweb', 'android']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=mweb_args)
             if res and is_valid_mp4_file(res.get("file_path")):
                 res["platform"] = "youtube"
                 res["low_quality_notice"] = True
                 return res
         except Exception as yt_err2:
-            logger.warning(f"yt-dlp 480p fallback failed for {clean_url}: {yt_err2}")
+            logger.warning(f"yt-dlp mweb fallback failed for {clean_url}: {yt_err2}")
 
-        # Шаг 3: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
+        # Шаг 3: yt-dlp fallback с visionos / android_vr
+        try:
+            vr_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=vr_args)
+            if res and is_valid_mp4_file(res.get("file_path")):
+                res["platform"] = "youtube"
+                res["low_quality_notice"] = True
+                return res
+        except Exception as yt_err3:
+            logger.warning(f"yt-dlp visionos fallback failed for {clean_url}: {yt_err3}")
+
+        # Шаг 4: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
         vid_id = extract_youtube_id(clean_url)
         dest_path = f"{output_prefix}.mp4"
         if vid_id:
