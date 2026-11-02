@@ -578,67 +578,57 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
 
 
 
-def setup_cookies_file():
+def setup_cookies_file(platform: str = None):
     """
-    Создает файл cookies.txt для yt-dlp из переменных окружения
-    INSTAGRAM_COOKIES и YOUTUBE_COOKIES, либо автоматически генерирует
-    анонимную гостевую сессию (Guest Session) с YouTube, не требующую аккаунта.
+    Создает файл cookies.txt для yt-dlp ТОЛЬКО ЕСЛИ пользователь передал
+    INSTAGRAM_COOKIES или YOUTUBE_COOKIES в переменных окружения.
+    Никогда не генерирует искусственные гостевые cookies, которые на дата-центрах
+    (Render) ловят капчу и блокируют скачивание для всех последующих запросов.
     """
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
     raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
     raw_yt = os.environ.get("YOUTUBE_COOKIES", "").strip()
 
-    if raw_ig or raw_yt:
-        try:
-            with open(cookies_path, "w", encoding="utf-8") as cf:
-                cf.write("# Netscape HTTP Cookie File\n")
-                if raw_yt:
-                    if "\t" in raw_yt:
-                        cf.write(raw_yt.strip() + "\n")
-                    else:
-                        for part in raw_yt.replace("Cookie:", "").split(";"):
-                            if "=" in part:
-                                k, v = part.strip().split("=", 1)
-                                cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-                if raw_ig:
-                    if "\t" in raw_ig:
-                        cf.write(raw_ig.strip() + "\n")
-                    else:
-                        for part in raw_ig.replace("Cookie:", "").split(";"):
-                            if "=" in part:
-                                k, v = part.strip().split("=", 1)
-                                cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-            return cookies_path
-        except Exception as ce:
-            logger.warning(f"Could not setup cookies file: {ce}")
+    # Если явных cookies нет — удаляем старый файл cookies.txt, чтобы не использовать капчу
+    if not raw_ig and not raw_yt:
+        if os.path.exists(cookies_path):
+            try:
+                os.remove(cookies_path)
+            except Exception:
+                pass
+        return None
 
-    if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 10:
-        return cookies_path
+    if platform == "youtube" and not raw_yt:
+        return None
+    if platform == "instagram" and not raw_ig:
+        return None
 
-    # Автоматическая генерация анонимных гостевых cookies без входа в аккаунт
-    import http.cookiejar
-    import urllib.request
     try:
-        cj = http.cookiejar.MozillaCookieJar(cookies_path)
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-        req = urllib.request.Request(
-            'https://www.youtube.com',
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-        )
-        opener.open(req, timeout=4)
-        cj.save(ignore_discard=True, ignore_expires=True)
-        if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 10:
-            return cookies_path
-    except Exception as ge:
-        logger.debug(f"Guest cookie auto-generation skipped: {ge}")
+        with open(cookies_path, "w", encoding="utf-8") as cf:
+            cf.write("# Netscape HTTP Cookie File\n")
+            if raw_yt:
+                if "\t" in raw_yt:
+                    cf.write(raw_yt.strip() + "\n")
+                else:
+                    for part in raw_yt.replace("Cookie:", "").split(";"):
+                        if "=" in part:
+                            k, v = part.strip().split("=", 1)
+                            cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+            if raw_ig:
+                if "\t" in raw_ig:
+                    cf.write(raw_ig.strip() + "\n")
+                else:
+                    for part in raw_ig.replace("Cookie:", "").split(";"):
+                        if "=" in part:
+                            k, v = part.strip().split("=", 1)
+                            cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
+        return cookies_path
+    except Exception as ce:
+        logger.warning(f"Could not setup cookies file: {ce}")
+        return None
 
-    return None
 
-
-def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None):
+def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None, platform: str = None):
     """
     Synchronous yt-dlp execution run inside asyncio.to_thread.
     Uses Apple VisionOS HLS protocol (m3u8_native) to bypass YouTube bot detection and 403 Forbidden
@@ -661,7 +651,8 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         f"best"
     )
     
-    cookie_file = setup_cookies_file()
+    plat = platform or detect_platform(url)
+    cookie_file = setup_cookies_file(plat)
 
     ydl_opts = {
         'outtmpl': out_tmpl,
@@ -824,50 +815,95 @@ async def download_video(url: str, user_id: int):
                 except Exception as e:
                     logger.warning(f"TikTok photo download failed: {e}")
 
-    # 2. YOUTUBE SHORTS / Обычные видео: Мульти-провайдерный каскад (Invidious -> Piped -> yt-dlp)
+    # 2. YOUTUBE SHORTS / Обычные видео:
     if platform == "youtube":
+        # Шаг 1: Быстрый локальный yt-dlp с клиентом VisionOS / Android VR HLS (< 3 сек)
+        try:
+            yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
+            if res and is_valid_mp4_file(res.get("file_path")):
+                res["platform"] = "youtube"
+                return res
+        except Exception as yt_err:
+            logger.warning(f"yt-dlp visionos 720p failed for {clean_url}: {yt_err}")
+
+        # Шаг 2: yt-dlp fallback 480p с альтернативными клиентами
+        try:
+            tv_args = {'youtube': {'player_client': ['tv', 'mweb', 'android_vr']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args)
+            if res and is_valid_mp4_file(res.get("file_path")):
+                res["platform"] = "youtube"
+                res["low_quality_notice"] = True
+                return res
+        except Exception as yt_err2:
+            logger.warning(f"yt-dlp 480p fallback failed for {clean_url}: {yt_err2}")
+
+        # Шаг 3: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
         vid_id = extract_youtube_id(clean_url)
         dest_path = f"{output_prefix}.mp4"
-        async with aiohttp.ClientSession() as session:
-            # 1. Invidious proxy (?local=true) — обход блокировки дата-центров
-            if vid_id:
+        if vid_id:
+            async with aiohttp.ClientSession() as session:
                 try:
                     inv_res = await _try_invidious_fallback(session, vid_id, dest_path)
                     if inv_res and is_valid_mp4_file(inv_res.get("file_path")):
                         return inv_res
                 except Exception as e:
-                    logger.debug(f"Invidious stage notice: {e}")
-
-            # 2. Piped proxy — проксированные потоки pipedproxy
-            if vid_id:
+                    logger.debug(f"Invidious stage error: {e}")
                 try:
                     piped_res = await _try_piped_fallback(session, vid_id, dest_path)
                     if piped_res and is_valid_mp4_file(piped_res.get("file_path")):
                         return piped_res
                 except Exception as e:
-                    logger.debug(f"Piped stage notice: {e}")
+                    logger.debug(f"Piped stage error: {e}")
 
-        # 3. yt-dlp с клиентом VisionOS / Android VR HLS (локальное скачивание)
-        try:
-            yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
-            res["platform"] = "youtube"
+        raise Exception("youtube_bot_detection")
+
+    # 3. INSTAGRAM REELS & TIKTOK FALLBACK:
+    try:
+        res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720)
+        if res and is_valid_mp4_file(res.get("file_path")):
+            res["platform"] = platform
             return res
-        except Exception as yt_err:
-            logger.warning(f"yt-dlp 720p failed for YouTube {clean_url}: {yt_err}")
-            try:
-                tv_args = {'youtube': {'player_client': ['tv', 'mweb', 'android_vr']}}
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args)
-                res["platform"] = "youtube"
-                res["low_quality_notice"] = True
-                return res
-            except Exception as fb_err:
-                logger.error(f"All YouTube download methods failed: {fb_err}")
-                if "sign in to confirm" in str(fb_err).lower() or "bot" in str(fb_err).lower():
-                    raise Exception("youtube_bot_detection")
-                raise fb_err
+    except Exception as e:
+        err_msg = str(e)
+        logger.warning(f"Download 720p failed for {clean_url}: {e}")
 
-    # 3. INSTAGRAM REELS / TIKTOK FALLBACK
+        # Для Instagram: пробуем embed/альбомный парсер при ЛЮБОЙ ошибке yt-dlp
+        if platform == "instagram":
+            m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', clean_url)
+            if m:
+                shortcode = m.group(1)
+                try:
+                    logger.info(f"Attempting Instagram embed/photo fallback for {shortcode}...")
+                    media_res = await try_download_instagram_media(shortcode, output_prefix)
+                    if media_res:
+                        return media_res
+                except Exception as fb_err:
+                    logger.warning(f"Instagram fallback failed: {fb_err}")
+
+        # Если в публикации нет видео (это фотопост или карусель в Instagram)
+        if "no video in this post" in err_msg.lower():
+            raise Exception("is_photo_post")
+
+        # If file too large, retry in lower resolution (360p)
+        if "max_filesize" in err_msg or "too large" in err_msg.lower():
+            try:
+                logger.info(f"Retrying in lower resolution (360p) for {clean_url}...")
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 360)
+                if res and is_valid_mp4_file(res.get("file_path")):
+                    res["platform"] = platform
+                    res["low_quality_notice"] = True
+                    return res
+            except Exception as e2:
+                raise Exception(f"file_too_large: {e2}")
+
+        # Если это возрастное ограничение (18+) или закрытая аудитория в Instagram
+        if "available to everyone" in err_msg.lower() or "certain audiences" in err_msg.lower():
+            raise Exception("instagram_age_restricted")
+
+        raise e
+
+    raise Exception("download_failed")
 
 
 async def extract_direct_video_info(url: str):

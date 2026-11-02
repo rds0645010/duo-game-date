@@ -475,20 +475,28 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
                 sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
                 if sent and sent.photo:
                     f_id = sent.photo[-1].file_id
-                    try: await bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                    except Exception: pass
+                    if chat_id > 0:
+                        asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
                     return f_id
             else:
                 sent = await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True)
                 if sent and sent.video:
                     f_id = sent.video.file_id
-                    try: await bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                    except Exception: pass
+                    if chat_id > 0:
+                        asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
                     return f_id
         except Exception as fb_err:
             logging.debug(f"Fallback upload chat {chat_id} error: {fb_err}")
 
     return None
+
+
+async def _delayed_delete_message(chat_id: int, message_id: int, delay_seconds: int = 60):
+    try:
+        await asyncio.sleep(delay_seconds)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
 
 def save_user(user_id: int, username: str, first_name: str, photo_url: str = None, gender: str = None):
@@ -752,6 +760,9 @@ async def process_video_download(message: types.Message, url: str):
 
         # Выполняем скачивание
         res = await download_video(clean_url, user_id)
+        if not res or not isinstance(res, dict):
+            await safe_edit_status(status_msg, "❌ <b>Не удалось скачать видео.</b>\nВозможно, видео удалено или автор ограничил доступ.")
+            return
         file_path = res.get("file_path")
 
         if not file_path or not os.path.exists(file_path):
@@ -1494,7 +1505,7 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     loading_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data="noop")]
+            [InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data=f"get_vid:{token}")]
         ]
     )
 
@@ -1522,86 +1533,108 @@ async def inline_query_handler(inline_query: InlineQuery):
 # ==========================================
 # 🔄 ОБРАБОТКА ВЫБОРА ИНЛАЙН-РЕЗУЛЬТАТА (SavXBot паттерн)
 # ==========================================
+_active_inline_jobs = set()
+
 async def execute_inline_delivery(inline_message_id: str, token: str, user_id: int):
     """Единая функция выполнения скачивания и подмены сообщения в инлайне."""
-    url = get_dl_token_url(token)
-    if not url:
-        try:
-            await bot.edit_message_text(
-                inline_message_id=inline_message_id,
-                text="⚠️ <b>Ссылка устарела.</b> Пожалуйста, вызовите бота заново через инлайн.",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
+    job_key = f"{inline_message_id}_{token}"
+    if job_key in _active_inline_jobs:
         return
+    _active_inline_jobs.add(job_key)
 
-    cached = get_cached_media(url)
-    file_id = cached.get("file_id") if cached else None
-    is_photo = (cached.get("media_type") == "photo") if cached else False
-
-    if not file_id:
-        try:
-            res = await download_video(url, user_id)
-            if res and res.get("file_path"):
-                is_photo = bool(res.get("is_photo"))
-                file_id = await upload_media_to_telegram(
-                    res["file_path"],
-                    is_photo=is_photo,
-                    target_user_id=user_id,
-                    title=res.get("title", ""),
-                    platform=res.get("platform", "")
-                )
-                if file_id:
-                    save_cached_media(
-                        url, file_id,
-                        "photo" if is_photo else "video",
-                        res.get("title", ""),
-                        res.get("platform", ""),
-                        res.get("author", "")
-                    )
-                try:
-                    if os.path.exists(res["file_path"]):
-                        os.remove(res["file_path"])
-                except Exception:
-                    pass
-        except Exception as e:
-            logging.error(f"Inline download error for {url}: {e}")
-            err_text = format_friendly_error(e)
-            retry_kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")]]
-            )
+    try:
+        url = get_dl_token_url(token)
+        if not url:
             try:
                 await bot.edit_message_text(
                     inline_message_id=inline_message_id,
-                    text=f"{err_text}\n\n<i>Нажмите кнопку ниже для повторной попытки 👇</i>",
-                    parse_mode="HTML",
-                    reply_markup=retry_kb
+                    text="⚠️ <b>Ссылка устарела.</b> Пожалуйста, вызовите бота заново через инлайн.",
+                    parse_mode="HTML"
                 )
             except Exception:
                 pass
             return
 
-    if file_id:
-        caption_enabled = get_user_inline_caption(user_id)
-        caption = None
-        if caption_enabled:
-            caption = "🎬 ✨ <i>Скачано через @duo_play_date_bot</i>"
+        cached = get_cached_media(url)
+        file_id = cached.get("file_id") if cached else None
+        is_photo = (cached.get("media_type") == "photo") if cached else False
 
-        try:
-            media_obj = (
-                InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
-                if is_photo
-                else InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
-            )
-            await bot.edit_message_media(
-                inline_message_id=inline_message_id,
-                media=media_obj,
-                reply_markup=None
-            )
-            logging.info(f"Successfully replaced inline message {inline_message_id} with media!")
-        except Exception as edit_err:
-            logging.error(f"Failed to edit_message_media: {edit_err}")
+        if not file_id:
+            try:
+                # 1. Проверяем, успела ли фоновая предзагрузка скачать файл на диск
+                pre_path = _stream_files.get(token)
+                if pre_path and os.path.exists(pre_path) and is_valid_mp4_file(pre_path):
+                    res = {
+                        "file_path": pre_path,
+                        "title": "Видео",
+                        "platform": detect_platform(url) or ""
+                    }
+                else:
+                    res = await download_video(url, user_id)
+
+                if res and isinstance(res, dict) and res.get("file_path"):
+                    is_photo = bool(res.get("is_photo"))
+                    file_id = await upload_media_to_telegram(
+                        res["file_path"],
+                        is_photo=is_photo,
+                        target_user_id=user_id,
+                        title=res.get("title", ""),
+                        platform=res.get("platform", "")
+                    )
+                    if file_id:
+                        save_cached_media(
+                            url, file_id,
+                            "photo" if is_photo else "video",
+                            res.get("title", ""),
+                            res.get("platform", ""),
+                            res.get("author", "")
+                        )
+                    try:
+                        if os.path.exists(res["file_path"]):
+                            os.remove(res["file_path"])
+                    except Exception:
+                        pass
+                else:
+                    raise Exception("download_failed")
+            except Exception as e:
+                logging.error(f"Inline download error for {url}: {e}")
+                err_text = format_friendly_error(e)
+                retry_kb = InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")]]
+                )
+                try:
+                    await bot.edit_message_text(
+                        inline_message_id=inline_message_id,
+                        text=f"{err_text}\n\n<i>Нажмите кнопку ниже для повторной попытки 👇</i>",
+                        parse_mode="HTML",
+                        reply_markup=retry_kb
+                    )
+                except Exception:
+                    pass
+                return
+
+        if file_id:
+            caption_enabled = get_user_inline_caption(user_id)
+            caption = None
+            if caption_enabled:
+                caption = "🎬 ✨ <i>Скачано через @duo_play_date_bot</i>"
+
+            try:
+                media_obj = (
+                    InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
+                    if is_photo
+                    else InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
+                )
+                await bot.edit_message_media(
+                    inline_message_id=inline_message_id,
+                    media=media_obj,
+                    reply_markup=None
+                )
+                logging.info(f"Successfully replaced inline message {inline_message_id} with media!")
+            except Exception as edit_err:
+                logging.error(f"Failed to edit_message_media: {edit_err}")
+    finally:
+        _active_inline_jobs.discard(job_key)
 
 
 @dp.chosen_inline_result()
@@ -1616,6 +1649,16 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
 
     token = chosen.result_id.replace("ytv2_", "").replace("tok_", "").strip()
     await execute_inline_delivery(chosen.inline_message_id, token, chosen.from_user.id)
+
+
+@dp.callback_query(F.data.startswith("get_vid:"))
+async def handle_get_vid_callback(callback: CallbackQuery):
+    if not callback.inline_message_id:
+        await callback.answer()
+        return
+    token = callback.data.split(":", 1)[1]
+    await callback.answer("⏳ Скачиваю видео в чат...", show_alert=False)
+    await execute_inline_delivery(callback.inline_message_id, token, callback.from_user.id)
 
 
 @dp.callback_query(F.data == "noop")
@@ -1636,7 +1679,7 @@ async def handle_retry_callback(callback: CallbackQuery):
             text="⏳ <b>Повторная загрузка видео...</b>\n<i>Пожалуйста, подождите ✨</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data="noop")]]
+                inline_keyboard=[[InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data=f"get_vid:{token}")]]
             )
         )
     except Exception:
