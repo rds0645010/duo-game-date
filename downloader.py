@@ -520,11 +520,24 @@ def setup_cookies_file():
 def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None):
     """
     Synchronous yt-dlp execution run inside asyncio.to_thread.
+    Uses Apple VisionOS HLS protocol (m3u8_native) to bypass YouTube bot detection and 403 Forbidden
+    on datacenter IPs completely anonymously without needing a Google account or cookies.
     """
     out_tmpl = f"{output_prefix}.%(ext)s"
     
-    # Try pre-merged MP4 first (works even without ffmpeg), then bestvideo+bestaudio
-    format_spec = f"best[ext=mp4][height<={height_limit}]/bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height_limit}][ext=mp4]/best[height<={height_limit}]/best"
+    # Priority cascade:
+    # 1. HLS m3u8_native video + audio (visionos bypass)
+    # 2. H.264 (avc1) + AAC (mp4a) for native fast playback in Telegram
+    # 3. Best video + best audio merged into MP4
+    # 4. Best single pre-merged MP4 stream
+    format_spec = (
+        f"bestvideo[protocol^=m3u8][height<={height_limit}]+bestaudio[protocol^=m3u8]/"
+        f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+        f"bestvideo[height<={height_limit}]+bestaudio/"
+        f"best[height<={height_limit}][ext=mp4]/"
+        f"best[height<={height_limit}]/"
+        f"best"
+    )
     
     cookie_file = setup_cookies_file()
 
@@ -535,12 +548,12 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         'no_warnings': True,
         'max_filesize': max_size_bytes,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
             'Accept-Language': 'en-US,en;q=0.9',
         },
         'extractor_args': extractor_args or {
             'youtube': {
-                'player_client': ['tv_samsung', 'visionos', 'web', 'android_vr']
+                'player_client': ['visionos', 'android_vr']
             }
         },
         'js_runtimes': {
@@ -561,6 +574,9 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
         }]
+        ydl_opts['postprocessor_args'] = {
+            'ffmpeg': ['-movflags', '+faststart']
+        }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -684,9 +700,10 @@ async def download_video(url: str, user_id: int):
                     logger.warning(f"TikTok photo download failed: {e}")
 
     # 2. YOUTUBE SHORTS / INSTAGRAM REELS / TIKTOK FALLBACK
-    # First attempt: 720p
+    # First attempt: 720p (with visionos & android_vr priority for YouTube)
     try:
-        res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720)
+        yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}} if platform == "youtube" else None
+        res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
         res["platform"] = platform
         return res
     except Exception as e:
@@ -710,24 +727,26 @@ async def download_video(url: str, user_id: int):
         if "no video in this post" in err_msg.lower():
             raise Exception("is_photo_post")
 
-        # Если YouTube запросил капчу или вход с аккаунта
-        if platform == "youtube" and ("sign in to confirm" in err_msg.lower() or "confirm you're not a bot" in err_msg.lower() or "bot" in err_msg.lower()):
-            # Пробуем fallback через visionos / android_vr клиенты YouTube
+        # Если YouTube: пробуем fallback 480p/360p с visionos/android_vr
+        if platform == "youtube":
             try:
-                logger.info(f"Retrying YouTube with visionos/android_vr player_client fallback for {clean_url}...")
-                tv_args = {'youtube': {'player_client': ['visionos', 'android_vr', 'tv_samsung']}}
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=tv_args)
+                logger.info(f"Retrying YouTube with 480p lower resolution fallback for {clean_url}...")
+                yt_fb_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=yt_fb_args)
                 res["platform"] = platform
+                res["low_quality_notice"] = True
                 return res
-            except Exception as tv_err:
-                logger.warning(f"YouTube player client fallback failed: {tv_err}")
-                raise Exception("youtube_bot_detection")
+            except Exception as yt_err:
+                logger.warning(f"YouTube 480p fallback failed: {yt_err}")
+                if "sign in to confirm" in str(yt_err).lower() or "confirm you're not a bot" in str(yt_err).lower():
+                    raise Exception("youtube_bot_detection")
 
-        # If file too large or format error, retry in lower resolution (360p)
+        # If file too large, retry in lower resolution (360p)
         if "max_filesize" in err_msg or "too large" in err_msg.lower():
             try:
                 logger.info(f"Retrying in lower resolution (360p) for {clean_url}...")
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 360)
+                yt_args = {'youtube': {'player_client': ['visionos', 'android_vr']}} if platform == "youtube" else None
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 360, extractor_args=yt_args)
                 res["platform"] = platform
                 res["low_quality_notice"] = True
                 return res

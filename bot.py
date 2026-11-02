@@ -1510,7 +1510,7 @@ async def inline_query_handler(inline_query: InlineQuery):
     asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
 
     try:
-        await inline_query.answer(results=[article_result], cache_time=10, is_personal=True)
+        await inline_query.answer(results=[article_result], cache_time=1, is_personal=True)
     except Exception as ans_err:
         logging.error(f"Error answering inline query: {ans_err}")
 
@@ -1539,6 +1539,7 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
     # 1. Проверяем кэш (вдруг уже готово)
     cached = get_cached_media(url)
     file_id = cached.get("file_id") if cached else None
+    is_photo = (cached.get("media_type") == "photo") if cached else False
 
     if not file_id:
         try:
@@ -1560,12 +1561,19 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
                         res.get("platform", ""),
                         res.get("author", "")
                     )
+                # Удаляем локальный файл после загрузки
+                try:
+                    if os.path.exists(res["file_path"]):
+                        os.remove(res["file_path"])
+                except Exception:
+                    pass
         except Exception as e:
             logging.error(f"Chosen inline download error for {url}: {e}")
+            err_text = format_friendly_error(e)
             try:
                 await bot.edit_message_text(
                     inline_message_id=chosen.inline_message_id,
-                    text="❌ <b>Не удалось загрузить видео.</b>\n<i>Возможно, файл превышает 50 МБ или автор ограничил доступ.</i>",
+                    text=err_text,
                     parse_mode="HTML"
                 )
             except Exception:
@@ -1579,17 +1587,17 @@ async def handle_chosen_inline_result(chosen: ChosenInlineResult):
             caption = "🎬 ✨ <i>Скачано через @duo_play_date_bot</i>"
 
         try:
+            media_obj = (
+                InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
+                if is_photo
+                else InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
+            )
             await bot.edit_message_media(
                 inline_message_id=chosen.inline_message_id,
-                media=InputMediaVideo(
-                    media=file_id,
-                    caption=caption,
-                    parse_mode="HTML" if caption else None,
-                    supports_streaming=True
-                ),
+                media=media_obj,
                 reply_markup=None
             )
-            logging.info(f"Successfully replaced inline message {chosen.inline_message_id} with video!")
+            logging.info(f"Successfully replaced inline message {chosen.inline_message_id} with media!")
         except Exception as edit_err:
             logging.error(f"Failed to edit_message_media: {edit_err}")
 
