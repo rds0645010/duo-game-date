@@ -158,9 +158,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id INTEGER PRIMARY KEY,
             inline_caption INTEGER DEFAULT 0,
+            save_inline_to_pm INTEGER DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE user_settings ADD COLUMN save_inline_to_pm INTEGER DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -300,6 +305,41 @@ def set_user_inline_caption(user_id: int, enabled: bool):
     conn.close()
 
 
+def get_user_save_to_pm(user_id: int) -> bool:
+    if not user_id:
+        return False
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT save_inline_to_pm FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row is not None and row[0] is not None:
+            return bool(row[0])
+    except Exception:
+        pass
+    return False  # По умолчанию выключено: личка остаётся абсолютно чистой!
+
+
+def set_user_save_to_pm(user_id: int, enabled: bool):
+    if not user_id:
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_settings (user_id, save_inline_to_pm)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                save_inline_to_pm = excluded.save_inline_to_pm,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, 1 if enabled else 0))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def get_canonical_media_key(url: str) -> str:
     """Нормализует любые варианты ссылок одного и того же поста к общему ключу"""
     if not url:
@@ -431,6 +471,8 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
             f"✨ <i>Сохранено при отправке через @duo_play_date_bot</i>"
         )
 
+    should_save_in_pm = get_user_save_to_pm(target_user_id) if target_user_id else False
+
     # 1. Пробуем отправить в ЛС пользователя
     if target_user_id:
         try:
@@ -438,23 +480,29 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
                 sent = await bot.send_photo(
                     chat_id=target_user_id,
                     photo=FSInputFile(file_path),
-                    caption=caption_text,
-                    parse_mode="HTML" if caption_text else None,
+                    caption=caption_text if should_save_in_pm else None,
+                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
                     disable_notification=True
                 )
                 if sent and sent.photo:
-                    return sent.photo[-1].file_id
+                    f_id = sent.photo[-1].file_id
+                    if not should_save_in_pm:
+                        asyncio.create_task(_delayed_delete_message(target_user_id, sent.message_id, 2))
+                    return f_id
             else:
                 sent = await bot.send_video(
                     chat_id=target_user_id,
                     video=FSInputFile(file_path),
-                    caption=caption_text,
-                    parse_mode="HTML" if caption_text else None,
+                    caption=caption_text if should_save_in_pm else None,
+                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
                     supports_streaming=True,
                     disable_notification=True
                 )
                 if sent and sent.video:
-                    return sent.video.file_id
+                    f_id = sent.video.file_id
+                    if not should_save_in_pm:
+                        asyncio.create_task(_delayed_delete_message(target_user_id, sent.message_id, 2))
+                    return f_id
         except Exception as u_err:
             logging.info(f"Target user {target_user_id} upload failed ({u_err}), trying silent fallback...")
 
@@ -1096,15 +1144,27 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
 
 
 def get_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    is_enabled = get_user_inline_caption(user_id)
-    btn_text = "🟢 Подпись: Включена" if is_enabled else "⚪ Подпись: Выключена"
-    toggle_val = "0" if is_enabled else "1"
+    is_caption = get_user_inline_caption(user_id)
+    is_pm_save = get_user_save_to_pm(user_id)
+
+    cap_btn = "🟢 Подпись: Включена" if is_caption else "⚪ Подпись: Выключена"
+    toggle_cap = "0" if is_caption else "1"
+
+    pm_btn = "🟢 Архив в ЛС: Включен" if is_pm_save else "⚪ Архив в ЛС: Выключен (чистая личка)"
+    toggle_pm = "0" if is_pm_save else "1"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{btn_text} (нажми для смены)",
-                    callback_data=f"toggle_caption_{toggle_val}"
+                    text=f"{cap_btn} (сменить)",
+                    callback_data=f"toggle_caption_{toggle_cap}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{pm_btn} (сменить)",
+                    callback_data=f"toggle_pm_{toggle_pm}"
                 )
             ],
             [
@@ -1118,18 +1178,29 @@ def get_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def get_settings_text(user_id: int) -> str:
-    is_enabled = get_user_inline_caption(user_id)
+    is_caption = get_user_inline_caption(user_id)
+    is_pm_save = get_user_save_to_pm(user_id)
+
     mode_descr = (
         "🟢 <b>Включена</b> — под видео будет автор, название и ссылка"
-        if is_enabled else
+        if is_caption else
         "⚪ <b>Выключена (по умолчанию)</b> — видео отправляется абсолютно чистым, без текста"
     )
+
+    pm_descr = (
+        "🟢 <b>Включен</b> — копии отправленных через @ видео сохраняются в вашей переписке с ботом"
+        if is_pm_save else
+        "⚪ <b>Выключен (по умолчанию)</b> — личка бота остаётся чистой, сообщения мгновенно удаляются после отправки другу"
+    )
+
     return (
         "⚙️ <b>НАСТРОЙКИ ЗАГРУЗЧИКА И DUO</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n\n"
-        "💬 <b>Подпись к видео при отправке через @ в чатах:</b>\n\n"
-        f"Текущий режим: {mode_descr}\n\n"
-        "<i>Нажми на кнопку ниже, чтобы переключить режим:</i>"
+        "💬 <b>Подпись к видео (при отправке через @):</b>\n"
+        f"{mode_descr}\n\n"
+        "📥 <b>Сохранение видео в ЛС бота:</b>\n"
+        f"{pm_descr}\n\n"
+        "<i>Нажмите на кнопку ниже, чтобы переключить режим 👇</i>"
     )
 
 
@@ -1169,6 +1240,23 @@ async def callback_toggle_caption(callback: types.CallbackQuery):
     set_user_inline_caption(callback.from_user.id, new_val)
 
     tip = "🟢 Подпись к видео включена!" if new_val else "⚪ Чистый режим активирован (без текста)!"
+    await callback.answer(tip)
+    try:
+        await callback.message.edit_text(
+            get_settings_text(callback.from_user.id),
+            reply_markup=get_settings_keyboard(callback.from_user.id),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("toggle_pm_"))
+async def callback_toggle_pm(callback: types.CallbackQuery):
+    new_val = callback.data.replace("toggle_pm_", "") == "1"
+    set_user_save_to_pm(callback.from_user.id, new_val)
+
+    tip = "🟢 Архив в ЛС включен!" if new_val else "⚪ Личка будет чистой (видео не сохраняются в ЛС)!"
     await callback.answer(tip)
     try:
         await callback.message.edit_text(

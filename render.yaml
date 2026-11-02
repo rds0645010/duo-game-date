@@ -2,7 +2,7 @@ services:
   - type: web
     name: duo-game-date-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: "pip install -r requirements.txt && curl -fsSL https://deno.land/install.sh | sh"
     startCommand: python bot.py
     plan: free
     autoDeploy: true
@@ -13,3 +13,5 @@ services:
         value: https://rds0645010.github.io/duo-game-date/
       - key: PORT
         value: 10000
+      - key: YOUTUBE_PROXY
+        sync: false

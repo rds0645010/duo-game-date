@@ -52,7 +52,22 @@ def ensure_js_runtime():
         except Exception as e:
             logger.debug(f"Deno check error: {e}")
 
-    # 3. Проверяем локальную папку bin/
+    # 3. Проверяем стандартные пути установки Deno на Linux/Render (~/.deno/bin)
+    candidate_deno_paths = [
+        os.path.expanduser("~/.deno/bin/deno"),
+        "/opt/render/.deno/bin/deno",
+        "/root/.deno/bin/deno",
+        os.path.join(os.getcwd(), "bin", "deno" if os.name != "nt" else "deno.exe")
+    ]
+    for cand in candidate_deno_paths:
+        if os.path.exists(cand) and os.path.getsize(cand) > 1000:
+            cand_dir = os.path.dirname(cand)
+            if cand_dir not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = cand_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"JS Runtime: Found Deno at {cand} and added to PATH")
+            return "deno", cand
+
+    # 4. Проверяем локальную папку bin/
     bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
     os.makedirs(bin_dir, exist_ok=True)
     local_deno = os.path.join(bin_dir, "deno" if os.name != "nt" else "deno.exe")
@@ -62,7 +77,7 @@ def ensure_js_runtime():
         logger.info(f"JS Runtime: Local Deno found at {local_deno}")
         return "deno", local_deno
 
-    # 4. Если на Linux (Render) — автоматически скачиваем standalone Deno v2.9.8
+    # 5. Если на Linux (Render) — автоматически скачиваем standalone Deno v2.9.8
     if platform.system() == "Linux":
         logger.info("⚡ Скачивание standalone Deno runtime для обхода защиты YouTube на Render...")
         import urllib.request
@@ -194,11 +209,12 @@ def extract_youtube_id(url: str):
 
 
 DEFAULT_INVIDIOUS_INSTANCES = [
-    "https://inv.nadeko.net",
+    "https://yt.chocolatemoo53.com",
     "https://invidious.nerdvpn.de",
+    "https://inv.nadeko.net",
+    "https://invidious.jing.rocks",
     "https://invidious.privacyredirect.com",
     "https://yewtu.be",
-    "https://yt.chocolatemoo53.com",
     "https://invidious.tiekoetter.com"
 ]
 
@@ -631,21 +647,19 @@ def setup_cookies_file(platform: str = None):
 def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None, platform: str = None):
     """
     Synchronous yt-dlp execution run inside asyncio.to_thread.
-    Uses Apple VisionOS HLS protocol (m3u8_native) to bypass YouTube bot detection and 403 Forbidden
-    on datacenter IPs completely anonymously without needing a Google account or cookies.
     """
     out_tmpl = f"{output_prefix}.%(ext)s"
     
     # Priority cascade:
-    # 1. HLS m3u8_native video + audio (visionos bypass)
-    # 2. H.264 (avc1) + AAC (mp4a) for native fast playback in Telegram
-    # 3. Best video + best audio merged into MP4
-    # 4. Best single pre-merged MP4 stream
+    # 1. Best MP4 video + M4A audio within height limit (native for Telegram)
+    # 2. AVC1 (h264) + MP4A
+    # 3. Any bestvideo + bestaudio merged to MP4
+    # 4. HLS / pre-muxed single stream
     format_spec = (
-        f"best[protocol^=m3u8][height<={height_limit}]/"
-        f"bestvideo[protocol^=m3u8][height<={height_limit}]+bestaudio/"
+        f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"
         f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
         f"bestvideo[height<={height_limit}]+bestaudio/"
+        f"best[protocol^=m3u8][height<={height_limit}]/"
         f"best[height<={height_limit}][ext=mp4]/"
         f"best[height<={height_limit}]/"
         f"best"
@@ -653,6 +667,9 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     
     plat = platform or detect_platform(url)
     cookie_file = setup_cookies_file(plat)
+
+    # Прокси для обхода блокировок дата-центров (например, Render GCP)
+    proxy = os.getenv("YOUTUBE_PROXY") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
 
     ydl_opts = {
         'outtmpl': out_tmpl,
@@ -663,13 +680,8 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         'geo_bypass': True,
         'nocheckcertificate': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
-        },
-        'extractor_args': extractor_args or {
-            'youtube': {
-                'player_client': ['android', 'android_creator']
-            }
         },
         'js_runtimes': {
             'node': {},
@@ -678,6 +690,18 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         },
         'remote_components': {'ejs:github'},
     }
+
+    if proxy:
+        ydl_opts['proxy'] = proxy
+
+    if extractor_args:
+        ydl_opts['extractor_args'] = extractor_args
+    elif plat == "youtube":
+        ydl_opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['tv_samsung', 'visionos', 'web']
+            }
+        }
 
     if cookie_file and os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
@@ -817,17 +841,27 @@ async def download_video(url: str, user_id: int):
 
     # 2. YOUTUBE SHORTS / Обычные видео:
     if platform == "youtube":
-        # Шаг 1: Быстрый локальный yt-dlp с клиентом Android (< 2 сек, без блокировок)
+        # Шаг 1: yt-dlp со стандартными оптимизированными клиентами (tv_samsung, visionos, web)
         try:
-            yt_args = {'youtube': {'player_client': ['android', 'android_creator']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=yt_args)
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720)
             if res and is_valid_mp4_file(res.get("file_path")):
                 res["platform"] = "youtube"
                 return res
         except Exception as yt_err:
-            logger.warning(f"yt-dlp android 720p failed for {clean_url}: {yt_err}")
+            logger.warning(f"yt-dlp standard 720p failed for {clean_url}: {yt_err}")
 
-        # Шаг 2: yt-dlp fallback с mweb + android
+        # Шаг 2: yt-dlp fallback с клиентом Smart TV (tv_samsung, visionos)
+        try:
+            tv_args = {'youtube': {'player_client': ['tv_samsung', 'visionos']}}
+            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args)
+            if res and is_valid_mp4_file(res.get("file_path")):
+                res["platform"] = "youtube"
+                res["low_quality_notice"] = True
+                return res
+        except Exception as yt_err2:
+            logger.warning(f"yt-dlp tv_samsung fallback failed for {clean_url}: {yt_err2}")
+
+        # Шаг 3: yt-dlp fallback с mweb + android
         try:
             mweb_args = {'youtube': {'player_client': ['mweb', 'android']}}
             res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=mweb_args)
@@ -835,19 +869,8 @@ async def download_video(url: str, user_id: int):
                 res["platform"] = "youtube"
                 res["low_quality_notice"] = True
                 return res
-        except Exception as yt_err2:
-            logger.warning(f"yt-dlp mweb fallback failed for {clean_url}: {yt_err2}")
-
-        # Шаг 3: yt-dlp fallback с visionos / android_vr
-        try:
-            vr_args = {'youtube': {'player_client': ['visionos', 'android_vr']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=vr_args)
-            if res and is_valid_mp4_file(res.get("file_path")):
-                res["platform"] = "youtube"
-                res["low_quality_notice"] = True
-                return res
         except Exception as yt_err3:
-            logger.warning(f"yt-dlp visionos fallback failed for {clean_url}: {yt_err3}")
+            logger.warning(f"yt-dlp mweb fallback failed for {clean_url}: {yt_err3}")
 
         # Шаг 4: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
         vid_id = extract_youtube_id(clean_url)
