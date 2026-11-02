@@ -597,13 +597,11 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
 def setup_cookies_file(platform: str = None):
     """
     Создает файл cookies.txt для yt-dlp ТОЛЬКО ЕСЛИ пользователь передал
-    INSTAGRAM_COOKIES или YOUTUBE_COOKIES в переменных окружения.
-    Никогда не генерирует искусственные гостевые cookies, которые на дата-центрах
-    (Render) ловят капчу и блокируют скачивание для всех последующих запросов.
+    INSTAGRAM_COOKIES, YOUTUBE_COOKIES или YTDLP_COOKIES в переменных окружения.
     """
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
     raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
-    raw_yt = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    raw_yt = os.environ.get("YOUTUBE_COOKIES", "").strip() or os.environ.get("YTDLP_COOKIES", "").strip()
 
     # Если явных cookies нет — удаляем старый файл cookies.txt, чтобы не использовать капчу
     if not raw_ig and not raw_yt:
@@ -650,17 +648,16 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     """
     out_tmpl = f"{output_prefix}.%(ext)s"
     
-    # Priority cascade:
-    # 1. Best MP4 video + M4A audio within height limit (native for Telegram)
-    # 2. AVC1 (h264) + MP4A
-    # 3. Any bestvideo + bestaudio merged to MP4
-    # 4. HLS / pre-muxed single stream
+    # Priority cascade (максимальная скорость и 0 нагрузки на сервер):
+    # 1. itag 22 (720p mp4) или 18 (360p mp4) — уже сшитое готовое видео, скачивается мгновенно БЕЗ FFmpeg!
+    # 2. Любой готовый цельный MP4 поток до указанной высоты
+    # 3. bestvideo (mp4) + bestaudio (m4a) с объединением через FFmpeg при необходимости
     format_spec = (
+        f"22/18/"
+        f"best[height<={height_limit}][ext=mp4]/"
         f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"
         f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
         f"bestvideo[height<={height_limit}]+bestaudio/"
-        f"best[protocol^=m3u8][height<={height_limit}]/"
-        f"best[height<={height_limit}][ext=mp4]/"
         f"best[height<={height_limit}]/"
         f"best"
     )
@@ -668,8 +665,10 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     plat = platform or detect_platform(url)
     cookie_file = setup_cookies_file(plat)
 
-    # Прокси для обхода блокировок дата-центров (например, Render GCP)
-    proxy = os.getenv("YOUTUBE_PROXY") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    # Прокси используется ИСКЛЮЧИТЕЛЬНО для YouTube (чтобы не тратить трафик и не тормозить TikTok/Instagram)
+    proxy = None
+    if plat == "youtube":
+        proxy = os.getenv("YTDLP_PROXY") or os.getenv("YOUTUBE_PROXY") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY")
 
     ydl_opts = {
         'outtmpl': out_tmpl,
