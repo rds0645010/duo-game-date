@@ -594,6 +594,25 @@ async def try_download_instagram_media(shortcode: str, output_prefix: str):
 
 
 
+def normalize_cookie_line(line: str) -> str:
+    """
+    Нормализует строку куки в валидный Netscape формат.
+    Если при вставке в веб-интерфейс Render знаки табуляции (\\t) превратились
+    в пробелы, восстанавливает правильное разделение на 7 колонок.
+    """
+    line_s = line.strip()
+    if not line_s or line_s.startswith("#"):
+        return line_s
+    parts = line_s.split("\t")
+    if len(parts) >= 7:
+        return "\t".join(parts[:7])
+    # Разбиваем по пробельным символам (максимум 7 частей)
+    space_parts = line_s.split(None, 6)
+    if len(space_parts) == 7:
+        return "\t".join(space_parts)
+    return line_s
+
+
 def setup_cookies_file(platform: str = None):
     """
     Создает файл cookies.txt для yt-dlp ТОЛЬКО ЕСЛИ пользователь передал
@@ -622,11 +641,11 @@ def setup_cookies_file(platform: str = None):
             cf.write("# Netscape HTTP Cookie File\n")
             if raw_yt:
                 cleaned_yt = raw_yt.replace("\\n", "\n")
-                if "\t" in cleaned_yt or "\n" in cleaned_yt:
+                if "\t" in cleaned_yt or "\n" in cleaned_yt or " " in cleaned_yt:
                     for line in cleaned_yt.splitlines():
-                        line_s = line.strip()
-                        if line_s:
-                            cf.write(line_s + "\n")
+                        norm_line = normalize_cookie_line(line)
+                        if norm_line:
+                            cf.write(norm_line + "\n")
                 else:
                     for part in cleaned_yt.replace("Cookie:", "").split(";"):
                         if "=" in part:
@@ -634,11 +653,11 @@ def setup_cookies_file(platform: str = None):
                             cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
             if raw_ig:
                 cleaned_ig = raw_ig.replace("\\n", "\n")
-                if "\t" in cleaned_ig or "\n" in cleaned_ig:
+                if "\t" in cleaned_ig or "\n" in cleaned_ig or " " in cleaned_ig:
                     for line in cleaned_ig.splitlines():
-                        line_s = line.strip()
-                        if line_s:
-                            cf.write(line_s + "\n")
+                        norm_line = normalize_cookie_line(line)
+                        if norm_line:
+                            cf.write(norm_line + "\n")
                 else:
                     for part in cleaned_ig.replace("Cookie:", "").split(";"):
                         if "=" in part:
@@ -701,17 +720,18 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
     if proxy:
         ydl_opts['proxy'] = proxy
 
+    has_cookies = bool(cookie_file and os.path.exists(cookie_file))
+    if has_cookies:
+        ydl_opts['cookiefile'] = cookie_file
+
     if extractor_args:
         ydl_opts['extractor_args'] = extractor_args
-    elif plat == "youtube":
+    elif plat == "youtube" and not has_cookies:
         ydl_opts['extractor_args'] = {
             'youtube': {
                 'player_client': ['tv_samsung', 'visionos', 'web']
             }
         }
-
-    if cookie_file and os.path.exists(cookie_file):
-        ydl_opts['cookiefile'] = cookie_file
 
     if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
@@ -848,6 +868,24 @@ async def download_video(url: str, user_id: int):
 
     # 2. YOUTUBE SHORTS / Обычные видео:
     if platform == "youtube":
+        has_cookies = bool(os.getenv("YOUTUBE_COOKIES") or os.getenv("YTDLP_COOKIES"))
+        if has_cookies:
+            # При наличии куки: авторизованная быстрая загрузка без переопределения клиентов
+            try:
+                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720)
+                if res and is_valid_mp4_file(res.get("file_path")):
+                    res["platform"] = "youtube"
+                    return res
+            except Exception as yt_err:
+                logger.warning(f"yt-dlp with cookies 720p failed for {clean_url}: {yt_err}")
+                try:
+                    res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480)
+                    if res and is_valid_mp4_file(res.get("file_path")):
+                        res["platform"] = "youtube"
+                        return res
+                except Exception as yt_err_low:
+                    logger.warning(f"yt-dlp with cookies 480p failed for {clean_url}: {yt_err_low}")
+
         # Шаг 1: yt-dlp со стандартными оптимизированными клиентами (tv_samsung, visionos, web)
         try:
             res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720)
