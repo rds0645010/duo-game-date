@@ -419,6 +419,11 @@ def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, 
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb']
+            }
         }
     }
 
@@ -648,6 +653,11 @@ async def extract_direct_video_info(url: str):
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'mweb']
+                }
             }
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

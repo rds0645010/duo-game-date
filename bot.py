@@ -553,6 +553,11 @@ def format_friendly_error(e: Exception) -> str:
             "Instagram закрыл доступ к этому ролику для гостей и требует подтверждения возраста.\n\n"
             "💡 <i>Администратор может указать cookies аккаунта (INSTAGRAM_COOKIES) в настройках хостинга, чтобы бот мог загружать контент 18+.</i>"
         )
+    elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text:
+        return (
+            "🤖 <b>YouTube временно запросил проверку капчи для этого ролика.</b>\n\n"
+            "Попробуй ещё раз через пару секунд или отправь другой Shorts/видео."
+        )
     elif "file_too_large" in err_text or "too large" in err_text:
         return (
             "⚠️ <b>Файл превышает 50 МБ (лимит Telegram).</b>\n\n"
