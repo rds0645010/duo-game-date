@@ -1246,31 +1246,26 @@ async def inline_query_handler(inline_query: InlineQuery):
     user_id = inline_query.from_user.id
     caption_enabled = get_user_inline_caption(user_id)
 
-    # 1. Если запрос ПУСТОЙ (@duo_play_date_bot в чате с другом):
-    # Показываем только одну чистую подсказку (без истории и без лишних кнопок)
+    # 1. Если запрос ПУСТОЙ — подсказка
     if not query:
         results = [
             InlineQueryResultArticle(
                 id="hint_empty",
                 title="📥 Вставь ссылку на видео или фото",
                 description="TikTok, YouTube Shorts или Instagram Reels/Фото",
-                thumbnail_url="https://cdn-icons-png.flaticon.com/512/3074/3074767.png",
+                thumbnail_url="https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png",
                 input_message_content=InputTextMessageContent(
                     message_text=(
                         "💡 **Как отправить видео другу через @duo_play_date_bot:**\n\n"
                         "Вставь ссылку на TikTok, Shorts или Reels после имени бота:\n"
                         "`@duo_play_date_bot https://...`\n\n"
-                        "И нажми на появившуюся кнопку, чтобы чистое видео улетело прямо в чат!"
+                        "И нажми на появившуюся кнопку — чистое видео улетит прямо в чат!"
                     ),
                     parse_mode="Markdown"
                 )
             )
         ]
-        await inline_query.answer(
-            results=results,
-            cache_time=5,
-            is_personal=True
-        )
+        await inline_query.answer(results=results, cache_time=5, is_personal=True)
         return
 
     clean_url = extract_url(query)
@@ -1281,8 +1276,8 @@ async def inline_query_handler(inline_query: InlineQuery):
             InlineQueryResultArticle(
                 id="hint_unsupported",
                 title="⚠️ Ссылка не распознана",
-                description="Поддерживаются: TikTok, YouTube Shorts, Instagram Reels и фото",
-                thumbnail_url="https://cdn-icons-png.flaticon.com/512/1000/1000966.png",
+                description="Поддерживаются: TikTok, YouTube Shorts, Instagram Reels",
+                thumbnail_url="https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png",
                 input_message_content=InputTextMessageContent(
                     message_text="⚠️ Отправьте прямую ссылку на TikTok, YouTube Shorts или Instagram Reels!"
                 )
@@ -1291,7 +1286,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=results, cache_time=10, is_personal=True)
         return
 
-    # Названия и официальные иконки платформ для идеального визуального стиля (как в SavXBot)
+    # Названия и официальные иконки платформ (стиль SavXBot)
     if platform == "instagram":
         plat_noun = "Reel"
         plat_source = "Instagram"
@@ -1309,128 +1304,141 @@ async def inline_query_handler(inline_query: InlineQuery):
         plat_source = "Видео"
         plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
 
-    # 2. Проверяем кэш бота: если видео уже скачано ранее — отдаем файл МГНОВЕННО!
+    inline_title = f"💌 Поделиться {plat_noun} из {plat_source}"
+
+    def _make_caption(title_text: str, is_photo: bool = False) -> str:
+        if not caption_enabled:
+            return None
+        t = html.escape((title_text or plat_noun)[:200])
+        icon = "📸" if is_photo else "🎬"
+        return f"{icon} <b>{t}</b>\n\n📱 {plat_source} | ✨ <i>через @duo_play_date_bot</i>"
+
+    # ─── 2. КЭШ: если видео уже есть — МГНОВЕННО ───
     cached = get_cached_media(clean_url)
     if cached and cached.get("file_id"):
-        title_esc = html.escape(cached.get("title") or plat_noun)
         m_type = cached.get("media_type", "video")
-
-        if caption_enabled:
-            if m_type == "photo":
-                caption = (
-                    f"📸 <b>{title_esc}</b>\n\n"
-                    f"📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                )
-            else:
-                caption = (
-                    f"🎬 <b>{title_esc}</b>\n\n"
-                    f"📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot без рекламы</i>"
-                )
-        else:
-            caption = None
-
+        cap = _make_caption(cached.get("title"), is_photo=(m_type == "photo"))
         if m_type == "photo":
             single_result = InlineQueryResultCachedPhoto(
                 id=f"c_p_{abs(hash(cached['file_id']))}",
                 photo_file_id=cached["file_id"],
-                title=f"💌 Поделиться фото из {plat_source}",
-                caption=caption,
-                parse_mode="HTML" if caption else None
+                title=inline_title,
+                caption=cap,
+                parse_mode="HTML" if cap else None
             )
         else:
             single_result = InlineQueryResultCachedVideo(
                 id=f"c_v_{abs(hash(cached['file_id']))}",
                 video_file_id=cached["file_id"],
-                title=f"💌 Поделиться {plat_noun} из {plat_source}",
-                caption=caption,
-                parse_mode="HTML" if caption else None
+                title=inline_title,
+                caption=cap,
+                parse_mode="HTML" if cap else None
             )
-
-        # Отдаем РОВНО ОДИН результат без switch_pm_text (стиль SavXBot)
-        await inline_query.answer(
-            results=[single_result],
-            cache_time=300,
-            is_personal=True
-        )
+        await inline_query.answer(results=[single_result], cache_time=300, is_personal=True)
         return
 
+    # ─── 3. БЫСТРЫЙ ПРЯМОЙ ПОТОК (TikTok / Instagram) ───
+    # Для этих платформ можно получить прямой URL за <1.5 сек — Telegram скачает сам
+    direct_video_url = None
+    direct_title = None
+    direct_is_photo = False
+    direct_photo_url = None
+
+    if platform == "tiktok":
+        try:
+            direct_info = await asyncio.wait_for(parse_tiktok_tikwm(clean_url), timeout=4.0)
+            if direct_info and direct_info.get("video_url"):
+                direct_video_url = direct_info["video_url"]
+                direct_title = direct_info.get("title")
+        except Exception as e:
+            logging.debug(f"TikTok direct parse failed: {e}")
+
+    elif platform == "instagram":
+        try:
+            ig_info = await asyncio.wait_for(parse_instagram_embed(clean_url), timeout=4.0)
+            if ig_info and ig_info.get("success"):
+                if ig_info.get("is_video") and ig_info.get("video_url"):
+                    direct_video_url = ig_info["video_url"]
+                    direct_title = ig_info.get("title")
+                elif ig_info.get("is_photo") and ig_info.get("photo_url"):
+                    direct_photo_url = ig_info["photo_url"]
+                    direct_title = ig_info.get("title")
+                    direct_is_photo = True
+        except Exception as e:
+            logging.debug(f"Instagram direct parse failed: {e}")
+
+    if direct_video_url:
+        cap = _make_caption(direct_title)
+        single_result = InlineQueryResultVideo(
+            id=f"dir_{platform[:2]}_{abs(hash(clean_url))}",
+            video_url=direct_video_url,
+            mime_type="video/mp4",
+            thumbnail_url=plat_icon,
+            title=inline_title,
+            caption=cap,
+            parse_mode="HTML" if cap else None
+        )
+        await inline_query.answer(results=[single_result], cache_time=120, is_personal=True)
+        return
+
+    if direct_photo_url:
+        cap = _make_caption(direct_title, is_photo=True)
+        single_result = InlineQueryResultPhoto(
+            id=f"dir_ph_{abs(hash(clean_url))}",
+            photo_url=direct_photo_url,
+            thumbnail_url=direct_photo_url,
+            title=inline_title,
+            caption=cap,
+            parse_mode="HTML" if cap else None
+        )
+        await inline_query.answer(results=[single_result], cache_time=120, is_personal=True)
+        return
+
+    # ─── 4. ПОЛНАЯ ЗАГРУЗКА НА СЕРВЕР (YouTube и fallback) ───
     token = save_dl_token(clean_url)
     stream_url = f"{RENDER_EXTERNAL_URL}/stream/{token}.mp4"
 
-    # 3. Для TikTok: быстрый прямой поток без водяного знака через TikWM API
-    if platform == "tiktok":
-        direct_info = await parse_tiktok_tikwm(clean_url)
-        if direct_info and direct_info.get("video_url"):
-            title_esc = html.escape(direct_info.get("title") or "TikTok видео")
-            caption = (
-                f"🎬 <b>{title_esc}</b>\n\n📱 TikTok | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                if caption_enabled else None
-            )
-            single_result = InlineQueryResultVideo(
-                id=f"dir_tt_{abs(hash(clean_url))}",
-                video_url=direct_info["video_url"],
-                mime_type="video/mp4",
-                thumbnail_url=plat_icon,
-                title=f"💌 Поделиться {plat_noun} из {plat_source}",
-                caption=caption,
-                parse_mode="HTML" if caption else None
-            )
-            await inline_query.answer(
-                results=[single_result],
-                cache_time=120,
-                is_personal=True
-            )
-            return
-
-    # 4. Скачиваем ролик на сервере
     try:
-        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=6.0)
+        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=12.0)
         if res and res.get("file_path"):
             _stream_files[token] = res["file_path"]
             is_photo = bool(res.get("is_photo"))
-            title_esc = html.escape(res.get("title") or plat_noun)
-            caption = (
-                f"📸 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-                if is_photo else
-                f"🎬 <b>{title_esc}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-            ) if caption_enabled else None
+            cap = _make_caption(res.get("title"), is_photo=is_photo)
 
-            # Если настроен канал постоянного хранения — получаем постоянный file_id
+            # Загружаем в хранилище и получаем постоянный file_id
             f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo)
             if f_id:
                 save_cached_media(
-                    clean_url,
-                    f_id,
+                    clean_url, f_id,
                     "photo" if is_photo else "video",
-                    res.get("title", ""),
-                    res.get("platform", ""),
-                    res.get("author", "")
+                    res.get("title", ""), res.get("platform", ""), res.get("author", "")
                 )
                 if is_photo:
                     single_result = InlineQueryResultCachedPhoto(
                         id=f"live_p_{abs(hash(f_id))}",
                         photo_file_id=f_id,
-                        title=f"💌 Поделиться фото из {plat_source}",
-                        caption=caption,
-                        parse_mode="HTML" if caption else None
+                        title=inline_title,
+                        caption=cap,
+                        parse_mode="HTML" if cap else None
                     )
                 else:
                     single_result = InlineQueryResultCachedVideo(
                         id=f"live_v_{abs(hash(f_id))}",
                         video_file_id=f_id,
-                        title=f"💌 Поделиться {plat_noun} из {plat_source}",
-                        caption=caption,
-                        parse_mode="HTML" if caption else None
+                        title=inline_title,
+                        caption=cap,
+                        parse_mode="HTML" if cap else None
                     )
             else:
+                # Нет storage channel — стримим через свой сервер
                 if is_photo:
                     single_result = InlineQueryResultPhoto(
                         id=f"p_{token}",
                         photo_url=f"{RENDER_EXTERNAL_URL}/stream/{token}.jpg",
                         thumbnail_url=plat_icon,
-                        title=f"💌 Поделиться фото из {plat_source}",
-                        caption=caption,
-                        parse_mode="HTML" if caption else None
+                        title=inline_title,
+                        caption=cap,
+                        parse_mode="HTML" if cap else None
                     )
                 else:
                     single_result = InlineQueryResultVideo(
@@ -1438,38 +1446,32 @@ async def inline_query_handler(inline_query: InlineQuery):
                         video_url=stream_url,
                         mime_type="video/mp4",
                         thumbnail_url=plat_icon,
-                        title=f"💌 Поделиться {plat_noun} из {plat_source}",
-                        caption=caption,
-                        parse_mode="HTML" if caption else None
+                        title=inline_title,
+                        caption=cap,
+                        parse_mode="HTML" if cap else None
                     )
 
-            await inline_query.answer(
-                results=[single_result],
-                cache_time=300,
-                is_personal=True
-            )
+            await inline_query.answer(results=[single_result], cache_time=300, is_personal=True)
             return
 
     except asyncio.TimeoutError:
-        logging.info(f"Inline prefetch timeout for {clean_url}, serving via direct streaming endpoint")
+        logging.info(f"Inline download timeout for {clean_url}")
+        # Запускаем фоновую докачку
         asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
     except Exception as e:
-        logging.warning(f"Inline prefetch error for {clean_url}: {e}")
+        logging.warning(f"Inline download error for {clean_url}: {e}")
 
-    # Если ролик загружается — отдаем видео-карточку со ссылкой на стрим!
-    # Telegram при клике подключится к stream_url, сервер отдаст MP4.
-    # Никаких текстовых сообщений в чат!
+    # ─── 5. FALLBACK: стрим-ссылка (видео ещё качается в фоне) ───
+    cap = _make_caption(plat_noun)
     single_result = InlineQueryResultVideo(
         id=f"v_{token}",
         video_url=stream_url,
         mime_type="video/mp4",
         thumbnail_url=plat_icon,
-        title=f"💌 Поделиться {plat_noun} из {plat_source}",
-        caption=(
-            f"🎬 <b>{plat_noun}</b>\n\n📱 {plat_source} | ✨ <i>Скачано через @duo_play_date_bot</i>"
-            if caption_enabled else None
-        ),
-        parse_mode="HTML" if caption else None
+        title=f"⏳ Загружаю {plat_noun} из {plat_source}...",
+        description="Видео загружается на сервер, нажми чтобы отправить",
+        caption=cap,
+        parse_mode="HTML" if cap else None
     )
     try:
         await inline_query.answer(results=[single_result], cache_time=2, is_personal=True)
