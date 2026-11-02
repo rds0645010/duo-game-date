@@ -1,10 +1,14 @@
 import os
 import re
+import time
+import shutil
 import asyncio
 import logging
 import aiohttp
 import yt_dlp
 import imageio_ffmpeg
+
+import warp_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -12,15 +16,30 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = "temp_downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Path to ffmpeg binary from imageio-ffmpeg
+# Путь к FFmpeg. imageio-ffmpeg несёт собранный бинарник, поэтому на Render
+# ничего дополнительно устанавливать не нужно.
+FFMPEG_PATH = None
 try:
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
     if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
-        import stat
-        os.chmod(FFMPEG_PATH, os.stat(FFMPEG_PATH).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        try:
+            import stat
+            os.chmod(
+                FFMPEG_PATH,
+                os.stat(FFMPEG_PATH).st_mode
+                | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH,
+            )
+        except OSError:
+            # На Windows/read-only ФС chmod не нужен: .exe и так исполняемый.
+            pass
 except Exception as e:
     logger.warning(f"FFmpeg init warning: {e}")
-    FFMPEG_PATH = None
+
+if not FFMPEG_PATH or not os.path.exists(FFMPEG_PATH):
+    FFMPEG_PATH = shutil.which("ffmpeg")
+
+if not FFMPEG_PATH:
+    logger.warning("FFmpeg не найден: склейка видео+звук для YouTube будет недоступна")
 
 
 def ensure_js_runtime():
@@ -30,7 +49,6 @@ def ensure_js_runtime():
     """
     import shutil
     import subprocess
-    import platform
 
     # 1. Проверяем node в PATH
     node_path = shutil.which("node")
@@ -77,28 +95,9 @@ def ensure_js_runtime():
         logger.info(f"JS Runtime: Local Deno found at {local_deno}")
         return "deno", local_deno
 
-    # 5. Если на Linux (Render) — автоматически скачиваем standalone Deno v2.9.8
-    if platform.system() == "Linux":
-        logger.info("⚡ Скачивание standalone Deno runtime для обхода защиты YouTube на Render...")
-        import urllib.request
-        import zipfile
-        import io
-        deno_url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip"
-        try:
-            req = urllib.request.Request(deno_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=40) as resp:
-                data = resp.read()
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    zf.extract("deno", path=bin_dir)
-            import stat
-            os.chmod(local_deno, os.stat(local_deno).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH | stat.S_IRUSR | stat.S_IWUSR)
-            if bin_dir not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
-            logger.info(f"✅ Deno успешно установлен в {local_deno} и добавлен в PATH")
-            return "deno", local_deno
-        except Exception as dl_err:
-            logger.warning(f"Не удалось скачать Deno: {dl_err}")
-
+    # Автоскачивание Deno при старте отключено: usque/WARP + visionos-клиент
+    # работают без JS runtime, а лишние 40 МБ на диске и 10-20 сек cold start
+    # на бесплатном Render ни к чему. Runtime ставится на этапе сборки.
     return None, None
 
 # Автоматическая инициализация JS runtime при импорте модуля
@@ -109,8 +108,14 @@ except Exception as _js_e:
 
 # Regex patterns for supported platforms
 TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
-YOUTUBE_REGEX = re.compile(r'https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)[^\s]+')
+YOUTUBE_REGEX = re.compile(
+    r'https?://(?:www\.|m\.|music\.)?'
+    r'(?:youtube\.com/(?:watch\?[^\s#]*v=|shorts/|live/|embed/|v/)|youtu\.be/)[^\s]+'
+)
 INSTAGRAM_REGEX = re.compile(r'https?://(?:www\.)?instagram\.com/(?:reel|p|reels)/[^\s]+')
+
+# Хвостовая пунктуация из сообщений: "вот ссылка: https://youtu.be/xxx."
+_URL_TRAILING = '.,;:!?)]}>"\''
 
 def detect_platform(text: str):
     if not text:
@@ -129,7 +134,7 @@ def extract_url(text: str):
     for pattern in [TIKTOK_REGEX, YOUTUBE_REGEX, INSTAGRAM_REGEX]:
         m = pattern.search(text)
         if m:
-            return m.group(0).split('?')[0] + ('?' + m.group(0).split('?')[1] if '?' in m.group(0) else '')
+            return m.group(0).rstrip(_URL_TRAILING)
     return None
 
 
@@ -204,102 +209,11 @@ def is_valid_mp4_file(file_path: str) -> bool:
 
 
 def extract_youtube_id(url: str):
-    m = re.search(r'(?:youtu\.be/|youtube\.com/(?:shorts/|watch\?v=|embed/|v/))([A-Za-z0-9_-]{11})', url)
+    m = re.search(
+        r'(?:youtu\.be/|youtube\.com/(?:shorts/|live/|watch\?v=|embed/|v/))([A-Za-z0-9_-]{11})',
+        url or "",
+    )
     return m.group(1) if m else None
-
-
-DEFAULT_INVIDIOUS_INSTANCES = [
-    "https://yt.chocolatemoo53.com",
-    "https://invidious.nerdvpn.de",
-    "https://inv.nadeko.net",
-    "https://invidious.jing.rocks",
-    "https://invidious.privacyredirect.com",
-    "https://yewtu.be",
-    "https://invidious.tiekoetter.com"
-]
-
-DEFAULT_PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.tokhmi.xyz",
-    "https://pipedapi.drgns.space"
-]
-
-
-async def _try_invidious_fallback(session: aiohttp.ClientSession, video_id: str, dest_path: str):
-    """Уровень 1: Invidious API с local=true (проксирует трафик через себя, обходя блокировку Render)."""
-    instances = os.getenv("INVIDIOUS_URLS", "").split(",") if os.getenv("INVIDIOUS_URLS") else DEFAULT_INVIDIOUS_INSTANCES
-    for base_url in [u.strip().rstrip("/") for u in instances if u.strip()]:
-        api_url = f"{base_url}/api/v1/videos/{video_id}?local=true"
-        try:
-            async with session.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status != 200:
-                    continue
-                data = await resp.json()
-                title = data.get("title", "YouTube Video")
-                duration = int(data.get("lengthSeconds", 0))
-                format_streams = data.get("formatStreams") or []
-                candidate_urls = []
-                for stream in reversed(format_streams):
-                    if "video/mp4" in stream.get("type", ""):
-                        raw_url = stream.get("url", "")
-                        if raw_url.startswith("/"):
-                            candidate_urls.append(f"{base_url}{raw_url}")
-                        elif raw_url:
-                            candidate_urls.append(raw_url)
-                candidate_urls.append(f"{base_url}/latest_version?id={video_id}&itag=18&local=true")
-                for dl_url in candidate_urls:
-                    try:
-                        await download_file_from_url(dl_url, dest_path)
-                        if is_valid_mp4_file(dest_path):
-                            logger.info(f"✅ [YouTube] Downloaded via Invidious ({base_url})")
-                            return {
-                                "file_path": dest_path,
-                                "title": title,
-                                "duration": duration,
-                                "filesize": os.path.getsize(dest_path),
-                                "platform": "youtube"
-                            }
-                    except Exception:
-                        pass
-        except Exception:
-            continue
-    return None
-
-
-async def _try_piped_fallback(session: aiohttp.ClientSession, video_id: str, dest_path: str):
-    """Уровень 2: Piped API с проксированными потоками pipedproxy."""
-    instances = os.getenv("PIPED_URLS", "").split(",") if os.getenv("PIPED_URLS") else DEFAULT_PIPED_INSTANCES
-    for base_url in [u.strip().rstrip("/") for u in instances if u.strip()]:
-        api_url = f"{base_url}/streams/{video_id}"
-        try:
-            async with session.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status != 200:
-                    continue
-                data = await resp.json()
-                title = data.get("title", "YouTube Video")
-                duration = int(data.get("duration", 0))
-                video_streams = data.get("videoStreams") or []
-                muxed_streams = [
-                    s for s in video_streams
-                    if not s.get("videoOnly", True) and s.get("format") == "MPEG_4" and s.get("url")
-                ]
-                for stream in muxed_streams:
-                    try:
-                        await download_file_from_url(stream["url"], dest_path)
-                        if is_valid_mp4_file(dest_path):
-                            logger.info(f"✅ [YouTube] Downloaded via Piped ({base_url})")
-                            return {
-                                "file_path": dest_path,
-                                "title": title,
-                                "duration": duration,
-                                "filesize": os.path.getsize(dest_path),
-                                "platform": "youtube"
-                            }
-                    except Exception:
-                        pass
-        except Exception:
-            continue
-    return None
 
 
 async def download_file_from_url(url: str, output_path: str, max_size_bytes: int = 50 * 1024 * 1024):
@@ -669,120 +583,314 @@ def setup_cookies_file(platform: str = None):
         return None
 
 
-def _download_ytdlp_sync(url: str, output_prefix: str, height_limit: int = 720, max_size_bytes: int = 50 * 1024 * 1024, extractor_args: dict = None, platform: str = None, use_cookies: bool = True):
+def _cleanup_prefix(output_prefix: str):
+    """Удаляет все временные файлы, начинающиеся с output_prefix."""
+    try:
+        directory = os.path.dirname(output_prefix) or "."
+        base = os.path.basename(output_prefix)
+        for name in os.listdir(directory):
+            if name.startswith(base):
+                path = os.path.join(directory, name)
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+_stale_cleanup_done = False
+
+# На 512 МБ нельзя допускать два одновременных YouTube-скачивания с FFmpeg.
+# TikTok/Instagram этот lock не трогают: они почти не используют RAM.
+_youtube_download_lock = asyncio.Lock()
+
+
+def _cleanup_stale_downloads(max_age_seconds: int = 2 * 60 * 60):
+    """Раз в жизни процесса чистит temp_downloads от старых недокачанных файлов."""
+    global _stale_cleanup_done
+    if _stale_cleanup_done:
+        return
+    _stale_cleanup_done = True
+    try:
+        now = time.time()
+        for name in os.listdir(DOWNLOAD_DIR):
+            path = os.path.join(DOWNLOAD_DIR, name)
+            try:
+                if os.path.isfile(path) and now - os.path.getmtime(path) > max_age_seconds:
+                    os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _download_ytdlp_sync(
+    url: str,
+    output_prefix: str,
+    height_limit: int = 720,
+    max_size_bytes: int = 50 * 1024 * 1024,
+    extractor_args: dict = None,
+    platform: str = None,
+    use_cookies: bool = True,
+    proxy_url: str = None,
+):
     """
-    Synchronous yt-dlp execution run inside asyncio.to_thread.
+    Синхронное скачивание через yt-dlp (запускается в asyncio.to_thread).
+
+    proxy_url:
+      * None — взять прокси из env для YouTube (совместимость со старым поведением);
+      * ""   — принудительно без прокси;
+      * "http://..." — явный прокси (WARP).
     """
+    _cleanup_stale_downloads()
+    _cleanup_prefix(output_prefix)
     out_tmpl = f"{output_prefix}.%(ext)s"
-    
-    # Priority cascade:
-    # 1. best[ext=mp4][height<=limit] (itag 22/18 pre-muxed mp4) — скачивается напрямую БЕЗ нагрузки на FFmpeg
-    # 2. bestvideo+bestaudio с объединением через FFmpeg при необходимости
-    # 3. best MP4 поток или общий best поток
-    format_spec = (
-        f"best[ext=mp4][height<={height_limit}]/"
-        f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"
-        f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-        f"bestvideo[height<={height_limit}]+bestaudio/"
-        f"best[height<={height_limit}][ext=mp4]/"
-        f"best[height<={height_limit}]/"
-        f"best"
-    )
-    
+
     plat = platform or detect_platform(url)
     cookie_file = setup_cookies_file(plat) if use_cookies else None
+    has_cookies = bool(cookie_file and os.path.exists(cookie_file))
 
-    # Прокси используется ИСКЛЮЧИТЕЛЬНО для YouTube (чтобы не тратить трафик и не тормозить TikTok/Instagram)
-    proxy = None
-    if plat == "youtube":
-        proxy = os.getenv("YTDLP_PROXY") or os.getenv("YOUTUBE_PROXY") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY")
+    if proxy_url is None and plat == "youtube":
+        proxy = (
+            os.getenv("YTDLP_PROXY")
+            or os.getenv("YOUTUBE_PROXY")
+            or os.getenv("PROXY")
+            or os.getenv("HTTPS_PROXY")
+        )
+    else:
+        proxy = proxy_url
+
+    has_ffmpeg = bool(FFMPEG_PATH and os.path.exists(FFMPEG_PATH))
+
+    # Для Telegram лучше H.264 + AAC (mp4), иначе часть клиентов показывает
+    # "битое" видео. При наличии FFmpeg сначала берём адаптивные потоки
+    # (качество выше), иначе — готовый muxed-поток.
+    if has_ffmpeg:
+        format_spec = (
+            f"bestvideo[height<={height_limit}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio/"
+            f"bestvideo[height<={height_limit}]+bestaudio/"
+            f"best[height<={height_limit}][ext=mp4]/"
+            f"best[height<={height_limit}]/"
+            f"best"
+        )
+    else:
+        format_spec = (
+            f"best[height<={height_limit}][ext=mp4]/"
+            f"best[height<={height_limit}]/"
+            f"best"
+        )
 
     ydl_opts = {
         'outtmpl': out_tmpl,
         'format': format_spec,
         'quiet': True,
         'no_warnings': True,
+        'noprogress': True,
         'max_filesize': max_size_bytes,
         'geo_bypass': True,
         'nocheckcertificate': True,
+        'retries': 2,
+        'fragment_retries': 2,
+        'socket_timeout': 25,
+        'concurrent_fragment_downloads': 1,
+        'overwrites': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
-        },
-        'js_runtimes': {
-            'deno': {},
-            'node': {},
         },
     }
 
     if proxy:
         ydl_opts['proxy'] = proxy
 
-    has_cookies = bool(cookie_file and os.path.exists(cookie_file)) and use_cookies
     if has_cookies:
         ydl_opts['cookiefile'] = cookie_file
 
     if extractor_args:
         ydl_opts['extractor_args'] = extractor_args
-    elif plat == "youtube":
-        # Проверенные клиенты: если сессия с куки — web_embedded; если анонимно — visionos (без SABR и без блокировок)
-        if has_cookies:
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['web_embedded', 'tv_samsung', 'web']
-                }
-            }
-        else:
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['visionos']
-                }
-            }
+    elif plat == "youtube" and not has_cookies:
+        # visionos не требует PO-token и не попадает под SABR-ограничения.
+        ydl_opts['extractor_args'] = {'youtube': {'player_client': ['visionos']}}
 
-    if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+    # JS runtime подключаем только если он реально установлен: для visionos
+    # он не обязателен, а лишний запуск Deno/Node на 512 МБ не нужен.
+    js_runtimes = {}
+    if shutil.which("deno"):
+        js_runtimes['deno'] = {}
+    if shutil.which("node"):
+        js_runtimes['node'] = {}
+    if js_runtimes:
+        ydl_opts['js_runtimes'] = js_runtimes
+
+    if has_ffmpeg:
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
         ydl_opts['merge_output_format'] = 'mp4'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }]
         ydl_opts['postprocessor_args'] = {
             'ffmpeg': ['-movflags', '+faststart']
         }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        # Find created file
-        for ext in ['mp4', 'mkv', 'webm']:
-            cand = f"{output_prefix}.{ext}"
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+        # Ищем именно результат текущей попытки (prefix чистился выше).
+        candidates = [f"{output_prefix}.{ext}" for ext in ("mp4", "mkv", "webm")]
+        try:
+            prefix_files = [
+                os.path.join(DOWNLOAD_DIR, name)
+                for name in os.listdir(DOWNLOAD_DIR)
+                if name.startswith(os.path.basename(output_prefix))
+            ]
+            prefix_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        except OSError:
+            prefix_files = []
+        candidates.extend(prefix_files)
+
+        for cand in candidates:
             if is_valid_mp4_file(cand):
                 return {
                     "file_path": cand,
-                    "title": info.get("title", "Video"),
-                    "duration": info.get("duration", 0),
-                    "author": info.get("uploader", "") or info.get("channel", "") or "Creator",
-                    "filesize": os.path.getsize(cand)
-                }
-        # Fallback if filename differed
-        files = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith(os.path.basename(output_prefix))]
-        for f in files:
-            p = os.path.join(DOWNLOAD_DIR, f)
-            if is_valid_mp4_file(p):
-                return {
-                    "file_path": p,
-                    "title": info.get("title", "Video"),
-                    "duration": info.get("duration", 0),
-                    "author": info.get("uploader", "") or "Creator",
-                    "filesize": os.path.getsize(p)
+                    "title": info.get("title", "Video") if info else "Video",
+                    "duration": info.get("duration", 0) if info else 0,
+                    "author": (
+                        (info.get("uploader") or info.get("channel") or "Creator")
+                        if info else "Creator"
+                    ),
+                    "filesize": os.path.getsize(cand),
                 }
         raise Exception("Downloaded file not valid or not found on disk")
+    except Exception:
+        _cleanup_prefix(output_prefix)
+        raise
+
+
+async def _download_youtube(clean_url: str, output_prefix: str):
+    """YouTube-ветка: WARP -> прямой IP -> понижение качества."""
+    # 2. YOUTUBE SHORTS / Обычные видео:
+    # Главный приём: WARP-прокси (usque) подменяет IP Render на Cloudflare,
+    # поэтому YouTube не показывает "Sign in to confirm you're not a bot".
+    # Никакой регистрации, cookies и аккаунта Google не требуется.
+    is_short = "/shorts/" in clean_url
+    # У вертикальных Shorts 720p — это 720x1280 (height=1280).
+    # Для обычных видео ограничиваемся 720p по высоте.
+    heights = [1280, 480, 360] if is_short else [720, 480, 360]
+
+    manual_proxy = (
+        os.getenv("YTDLP_PROXY")
+        or os.getenv("YOUTUBE_PROXY")
+        or os.getenv("PROXY")
+        or os.getenv("HTTPS_PROXY")
+        or ""
+    ).strip()
+
+    strategies = []
+
+    warp_ready = False
+    if warp_proxy.warp.enabled and warp_proxy.warp.supported:
+        try:
+            warp_ready = await warp_proxy.warp.ensure_ready()
+        except Exception as e:
+            logger.warning(f"WARP init error: {e}")
+    if warp_ready and warp_proxy.warp.proxy_url:
+        strategies.append(("warp", warp_proxy.warp.proxy_url))
+
+    # Ручной прокси — только запасной вариант после WARP. Если он остался
+    # в env с прошлых экспериментов и умер, он не должен задерживать YouTube.
+    if manual_proxy:
+        strategies.append(("manual-proxy", manual_proxy))
+
+    # Всегда оставляем прямой запасной вариант.
+    strategies.append(("direct", ""))
+
+    if not strategies:
+        strategies = [("direct", "")]
+
+    last_error = None
+    size_error = False
+    visionos_args = {'youtube': {'player_client': ['visionos']}}
+    attempted = set()
+
+    for height in heights:
+        for strategy_name, strategy_proxy in strategies:
+            key = (height, strategy_name)
+            if key in attempted:
+                continue
+            attempted.add(key)
+            try:
+                res = await asyncio.to_thread(
+                    _download_ytdlp_sync,
+                    clean_url,
+                    output_prefix,
+                    height,
+                    extractor_args=visionos_args,
+                    use_cookies=False,
+                    proxy_url=strategy_proxy,
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"[YouTube] {strategy_name} {height}p failed for {clean_url}: {e}"
+                )
+                # Если завис именно туннель WARP — сбросим его, чтобы
+                # следующий запрос поднял прокси заново.
+                if strategy_name == "warp" and any(
+                    token in str(e).lower()
+                    for token in (
+                        "proxy", "tunnel", "timed out", "connection", "403",
+                        "not a bot", "sign in", "login_required",
+                    )
+                ):
+                    try:
+                        await warp_proxy.warp.mark_unhealthy()
+                    except Exception:
+                        pass
+                continue
+
+            if not res or not res.get("file_path"):
+                last_error = Exception("empty download result")
+                continue
+
+            size = res.get("filesize") or 0
+            if size > 50 * 1024 * 1024:
+                size_error = True
+                logger.warning(
+                    f"[YouTube] {strategy_name} {height}p: файл {size / 1048576:.1f} МБ > 50 МБ, пробую ниже"
+                )
+                try:
+                    if os.path.exists(res["file_path"]):
+                        os.remove(res["file_path"])
+                except OSError:
+                    pass
+                continue
+
+            res["platform"] = "youtube"
+            if height < heights[0]:
+                res["low_quality_notice"] = True
+            logger.info(
+                f"✅ [YouTube] Скачано через {strategy_name} ({height}p, {size / 1048576:.1f} МБ)"
+            )
+            return res
+
+        # Если на этом качестве всё упало по размеру — сразу пробуем ниже.
+        # Если же были сетевые ошибки, тоже пробуем ниже: 360p часто проходит.
+        continue
+
+    if size_error and last_error is None:
+        raise Exception("file_too_large: видео больше 50 МБ даже в 360p")
+    raise Exception(f"youtube_bot_detection: {last_error}")
 
 
 async def download_video(url: str, user_id: int):
     """
-    Main download dispatcher:
-    - If TikTok -> TikWM API direct download first (instant and high quality without watermark).
-    - If YouTube Shorts / Instagram -> yt-dlp with automatic 720p fallback to 360p if large.
+    Главный диспетчер скачивания:
+    - TikTok -> быстрый TikWM API (без водяного знака);
+    - YouTube Shorts / видео -> WARP-прокси + yt-dlp (visionos client),
+      без cookies и регистрации, с fallback на прямой IP и понижение качества;
+    - Instagram -> yt-dlp + embed/photo fallback.
     """
     platform = detect_platform(url)
     if not platform:
@@ -873,83 +981,11 @@ async def download_video(url: str, user_id: int):
                     logger.warning(f"TikTok photo download failed: {e}")
 
     # 2. YOUTUBE SHORTS / Обычные видео:
+    # WARP-прокси подменяет IP Render на Cloudflare, чтобы YouTube не показывал
+    # "Sign in to confirm you're not a bot". Без регистрации, cookies и аккаунта.
     if platform == "youtube":
-        has_cookies = bool(os.getenv("YOUTUBE_COOKIES") or os.getenv("YTDLP_COOKIES"))
-
-        # Попытка 1: Apple VisionOS клиент (720p).
-        # VisionOS — официальный клиент yt-dlp, не попадающий под SABR-ограничения YouTube на облачных IP (Render).
-        # Скачивает готовые потоки без капчи и без bot detection!
-        try:
-            vis_args = {'youtube': {'player_client': ['visionos']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=vis_args, use_cookies=False)
-            if res and is_valid_mp4_file(res.get("file_path")):
-                res["platform"] = "youtube"
-                return res
-        except Exception as vis_err:
-            logger.warning(f"yt-dlp youtube visionos 720p failed for {clean_url}: {vis_err}")
-
-        # Попытка 2: VisionOS в 480p / 360p
-        try:
-            vis_args = {'youtube': {'player_client': ['visionos']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=vis_args, use_cookies=False)
-            if res and is_valid_mp4_file(res.get("file_path")):
-                res["platform"] = "youtube"
-                res["low_quality_notice"] = True
-                return res
-        except Exception as vis_err2:
-            logger.warning(f"yt-dlp youtube visionos 480p failed for {clean_url}: {vis_err2}")
-
-        # Попытка 3: Мобильные клиенты (android, ios) без cookies
-        try:
-            mobile_args = {'youtube': {'player_client': ['android', 'ios']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=mobile_args, use_cookies=False)
-            if res and is_valid_mp4_file(res.get("file_path")):
-                res["platform"] = "youtube"
-                return res
-        except Exception as yt_err:
-            logger.warning(f"yt-dlp youtube mobile 720p failed for {clean_url}: {yt_err}")
-
-        # Попытка 4: Если есть cookies — пробуем авторизованные клиенты (web_embedded, tv_samsung, web)
-        if has_cookies:
-            try:
-                auth_args = {'youtube': {'player_client': ['web_embedded', 'tv_samsung', 'web']}}
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720, extractor_args=auth_args, use_cookies=True)
-                if res and is_valid_mp4_file(res.get("file_path")):
-                    res["platform"] = "youtube"
-                    return res
-            except Exception as yt_auth_err:
-                logger.warning(f"yt-dlp youtube authenticated clients failed for {clean_url}: {yt_auth_err}")
-
-        # Попытка 5: Fallback с ТВ-клиентами (tv_samsung, tv)
-        try:
-            tv_args = {'youtube': {'player_client': ['tv_samsung', 'tv']}}
-            res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 480, extractor_args=tv_args, use_cookies=False)
-            if res and is_valid_mp4_file(res.get("file_path")):
-                res["platform"] = "youtube"
-                res["low_quality_notice"] = True
-                return res
-        except Exception as yt_err3:
-            logger.warning(f"yt-dlp youtube TV fallback failed for {clean_url}: {yt_err3}")
-
-        # Попытка 6: Внешние резервные прокси (Invidious / Piped) с коротким таймаутом
-        vid_id = extract_youtube_id(clean_url)
-        dest_path = f"{output_prefix}.mp4"
-        if vid_id:
-            async with aiohttp.ClientSession() as session:
-                try:
-                    inv_res = await _try_invidious_fallback(session, vid_id, dest_path)
-                    if inv_res and is_valid_mp4_file(inv_res.get("file_path")):
-                        return inv_res
-                except Exception as e:
-                    logger.debug(f"Invidious stage error: {e}")
-                try:
-                    piped_res = await _try_piped_fallback(session, vid_id, dest_path)
-                    if piped_res and is_valid_mp4_file(piped_res.get("file_path")):
-                        return piped_res
-                except Exception as e:
-                    logger.debug(f"Piped stage error: {e}")
-
-        raise Exception("youtube_bot_detection")
+        async with _youtube_download_lock:
+            return await _download_youtube(clean_url, output_prefix)
 
     # 3. INSTAGRAM REELS & TIKTOK FALLBACK:
     try:

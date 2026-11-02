@@ -30,6 +30,11 @@ users.db
 temp_downloads/
 cookies.txt
 
+# WARP / usque runtime (бинарник и приватный конфиг WARP)
+bin/
+warp_data/
+*.log
+
 # IDE & Editor
 .vscode/
 .idea/

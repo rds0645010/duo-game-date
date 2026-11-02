@@ -40,6 +40,7 @@ from downloader import (
     extract_direct_video_info,
     parse_instagram_embed
 )
+import warp_proxy
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -74,7 +75,12 @@ DB_PATH = "users.db"
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "").strip()
 ADMIN_IDS = set([x.strip() for x in ADMIN_ID_RAW.split(",") if x.strip()])
 
-MAX_CONCURRENT_DOWNLOADS = 2
+# На бесплатном Render всего 512 МБ RAM: два одновременных YouTube-скачивания
+# с FFmpeg-склейкой могут дать OOM. По умолчанию 1, можно поднять через env.
+try:
+    MAX_CONCURRENT_DOWNLOADS = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1") or "1"))
+except ValueError:
+    MAX_CONCURRENT_DOWNLOADS = 1
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 active_download_count = 0
 waiting_queue_count = 0
@@ -1357,6 +1363,24 @@ async def handle_decline(callback: types.CallbackQuery):
 
 _stream_files = {}   # token -> local_file_path
 _stream_locks = {}   # token -> asyncio.Lock
+# Даже если несколько пользователей одновременно вставят ссылки в inline,
+# качаем не больше одного видео: на 512 МБ это критично.
+_precache_semaphore = asyncio.Semaphore(1)
+
+
+async def _expire_stream_file(token: str, path: str, delay: int = 900):
+    """Через 15 минут удаляет неиспользованный pre-cache, чтобы не забить диск."""
+    try:
+        await asyncio.sleep(delay)
+        if _stream_files.get(token) != path:
+            return
+        _stream_files.pop(token, None)
+        if os.path.exists(path):
+            os.remove(path)
+            logging.info(f"Pre-cache cleanup: removed {path}")
+    except Exception:
+        pass
+
 
 async def pre_cache_video_to_disk(clean_url: str, token: str):
     """
@@ -1365,17 +1389,31 @@ async def pre_cache_video_to_disk(clean_url: str, token: str):
     """
     if token in _stream_files and os.path.exists(_stream_files[token]):
         return
+    # Чистим ссылки на уже удалённые файлы, чтобы лимит не «залипал».
+    for stale_token in [k for k, v in _stream_files.items() if not os.path.exists(v)]:
+        _stream_files.pop(stale_token, None)
+    # Не запускаем десятки фоновых скачиваний, если пользователи просто
+    # перебирают ссылки в inline-режиме: на 512 МБ это лишняя нагрузка.
+    if len(_stream_files) >= 5:
+        logging.info("Pre-cache skipped: already 5 files pending")
+        return
     lock = _stream_locks.setdefault(token, asyncio.Lock())
     async with lock:
         if token in _stream_files and os.path.exists(_stream_files[token]):
             return
-        output_prefix = os.path.join(DOWNLOAD_DIR, f"dl_{token}")
-        try:
-            res = await download_video(clean_url, 0)
-            if res and res.get("file_path") and os.path.exists(res["file_path"]):
-                _stream_files[token] = res["file_path"]
-        except Exception as e:
-            logging.warning(f"Pre-cache error for {clean_url}: {e}")
+        async with _precache_semaphore:
+            if token in _stream_files and os.path.exists(_stream_files[token]):
+                return
+            if len(_stream_files) >= 5:
+                logging.info("Pre-cache skipped inside semaphore: 5 files pending")
+                return
+            try:
+                res = await download_video(clean_url, 0)
+                if res and res.get("file_path") and os.path.exists(res["file_path"]):
+                    _stream_files[token] = res["file_path"]
+                    asyncio.create_task(_expire_stream_file(token, res["file_path"]))
+            except Exception as e:
+                logging.warning(f"Pre-cache error for {clean_url}: {e}")
 
 
 async def handle_stream_video(request: web.Request) -> web.StreamResponse:
@@ -1657,6 +1695,8 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                             os.remove(res["file_path"])
                     except Exception:
                         pass
+                    # Больше не держим ссылку на уже удалённый pre-cache файл.
+                    _stream_files.pop(token, None)
                 else:
                     raise Exception("download_failed")
             except Exception as e:
@@ -1791,11 +1831,24 @@ async def handle_text_messages(message: types.Message):
 # 🌐 ВСТРОЕННЫЙ HTTP API ДЛЯ САЙТА (MINI APP)
 # ==========================================
 async def handle_health(request):
+    warp_status = warp_proxy.warp.status()
     return web.json_response({
         "status": "ok",
         "app": "DUO 24/7 Bot Server",
-        "bot_configured": bool(bot)
+        "bot_configured": bool(bot),
+        "warp_enabled": warp_status["enabled"],
+        "warp_ready": warp_status["ready"],
     })
+
+
+async def handle_api_warp(request):
+    """Диагностика WARP: GET /api/warp (или ?check=1, чтобы поднять прокси сразу)."""
+    if request.query.get("check", "").lower() in ("1", "true", "yes", "on"):
+        try:
+            await warp_proxy.warp.ensure_ready()
+        except Exception as e:
+            logging.warning(f"WARP check failed: {e}")
+    return web.json_response(warp_proxy.warp.status())
 
 
 async def handle_api_check_user(request):
@@ -1945,7 +1998,8 @@ async def handle_api_logs(request):
         "recent_errors": recent_errors,
         "ffmpeg_path": str(FFMPEG_PATH),
         "ffmpeg_exists": os.path.exists(FFMPEG_PATH) if FFMPEG_PATH else False,
-        "system_ffmpeg": shutil.which("ffmpeg")
+        "system_ffmpeg": shutil.which("ffmpeg"),
+        "warp": warp_proxy.warp.status(),
     })
 
 
@@ -1953,6 +2007,7 @@ async def handle_api_test_dl(request):
     url = request.query.get("url", "").strip()
     if not url:
         return web.json_response({"error": "missing url query parameter"})
+    fp = None
     try:
         res = await download_video(url, 9999)
         fp = res.get("file_path")
@@ -1961,16 +2016,24 @@ async def handle_api_test_dl(request):
             "status": "success",
             "title": res.get("title"),
             "platform": res.get("platform"),
-            "file_path": fp,
-            "size_bytes": sz
+            "size_bytes": sz,
+            "warp": warp_proxy.warp.status(),
         })
     except Exception as e:
         import traceback
         return web.json_response({
             "status": "error",
             "error": str(e),
-            "traceback": traceback.format_exc()
+            "traceback": traceback.format_exc(),
+            "warp": warp_proxy.warp.status(),
         }, status=500)
+    finally:
+        # Не оставляем тестовые файлы на диске Render.
+        if fp and os.path.exists(fp):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
 
 
 def create_web_app():
@@ -1995,10 +2058,34 @@ def create_web_app():
     app.router.add_get("/health", handle_health)
     app.router.add_get("/stream/{media_key}", handle_stream_video)
     app.router.add_get("/api/logs", handle_api_logs)
+    app.router.add_get("/api/warp", handle_api_warp)
     app.router.add_get("/api/test_dl", handle_api_test_dl)
     app.router.add_get("/api/check_user", handle_api_check_user)
     app.router.add_post("/api/send_invite", handle_api_send_invite)
     return app
+
+
+async def warm_up_warp():
+    """Фоновая подготовка WARP, чтобы первое YouTube-видео не ждало 5-10 сек."""
+    status = warp_proxy.warp.status()
+    if not status["enabled"]:
+        logging.info("WARP отключён (WARP_ENABLED=false)")
+        return
+    if not status["supported"]:
+        logging.info("WARP не поддерживается на этой платформе — YouTube пойдёт напрямую")
+        return
+    try:
+        ok = await warp_proxy.warp.ensure_ready()
+        if ok:
+            st = warp_proxy.warp.status()
+            logging.info(
+                f"🌐 YouTube через WARP готов: IP {st['egress_ip']} ({st['egress_colo']}), "
+                f"RAM ~{st['rss_mb']} МБ"
+            )
+        else:
+            logging.warning(f"WARP не поднялся: {warp_proxy.warp.status()['last_error']}")
+    except Exception as e:
+        logging.warning(f"WARP warm-up error: {e}")
 
 
 async def keep_alive_ping():
@@ -2033,6 +2120,9 @@ async def main():
 
     # Запускаем фоновый пингер анти-сна
     asyncio.create_task(keep_alive_ping())
+
+    # Заранее поднимаем WARP для YouTube (не блокирует polling бота)
+    asyncio.create_task(warm_up_warp())
 
     if bot:
         logging.info("🤖 Бот запущен и слушает Telegram (24/7)...")

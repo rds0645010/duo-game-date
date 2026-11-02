@@ -2,7 +2,7 @@ services:
   - type: web
     name: duo-game-date-bot
     env: python
-    buildCommand: "pip install -r requirements.txt && curl -fsSL https://deno.land/install.sh | sh"
+    buildCommand: "pip install -r requirements.txt && python bootstrap_usque.py --register && (curl -fsSL https://deno.land/install.sh | sh || true)"
     startCommand: python bot.py
     plan: free
     autoDeploy: true
@@ -13,5 +13,13 @@ services:
         value: https://rds0645010.github.io/duo-game-date/
       - key: PORT
         value: 10000
+      # Cloudflare WARP для YouTube: без регистрации, cookies и аккаунта Google.
+      # Отключить можно значением "false".
+      - key: WARP_ENABLED
+        value: "true"
+      # 512 МБ RAM на free-тарифе: одно тяжёлое скачивание за раз.
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "1"
+      # Необязательный ручной прокси для YouTube (запасной вариант после WARP).
       - key: YOUTUBE_PROXY
         sync: false
