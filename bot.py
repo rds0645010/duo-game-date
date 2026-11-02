@@ -25,6 +25,9 @@ from aiogram.types import (
     InlineQueryResultCachedPhoto,
     InputTextMessageContent,
     InputMediaPhoto,
+    InputMediaVideo,
+    ChosenInlineResult,
+    CallbackQuery,
     FSInputFile
 )
 from downloader import (
@@ -407,27 +410,79 @@ def get_fallback_upload_chat():
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "").strip()
 
 
-async def upload_media_to_telegram(file_path: str, is_photo: bool = False):
+async def upload_media_to_telegram(file_path: str, is_photo: bool = False, target_user_id: int = None, title: str = "", platform: str = ""):
     """
-    Загружает медиафайл в специальный приватный канал хранения (STORAGE_CHANNEL_ID),
-    если он указан в настройках. Никогда не отправляет и не удаляет сообщения в ЛС
-    пользователей, чтобы не ломать CDN file_id в Telegram.
+    Загружает медиафайл в Telegram для генерации постоянного CDN file_id.
+    1. Если указан STORAGE_CHANNEL_ID — отправляет в приватный канал.
+    2. Если нет — отправляет в ЛС пользователя (сохраняя ролик у бота в личке).
+    3. Если ЛС недоступно — отправляет администратору бота.
     """
-    if not file_path or not os.path.exists(file_path) or not STORAGE_CHANNEL_ID:
+    if not file_path or not os.path.exists(file_path):
         return None
 
+    dest_chat = None
+    if STORAGE_CHANNEL_ID:
+        try:
+            dest_chat = int(STORAGE_CHANNEL_ID)
+        except Exception:
+            pass
+
+    if not dest_chat and target_user_id:
+        dest_chat = target_user_id
+
+    if not dest_chat:
+        dest_chat = get_fallback_upload_chat()
+
+    if not dest_chat:
+        return None
+
+    caption_text = None
+    if dest_chat == target_user_id:
+        t_clean = html.escape((title or "Видео")[:150])
+        p_clean = html.escape((platform or "Медиа").capitalize())
+        caption_text = (
+            f"🎬 <b>{t_clean}</b>\n\n"
+            f"📱 Источник: {p_clean}\n"
+            f"✨ <i>Сохранено при отправке через @duo_play_date_bot</i>"
+        )
+
     try:
-        chan_id = int(STORAGE_CHANNEL_ID)
         if is_photo:
-            sent = await bot.send_photo(chat_id=chan_id, photo=FSInputFile(file_path), disable_notification=True)
+            sent = await bot.send_photo(
+                chat_id=dest_chat,
+                photo=FSInputFile(file_path),
+                caption=caption_text,
+                parse_mode="HTML" if caption_text else None,
+                disable_notification=True
+            )
             if sent and sent.photo:
                 return sent.photo[-1].file_id
         else:
-            sent = await bot.send_video(chat_id=chan_id, video=FSInputFile(file_path), disable_notification=True)
+            sent = await bot.send_video(
+                chat_id=dest_chat,
+                video=FSInputFile(file_path),
+                caption=caption_text,
+                parse_mode="HTML" if caption_text else None,
+                supports_streaming=True,
+                disable_notification=True
+            )
             if sent and sent.video:
                 return sent.video.file_id
     except Exception as e:
-        logging.debug(f"Storage channel upload to {STORAGE_CHANNEL_ID} failed: {e}")
+        logging.warning(f"Upload to primary chat {dest_chat} failed: {e}")
+        fallback = get_fallback_upload_chat()
+        if fallback and fallback != dest_chat:
+            try:
+                if is_photo:
+                    sent = await bot.send_photo(chat_id=fallback, photo=FSInputFile(file_path), disable_notification=True)
+                    if sent and sent.photo:
+                        return sent.photo[-1].file_id
+                else:
+                    sent = await bot.send_video(chat_id=fallback, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True)
+                    if sent and sent.video:
+                        return sent.video.file_id
+            except Exception as fb_err:
+                logging.warning(f"Upload to fallback chat {fallback} failed: {fb_err}")
 
     return None
 
@@ -1427,89 +1482,121 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=[single_result], cache_time=120, is_personal=True)
         return
 
-    # ─── 4. ПОЛНАЯ ЗАГРУЗКА НА СЕРВЕР (YouTube и fallback) ───
+    # ─── 4. ДВУХФАЗНАЯ ПОДМЕНА (Стиль SavXBot: 100% надежно, без "Unknown Track") ───
+    # Если ролик ещё не в кэше — отдаём аккуратную карточку с кнопкой-индикатором.
+    # При клике Telegram отправляет ChosenInlineResult, бот скачивает видео и подменяет
+    # сообщение на чистое нативное видео через edit_message_media!
     token = save_dl_token(clean_url)
-    stream_url = f"{RENDER_EXTERNAL_URL}/stream/{token}.mp4"
 
-    try:
-        res = await asyncio.wait_for(download_video(clean_url, user_id), timeout=12.0)
-        if res and res.get("file_path"):
-            _stream_files[token] = res["file_path"]
-            update_dl_token_file(token, res["file_path"])
-            is_photo = bool(res.get("is_photo"))
-            cap = _make_caption(res.get("title"), is_photo=is_photo)
-
-            # Загружаем в хранилище и получаем постоянный file_id
-            f_id = await upload_media_to_telegram(res["file_path"], is_photo=is_photo)
-            if f_id:
-                save_cached_media(
-                    clean_url, f_id,
-                    "photo" if is_photo else "video",
-                    res.get("title", ""), res.get("platform", ""), res.get("author", "")
-                )
-                if is_photo:
-                    single_result = InlineQueryResultCachedPhoto(
-                        id=f"live_p_{abs(hash(f_id))}",
-                        photo_file_id=f_id,
-                        title=inline_title,
-                        caption=cap,
-                        parse_mode="HTML" if cap else None
-                    )
-                else:
-                    single_result = InlineQueryResultCachedVideo(
-                        id=f"live_v_{abs(hash(f_id))}",
-                        video_file_id=f_id,
-                        title=inline_title,
-                        caption=cap,
-                        parse_mode="HTML" if cap else None
-                    )
-            else:
-                # Нет storage channel — стримим через свой сервер
-                if is_photo:
-                    single_result = InlineQueryResultPhoto(
-                        id=f"p_{token}",
-                        photo_url=f"{RENDER_EXTERNAL_URL}/stream/{token}.jpg",
-                        thumbnail_url=plat_icon,
-                        title=inline_title,
-                        caption=cap,
-                        parse_mode="HTML" if cap else None
-                    )
-                else:
-                    single_result = InlineQueryResultVideo(
-                        id=f"v_{token}",
-                        video_url=stream_url,
-                        mime_type="video/mp4",
-                        thumbnail_url=plat_icon,
-                        title=inline_title,
-                        caption=cap,
-                        parse_mode="HTML" if cap else None
-                    )
-
-            await inline_query.answer(results=[single_result], cache_time=300, is_personal=True)
-            return
-
-    except asyncio.TimeoutError:
-        logging.info(f"Inline download timeout for {clean_url}")
-        # Запускаем фоновую докачку
-        asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
-    except Exception as e:
-        logging.warning(f"Inline download error for {clean_url}: {e}")
-
-    # ─── 5. FALLBACK: стрим-ссылка (видео ещё качается в фоне) ───
-    cap = _make_caption(plat_noun)
-    single_result = InlineQueryResultVideo(
-        id=f"v_{token}",
-        video_url=stream_url,
-        mime_type="video/mp4",
-        thumbnail_url=plat_icon,
-        title=inline_title,
-        caption=cap,
-        parse_mode="HTML" if cap else None
+    loading_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data="noop")]
+        ]
     )
+
+    article_result = InlineQueryResultArticle(
+        id=f"tok_{token}",
+        title=inline_title,
+        description="Нажми, чтобы чистое видео улетело прямо в чат",
+        thumbnail_url=plat_icon,
+        input_message_content=InputTextMessageContent(
+            message_text=f"⏳ <b>Загружаю {plat_noun} из {plat_source}...</b>\n<i>Скоро появится в этом сообщении ✨</i>",
+            parse_mode="HTML"
+        ),
+        reply_markup=loading_kb
+    )
+
+    # Запускаем фоновую докачку на сервере, чтобы к моменту клика файл уже скачивался
+    asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
+
     try:
-        await inline_query.answer(results=[single_result], cache_time=2, is_personal=True)
+        await inline_query.answer(results=[article_result], cache_time=10, is_personal=True)
     except Exception as ans_err:
         logging.error(f"Error answering inline query: {ans_err}")
+
+
+# ==========================================
+# 🔄 ОБРАБОТКА ВЫБОРА ИНЛАЙН-РЕЗУЛЬТАТА (SavXBot паттерн)
+# ==========================================
+@dp.chosen_inline_result()
+async def handle_chosen_inline_result(chosen: ChosenInlineResult):
+    """
+    Срабатывает сразу после того, как пользователь нажал на кнопку в инлайне.
+    Бот скачивает видео, загружает его в Telegram и подменяет текстовую плашку
+    'Загружаю видео...' на готовое чистое видео!
+    """
+    if not chosen.inline_message_id:
+        return
+
+    token = chosen.result_id.replace("tok_", "").strip()
+    url = get_dl_token_url(token)
+    if not url:
+        return
+
+    user_id = chosen.from_user.id
+    logging.info(f"Chosen inline result triggered for url {url} by user {user_id}")
+
+    # 1. Проверяем кэш (вдруг уже готово)
+    cached = get_cached_media(url)
+    file_id = cached.get("file_id") if cached else None
+
+    if not file_id:
+        try:
+            res = await download_video(url, user_id)
+            if res and res.get("file_path"):
+                is_photo = bool(res.get("is_photo"))
+                file_id = await upload_media_to_telegram(
+                    res["file_path"],
+                    is_photo=is_photo,
+                    target_user_id=user_id,
+                    title=res.get("title", ""),
+                    platform=res.get("platform", "")
+                )
+                if file_id:
+                    save_cached_media(
+                        url, file_id,
+                        "photo" if is_photo else "video",
+                        res.get("title", ""),
+                        res.get("platform", ""),
+                        res.get("author", "")
+                    )
+        except Exception as e:
+            logging.error(f"Chosen inline download error for {url}: {e}")
+            try:
+                await bot.edit_message_text(
+                    inline_message_id=chosen.inline_message_id,
+                    text="❌ <b>Не удалось загрузить видео.</b>\n<i>Возможно, файл превышает 50 МБ или автор ограничил доступ.</i>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            return
+
+    if file_id:
+        caption_enabled = get_user_inline_caption(user_id)
+        caption = None
+        if caption_enabled:
+            caption = "🎬 ✨ <i>Скачано через @duo_play_date_bot</i>"
+
+        try:
+            await bot.edit_message_media(
+                inline_message_id=chosen.inline_message_id,
+                media=InputMediaVideo(
+                    media=file_id,
+                    caption=caption,
+                    parse_mode="HTML" if caption else None,
+                    supports_streaming=True
+                ),
+                reply_markup=None
+            )
+            logging.info(f"Successfully replaced inline message {chosen.inline_message_id} with video!")
+        except Exception as edit_err:
+            logging.error(f"Failed to edit_message_media: {edit_err}")
+
+
+@dp.callback_query(F.data == "noop")
+async def handle_noop_callback(callback: CallbackQuery):
+    await callback.answer("⏳ Видео обрабатывается и появится в этом сообщении через пару секунд!", show_alert=False)
 
 
 # ==========================================
@@ -1793,7 +1880,7 @@ async def main():
 
     if bot:
         logging.info("🤖 Бот запущен и слушает Telegram (24/7)...")
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     else:
         logging.warning("⚠️ Бот не запущен, так как нет BOT_TOKEN. HTTP сервер работает.")
         while True:
