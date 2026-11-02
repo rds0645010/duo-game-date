@@ -621,18 +621,26 @@ def setup_cookies_file(platform: str = None):
         with open(cookies_path, "w", encoding="utf-8") as cf:
             cf.write("# Netscape HTTP Cookie File\n")
             if raw_yt:
-                if "\t" in raw_yt:
-                    cf.write(raw_yt.strip() + "\n")
+                cleaned_yt = raw_yt.replace("\\n", "\n")
+                if "\t" in cleaned_yt or "\n" in cleaned_yt:
+                    for line in cleaned_yt.splitlines():
+                        line_s = line.strip()
+                        if line_s:
+                            cf.write(line_s + "\n")
                 else:
-                    for part in raw_yt.replace("Cookie:", "").split(";"):
+                    for part in cleaned_yt.replace("Cookie:", "").split(";"):
                         if "=" in part:
                             k, v = part.strip().split("=", 1)
                             cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
             if raw_ig:
-                if "\t" in raw_ig:
-                    cf.write(raw_ig.strip() + "\n")
+                cleaned_ig = raw_ig.replace("\\n", "\n")
+                if "\t" in cleaned_ig or "\n" in cleaned_ig:
+                    for line in cleaned_ig.splitlines():
+                        line_s = line.strip()
+                        if line_s:
+                            cf.write(line_s + "\n")
                 else:
-                    for part in raw_ig.replace("Cookie:", "").split(";"):
+                    for part in cleaned_ig.replace("Cookie:", "").split(";"):
                         if "=" in part:
                             k, v = part.strip().split("=", 1)
                             cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
