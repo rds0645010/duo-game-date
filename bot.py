@@ -639,7 +639,7 @@ bot = Bot(token=BOT_TOKEN, session=bot_session) if (BOT_TOKEN and BOT_TOKEN != "
 dp = Dispatcher()
 
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip() or "https://duo-game-date.onrender.com"
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip() or "https://duo-game-date-bot.onrender.com"
 
 
 def get_app_url():
