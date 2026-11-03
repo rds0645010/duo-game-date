@@ -1,0 +1,13 @@
+name: Render 24/7 Keepalive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render
+        run: curl -s -o /dev/null -w "%{http_code}" --max-time 30 "https://duo-game-date-bot.onrender.com/health"
