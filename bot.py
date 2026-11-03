@@ -7,11 +7,13 @@ import base64
 import html
 import time
 import shutil
+import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -639,7 +641,32 @@ bot = Bot(token=BOT_TOKEN, session=bot_session) if (BOT_TOKEN and BOT_TOKEN != "
 dp = Dispatcher()
 
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip() or "https://duo-game-date-bot.onrender.com"
+# Окружение: Render или локальный запуск
+IS_ON_RENDER = bool(
+    os.getenv("RENDER")
+    or os.getenv("RENDER_SERVICE_ID")
+    or os.getenv("RENDER_INSTANCE_ID")
+)
+
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+if not RENDER_EXTERNAL_URL:
+    RENDER_EXTERNAL_URL = "https://duo-game-date-bot.onrender.com"
+if not RENDER_EXTERNAL_URL.startswith("http://") and not RENDER_EXTERNAL_URL.startswith("https://"):
+    RENDER_EXTERNAL_URL = f"https://{RENDER_EXTERNAL_URL}"
+RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
+
+# Режим работы бота: Webhook (по умолчанию на Render) или Polling (по умолчанию локально)
+# Принудительное управление через USE_WEBHOOK=true/false
+_use_wh_env = os.getenv("USE_WEBHOOK", "").strip().lower()
+if _use_wh_env in ("1", "true", "yes"):
+    USE_WEBHOOK = True
+elif _use_wh_env in ("0", "false", "no"):
+    USE_WEBHOOK = False
+else:
+    USE_WEBHOOK = bool(IS_ON_RENDER)
+
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip() or None
 
 
 def get_app_url():
@@ -1836,6 +1863,8 @@ async def handle_health(request):
         "status": "ok",
         "app": "DUO 24/7 Bot Server",
         "bot_configured": bool(bot),
+        "mode": "webhook" if USE_WEBHOOK else "polling",
+        "webhook_url": f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if USE_WEBHOOK else None,
         "warp_enabled": warp_status["enabled"],
         "warp_ready": warp_status["ready"],
     })
@@ -2062,6 +2091,19 @@ def create_web_app():
     app.router.add_get("/api/test_dl", handle_api_test_dl)
     app.router.add_get("/api/check_user", handle_api_check_user)
     app.router.add_post("/api/send_invite", handle_api_send_invite)
+
+    # Если включен режим Webhook и бот инициализирован — регистрируем aiogram webhook handler
+    if bot and USE_WEBHOOK:
+        webhook_requests_handler = SimpleRequestHandler(
+            dispatcher=dp,
+            bot=bot,
+            handle_in_background=True,
+            secret_token=WEBHOOK_SECRET,
+        )
+        webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+        setup_application(app, dp, bot=bot)
+        logging.info(f"🔗 Aiogram SimpleRequestHandler зарегистрирован на {WEBHOOK_PATH}")
+
     return app
 
 
@@ -2125,12 +2167,51 @@ async def main():
     asyncio.create_task(warm_up_warp())
 
     if bot:
-        logging.info("🤖 Бот запущен и слушает Telegram (24/7)...")
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        if USE_WEBHOOK:
+            webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+            logging.info(f"🌐 Режим WEBHOOK активирован. Целевой URL: {webhook_url}")
+            try:
+                info = await bot.get_webhook_info()
+                if info.url != webhook_url:
+                    await bot.set_webhook(
+                        url=webhook_url,
+                        allowed_updates=dp.resolve_used_update_types(),
+                        drop_pending_updates=False,
+                        secret_token=WEBHOOK_SECRET,
+                    )
+                    logging.info(f"✅ Webhook успешно установлен: {webhook_url}")
+                else:
+                    logging.info(f"✅ Webhook уже активен: {webhook_url}")
+            except Exception as e:
+                logging.error(f"❌ Не удалось установить Webhook: {e}")
+                record_error("webhook_setup", e)
+
+            logging.info("🤖 Бот слушает Telegram через Webhook (24/7)...")
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            finally:
+                await runner.cleanup()
+                await bot.session.close()
+        else:
+            try:
+                await bot.delete_webhook(drop_pending_updates=False)
+                logging.info("🧹 Webhook снят для работы в режиме Polling")
+            except Exception as e:
+                logging.debug(f"delete_webhook error: {e}")
+            logging.info("🤖 Бот запущен в режиме Polling (локально)...")
+            try:
+                await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            finally:
+                await runner.cleanup()
+                await bot.session.close()
     else:
         logging.warning("⚠️ Бот не запущен, так как нет BOT_TOKEN. HTTP сервер работает.")
-        while True:
-            await asyncio.sleep(3600)
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await runner.cleanup()
 
 
 
