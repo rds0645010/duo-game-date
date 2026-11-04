@@ -112,7 +112,7 @@ YOUTUBE_REGEX = re.compile(
     r'https?://(?:www\.|m\.|music\.)?'
     r'(?:youtube\.com/(?:watch\?[^\s#]*v=|shorts/|live/|embed/|v/)|youtu\.be/)[^\s]+'
 )
-INSTAGRAM_REGEX = re.compile(r'https?://(?:www\.)?instagram\.com/(?:reel|p|reels)/[^\s]+')
+INSTAGRAM_REGEX = re.compile(r'https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/(?:reel|reels|p|tv|share/(?:reel|p))/[^\s]+')
 
 # Хвостовая пунктуация из сообщений: "вот ссылка: https://youtu.be/xxx."
 _URL_TRAILING = '.,;:!?)]}>"\''
@@ -301,11 +301,11 @@ async def parse_instagram_embed(url: str):
     Быстро извлекает прямой URL видео или фото из публичного Instagram embed (< 1.5 сек).
     Работает без авторизации и cookies.
     """
-    m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', url)
+    m = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', url)
     if not m:
         return None
     shortcode = m.group(1)
-    is_reel = bool(re.search(r'instagram\.com/(?:reel|reels)/', url, re.I))
+    is_reel = bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url, re.I))
     embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -971,7 +971,7 @@ async def _download_instagram(clean_url: str, output_prefix: str):
     затем (только для /p/) — фото/альбомный fallback.
     Для /reel/ обложка вместо видео не отдаётся ни при каких условиях.
     """
-    is_reel = bool(re.search(r'instagram\.com/(?:reel|reels)/', clean_url, re.I))
+    is_reel = bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', clean_url, re.I))
 
     strategies = []
     if warp_proxy.warp.enabled and warp_proxy.warp.supported:
@@ -998,7 +998,9 @@ async def _download_instagram(clean_url: str, output_prefix: str):
                     output_prefix,
                     height,
                     platform="instagram",
-                    use_cookies=True,
+                    # WARP идёт анонимно (Polaris logged-out), чтобы старые
+                    # cookies не ломали загрузку; прямой заход — с cookies, если заданы.
+                    use_cookies=(strategy_name == "direct"),
                     proxy_url=strategy_proxy,
                     **extra,
                 )
@@ -1035,9 +1037,12 @@ async def _download_instagram(clean_url: str, output_prefix: str):
 
         if no_video:
             break
+        # Если ошибка не связана с превышением 50 МБ, повтор на 720p/480p не поможет.
+        if not size_error:
+            break
 
     # Фото/карусель — только для обычных постов /p/, но не для /reel/.
-    m = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', clean_url)
+    m = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', clean_url)
     if m:
         try:
             logger.info(f"Instagram photo fallback for {m.group(1)} (allow_photo={not is_reel})")

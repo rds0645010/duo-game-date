@@ -355,8 +355,8 @@ def get_canonical_media_key(url: str) -> str:
         return ""
     import re
     u = url.strip()
-    # 1. Instagram: ID шорткода (поддерживает /p/, /reel/, /reels/)
-    m_ig = re.search(r'instagram\.com/(?:reel|p|reels)/([A-Za-z0-9_-]+)', u)
+    # 1. Instagram: ID шорткода (поддерживает /p/, /reel/, /reels/, /tv/, /share/)
+    m_ig = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', u)
     if m_ig:
         return f"ig_{m_ig.group(1)}"
     # 2. YouTube: 11-значный ID ролика (shorts, watch, youtu.be)
@@ -434,7 +434,7 @@ def save_cached_media(url: str, file_id: str, media_type: str, title: str, platf
 
 def is_instagram_reel_url(url: str) -> bool:
     """Reels — это всегда видео. Фото-кэш для такого URL считается битым."""
-    return bool(re.search(r'instagram\.com/(?:reel|reels)/', url or "", re.IGNORECASE))
+    return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
 
 
 def delete_cached_media(url: str):
