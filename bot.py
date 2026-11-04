@@ -74,20 +74,28 @@ ORGANIZER_CHAT_ID = os.getenv("ORGANIZER_CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", 8080))
 DB_PATH = "users.db"
 
-# 👑 ПРИОРИТЕТ И ОЧЕРЕДИ СКАЧИВАНИЯ
+# 👑 ПРИОРИТЕТ И 3 НЕЗАВИСИМЫЕ СИСТЕМЫ СКАЧИВАНИЯ
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "").strip()
 ADMIN_IDS = set([x.strip() for x in ADMIN_ID_RAW.split(",") if x.strip()])
 
-# На бесплатном Render всего 512 МБ RAM: два одновременных YouTube-скачивания
-# с FFmpeg-склейкой могут дать OOM. По умолчанию 1, можно поднять через env.
+# 1. TikTok: лёгкий (не использует RAM/FFmpeg), до 5 параллельных потоков
+TIKTOK_SEMAPHORE = asyncio.Semaphore(5)
+tiktok_waiting_count = 0
+tiktok_lock = asyncio.Lock()
+
+# 2. Instagram: средний (~25-30 МБ RAM на процесс), до 2 параллельных потоков
+INSTAGRAM_SEMAPHORE = asyncio.Semaphore(2)
+instagram_waiting_count = 0
+instagram_lock = asyncio.Lock()
+
+# 3. YouTube: тяжёлый с FFmpeg-склейкой (~150 МБ), строго 1 для тарифа 512 МБ
 try:
-    MAX_CONCURRENT_DOWNLOADS = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1") or "1"))
+    MAX_YOUTUBE_DOWNLOADS = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1") or "1"))
 except ValueError:
-    MAX_CONCURRENT_DOWNLOADS = 1
-download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-active_download_count = 0
-waiting_queue_count = 0
-queue_lock = asyncio.Lock()
+    MAX_YOUTUBE_DOWNLOADS = 1
+YOUTUBE_SEMAPHORE = asyncio.Semaphore(MAX_YOUTUBE_DOWNLOADS)
+youtube_waiting_count = 0
+youtube_lock = asyncio.Lock()
 
 
 def init_db():
@@ -857,26 +865,48 @@ async def process_video_download(message: types.Message, url: str):
 
     is_vip = str(user_id) in ADMIN_IDS
 
-    global active_download_count, waiting_queue_count
+    target_platform = detect_platform(clean_url) or "youtube"
+    if target_platform == "tiktok":
+        sem = TIKTOK_SEMAPHORE
+        lock = tiktok_lock
+        p_name = "TikTok"
+    elif target_platform == "instagram":
+        sem = INSTAGRAM_SEMAPHORE
+        lock = instagram_lock
+        p_name = "Instagram Reels"
+    else:
+        sem = YOUTUBE_SEMAPHORE
+        lock = youtube_lock
+        p_name = "YouTube Shorts"
 
     status_msg = None
     queue_acquired = False
     res = None
 
     try:
-        # Проверяем занятость слотов
-        if download_semaphore.locked() and not is_vip:
-            async with queue_lock:
-                waiting_queue_count += 1
-                pos = waiting_queue_count
+        # Проверяем занятость независимого слота платформы
+        if sem.locked() and not is_vip:
+            async with lock:
+                if target_platform == "tiktok":
+                    global tiktok_waiting_count
+                    tiktok_waiting_count += 1
+                    pos = tiktok_waiting_count
+                elif target_platform == "instagram":
+                    global instagram_waiting_count
+                    instagram_waiting_count += 1
+                    pos = instagram_waiting_count
+                else:
+                    global youtube_waiting_count
+                    youtube_waiting_count += 1
+                    pos = youtube_waiting_count
             status_msg = await message.answer(
-                f"⏳ <b>В очереди на скачивание...</b>\n"
+                f"⏳ <b>В очереди на скачивание {p_name}...</b>\n"
                 f"Твоя позиция: {pos}. Ожидаем завершения предыдущих загрузок 🚀",
                 parse_mode="HTML"
             )
         else:
             status_msg = await message.answer(
-                "⚡ <b>Обрабатываю видео...</b>\n"
+                f"⚡ <b>Обрабатываю {p_name}...</b>\n"
                 "Скачиваем в максимальном качестве без водяных знаков...",
                 parse_mode="HTML"
             )
@@ -884,14 +914,18 @@ async def process_video_download(message: types.Message, url: str):
         # VIP пользователи имеют безусловный приоритет
         if is_vip:
             queue_acquired = True
-            await safe_edit_status(status_msg, "👑 <b>VIP приоритет активен!</b>\nСкачиваю видео вне очереди без ожидания...")
+            await safe_edit_status(status_msg, f"👑 <b>VIP приоритет активен!</b>\nСкачиваю {p_name} вне очереди...")
         else:
-            await download_semaphore.acquire()
+            await sem.acquire()
             queue_acquired = True
-            async with queue_lock:
-                if waiting_queue_count > 0:
-                    waiting_queue_count -= 1
-            await safe_edit_status(status_msg, "⚡ <b>Скачиваю видео...</b>\nОчищаю от водяных знаков и готовлю к отправке...")
+            async with lock:
+                if target_platform == "tiktok" and tiktok_waiting_count > 0:
+                    tiktok_waiting_count -= 1
+                elif target_platform == "instagram" and instagram_waiting_count > 0:
+                    instagram_waiting_count -= 1
+                elif target_platform == "youtube" and youtube_waiting_count > 0:
+                    youtube_waiting_count -= 1
+            await safe_edit_status(status_msg, f"⚡ <b>Скачиваю {p_name}...</b>\nОчищаю от водяных знаков и готовлю к отправке...")
 
         # Выполняем скачивание
         res = await download_video(clean_url, user_id)
@@ -1018,21 +1052,36 @@ async def process_video_download(message: types.Message, url: str):
         if res.get("low_quality_notice"):
             caption += "\n\n<i>(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)</i>"
 
-        video_input = FSInputFile(file_path)
-        try:
-            sent = await message.answer_video(
-                video=video_input,
-                caption=caption,
-                reply_markup=share_kb,
-                parse_mode="HTML"
-            )
-        except Exception as html_send_err:
-            logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
-            sent = await message.answer_video(
-                video=video_input,
-                caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
-                reply_markup=share_kb
-            )
+        sent = None
+        # Для TikTok: пробуем мгновенную отправку напрямую по CDN URL (1-2 сек вместо 20 сек)
+        if target_platform == "tiktok" and res.get("direct_url") and not res.get("is_photo") and not res.get("is_album"):
+            try:
+                sent = await message.answer_video(
+                    video=res["direct_url"],
+                    caption=caption,
+                    reply_markup=share_kb,
+                    parse_mode="HTML"
+                )
+            except Exception as direct_send_err:
+                logging.info(f"TikTok direct URL send bypassed ({direct_send_err}), sending local file...")
+                sent = None
+
+        if not sent:
+            video_input = FSInputFile(file_path)
+            try:
+                sent = await message.answer_video(
+                    video=video_input,
+                    caption=caption,
+                    reply_markup=share_kb,
+                    parse_mode="HTML"
+                )
+            except Exception as html_send_err:
+                logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
+                sent = await message.answer_video(
+                    video=video_input,
+                    caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
+                    reply_markup=share_kb
+                )
 
         # Сохраняем file_id в кэш для мгновенных ответов в будущем
         if sent and sent.video and sent.video.file_id:
@@ -1075,9 +1124,9 @@ async def process_video_download(message: types.Message, url: str):
 
 
     finally:
-        # Освобождаем семафор
+        # Освобождаем независимый семафор соответствующей платформы
         if queue_acquired and not is_vip:
-            download_semaphore.release()
+            sem.release()
         # Удаляем временные файлы с диска
         if res and isinstance(res, dict):
             # Удаляем фото из альбома

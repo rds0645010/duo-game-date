@@ -9,6 +9,9 @@ import yt_dlp
 import imageio_ffmpeg
 
 import warp_proxy
+import tiktok_service
+import youtube_service
+import instagram_service
 
 logger = logging.getLogger(__name__)
 
@@ -140,49 +143,9 @@ def extract_url(text: str):
 
 async def parse_tiktok_tikwm(url: str):
     """
-    Fast direct parser for TikTok without watermark via TikWM API.
-    Returns: dict(video_url=..., title=..., author=..., cover=..., duration=...)
+    Быстрый парсер TikTok без водяных знаков (делегирует в независимый tiktok_service).
     """
-    api_url = "https://www.tikwm.com/api/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
-    }
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(api_url, data={"url": url}, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("code") == 0 and data.get("data"):
-                        d = data["data"]
-                        video_url = d.get("play") or d.get("wmplay")
-                        if video_url:
-                            if video_url.startswith("/"):
-                                video_url = "https://www.tikwm.com" + video_url
-                            return {
-                                "success": True,
-                                "platform": "tiktok",
-                                "video_url": video_url,
-                                "title": d.get("title", "TikTok Video") or "TikTok Video",
-                                "author": d.get("author", {}).get("nickname", "TikTok"),
-                                "cover": d.get("cover", ""),
-                                "duration": d.get("duration", 0)
-                            }
-                        # Поддержка фото-слайдшоу TikTok
-                        images = d.get("images") or []
-                        if images:
-                            return {
-                                "success": True,
-                                "platform": "tiktok",
-                                "is_photo": True,
-                                "photo_urls": images,
-                                "title": d.get("title", "TikTok Фото") or "TikTok Фото",
-                                "author": d.get("author", {}).get("nickname", "TikTok"),
-                                "cover": d.get("cover", "")
-                            }
-        except Exception as e:
-            logger.warning(f"TikWM error for {url}: {e}")
-    return None
+    return await tiktok_service.parse_tiktok(url)
 
 
 def is_valid_mp4_file(file_path: str) -> bool:
@@ -258,7 +221,7 @@ async def download_file_from_url(url: str, output_path: str, max_size_bytes: int
 
             downloaded = 0
             with open(output_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(64 * 1024):
+                async for chunk in resp.content.iter_chunked(512 * 1024):
                     downloaded += len(chunk)
                     if downloaded > max_size_bytes:
                         raise Exception("file_too_large")
@@ -298,353 +261,21 @@ def _merge_image_audio_sync(image_path: str, audio_path: str, output_mp4: str) -
 
 async def parse_instagram_embed(url: str):
     """
-    Быстро извлекает прямой URL видео или фото из публичного Instagram embed (< 1.5 сек).
-    Работает без авторизации и cookies.
+    Быстро извлекает прямой URL видео или фото из публичного Instagram embed (делегирует в instagram_service).
     """
-    m = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', url)
-    if not m:
-        return None
-    shortcode = m.group(1)
-    is_reel = bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url, re.I))
-    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    import html as py_html
-
-                    # 1. Извлекаем автора
-                    author = ""
-                    owner_match = re.search(r'"username":\s*"([^"]+)"', text)
-                    if not owner_match:
-                        owner_match = re.search(r'class="OwnerUsername[^"]*">([^<]+)<', text)
-                    if owner_match:
-                        author = py_html.unescape(owner_match.group(1)).strip()
-
-                    # 2. Извлекаем заголовок/описание
-                    title = ""
-                    cap_match = re.search(r'class="Caption"[^>]*>.*?<div[^>]*>([^<]+)<', text, re.DOTALL)
-                    if not cap_match:
-                        cap_match = re.search(r'<title>([^<]+)</title>', text)
-                    if cap_match:
-                        title = py_html.unescape(cap_match.group(1)).strip()
-
-                    # 3. Ищем прямое видео
-                    video_matches = re.findall(r'"video_url":\s*"([^"]+)"', text)
-                    if video_matches:
-                        v_url = py_html.unescape(video_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
-                        thumb = ""
-                        disp_matches = re.findall(r'"display_url":\s*"([^"]+)"', text)
-                        if disp_matches:
-                            thumb = py_html.unescape(disp_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
-                        return {
-                            "success": True,
-                            "platform": "instagram",
-                            "is_video": True,
-                            "video_url": v_url,
-                            "title": title or "Instagram Reels",
-                            "author": author or "Instagram",
-                            "thumbnail": thumb or f"https://www.instagram.com/p/{shortcode}/media/?size=l"
-                        }
-
-                    # 4. Ищем прямое фото (если видео нет)
-                    photo_matches = re.findall(r'"display_url":\s*"([^"]+)"', text)
-                    if not photo_matches:
-                        photo_matches = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', text)
-                    if not photo_matches:
-                        photo_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', text)
-
-                    if photo_matches and not is_reel:
-                        p_url = py_html.unescape(photo_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
-                        return {
-                            "success": True,
-                            "platform": "instagram",
-                            "is_photo": True,
-                            "photo_url": p_url,
-                            "title": title or "Instagram Фото",
-                            "author": author or "Instagram",
-                            "thumbnail": p_url
-                        }
-    except Exception as e:
-        logger.debug(f"Instagram embed fast parse failed: {e}")
-
-    # Для /reel/ и /reels/ фото-фолбэк запрещён: это всегда видео.
-    # Раньше здесь возвращался /media/?size=l — обложка, которую бот
-    # отправлял как «фото из видео». Лучше вернуть None и скачать через yt-dlp.
-    if is_reel:
-        return None
-
-    # Fallback на официальный публичный медиа-редирект (только для фото-постов /p/)
-    media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
-    return {
-        "success": True,
-        "platform": "instagram",
-        "is_photo": True,
-        "photo_url": media_url,
-        "title": "Instagram Фото",
-        "author": "Instagram",
-        "thumbnail": media_url
-    }
+    return await instagram_service.parse_instagram_embed(url)
 
 
 async def try_download_instagram_media(shortcode: str, output_prefix: str, allow_photo: bool = True, proxy_url: str = None):
-    """
-    Скачивает видео, фотопост или карусель (альбом) из Instagram.
-    Если обнаружено видео в embed, скачивает его напрямую.
-    Если обнаружено несколько слайдов, возвращает список фото для Telegram MediaGroup.
-    Если один слайд с аудио, конвертирует в видео.
-    allow_photo=False для /reel/: обложку вместо видео отдавать нельзя.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.instagram.com/",
-    }
-
-    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-    img_urls = []
-    audio_url = None
-    direct_video_urls = []
-    title = ""
-    author = ""
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(embed_url, headers=headers, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    html_text = await resp.text()
-                    import html as py_html
-
-                    # Ищем автора
-                    owner_match = re.search(r'"username":\s*"([^"]+)"', html_text)
-                    if not owner_match:
-                        owner_match = re.search(r'class="OwnerUsername[^"]*">([^<]+)<', html_text)
-                    if owner_match:
-                        author = py_html.unescape(owner_match.group(1)).strip()
-
-                    # Ищем заголовок
-                    cap_match = re.search(r'class="Caption"[^>]*>.*?<div[^>]*>([^<]+)<', html_text, re.DOTALL)
-                    if not cap_match:
-                        cap_match = re.search(r'<title>([^<]+)</title>', html_text)
-                    if cap_match:
-                        title = py_html.unescape(cap_match.group(1)).strip()
-
-                    # Прямые видео-URL: Instagram менял формат embed несколько раз,
-                    # поэтому собираем все известные варианты, а не только video_url.
-                    video_candidates = []
-                    for pattern in (
-                        r'"video_url"\s*:\s*"([^"]+)"',
-                        r'"playable_url"\s*:\s*"([^"]+)"',
-                        r'"playable_url_quality_hd"\s*:\s*"([^"]+)"',
-                    ):
-                        video_candidates.extend(re.findall(pattern, html_text))
-                    for arr in re.findall(r'"video_versions"\s*:\s*\[(.*?)\]', html_text, re.S):
-                        video_candidates.extend(re.findall(r'"url"\s*:\s*"([^"]+)"', arr))
-                    video_candidates.extend(re.findall(r'<video[^>]+src="([^"]+)"', html_text))
-                    video_candidates.extend(
-                        re.findall(r'<meta[^>]+property="og:video"[^>]+content="([^"]+)"', html_text)
-                    )
-
-                    seen_video = set()
-                    for u in video_candidates:
-                        cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
-                        if cleaned.startswith("http") and cleaned not in seen_video:
-                            seen_video.add(cleaned)
-                            direct_video_urls.append(cleaned)
-
-                    # Ищем display_url из данных json
-                    raw_urls = re.findall(r'"display_url":\s*"([^"]+)"', html_text)
-                    if not raw_urls:
-                        raw_urls = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text)
-                    if not raw_urls:
-                        raw_urls = re.findall(r'<meta property="og:image" content="([^"]+)"', html_text)
-
-                    # Ищем аудиодорожку, если есть
-                    audio_matches = re.findall(r'"audio_src":\s*"([^"]+)"', html_text)
-                    if audio_matches:
-                        audio_url = py_html.unescape(audio_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
-
-                    seen = set()
-                    for u in raw_urls:
-                        cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
-                        base = cleaned.split("?")[0]
-                        if base not in seen:
-                            seen.add(base)
-                            img_urls.append(cleaned)
-        except Exception as e:
-            logger.debug(f"Embed parse error: {e}")
-
-    # Если в embed нашлось прямое видео — скачиваем его как видео MP4.
-    # Пробуем все найденные URL, потому что часть из них может быть 403.
-    for video_url in direct_video_urls:
-        dest_video = f"{output_prefix}.mp4"
-        try:
-            await download_file_from_url(video_url, dest_video, proxy=proxy_url)
-            if is_valid_mp4_file(dest_video):
-                return {
-                    "file_path": dest_video,
-                    "platform": "instagram",
-                    "title": title or "Instagram Reels",
-                    "author": author or "Instagram",
-                    "filesize": os.path.getsize(dest_video)
-                }
-        except Exception as e:
-            logger.warning(f"Direct embed video download failed: {e}")
-        try:
-            if os.path.exists(dest_video):
-                os.remove(dest_video)
-        except OSError:
-            pass
-
-    # Для /reel/ обложка вместо видео — это баг, а не фолбэк.
-    if not allow_photo:
-        raise Exception("instagram_video_unavailable")
-
-    # Fallback на прямой media endpoint (только для фото-постов /p/)
-    if not img_urls:
-        media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
-        img_urls = [media_url]
-
-    # Если слайдов больше одного — скачиваем как альбом (карусель)
-    if len(img_urls) > 1:
-        album_photos = []
-        for idx, u in enumerate(img_urls[:10]):
-            dest = f"{output_prefix}_{idx}.jpg"
-            try:
-                await download_file_from_url(u, dest, proxy=proxy_url)
-                if os.path.exists(dest) and os.path.getsize(dest) > 1000:
-                    album_photos.append(dest)
-            except Exception as e:
-                logger.warning(f"Error downloading album slide {idx}: {e}")
-        if len(album_photos) > 1:
-            return {
-                "is_album": True,
-                "photos": album_photos,
-                "platform": "instagram",
-                "title": title or "Instagram Альбом",
-                "author": author or "Instagram"
-            }
-
-    # Если слайд один
-    single_dest = f"{output_prefix}.jpg"
-    try:
-        await download_file_from_url(img_urls[0], single_dest, proxy=proxy_url)
-        # Если есть аудио, конвертируем в видео MP4
-        if audio_url and FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
-            audio_dest = f"{output_prefix}.mp3"
-            mp4_dest = f"{output_prefix}.mp4"
-            try:
-                await download_file_from_url(audio_url, audio_dest, proxy=proxy_url)
-                merged = await asyncio.to_thread(_merge_image_audio_sync, single_dest, audio_dest, mp4_dest)
-                if merged and os.path.exists(mp4_dest):
-                    if os.path.exists(audio_dest): os.remove(audio_dest)
-                    if os.path.exists(single_dest): os.remove(single_dest)
-                    return {
-                        "file_path": mp4_dest,
-                        "platform": "instagram",
-                        "title": title or "Instagram Видео (Фото со звуком)",
-                        "author": author or "Instagram",
-                        "filesize": os.path.getsize(mp4_dest)
-                    }
-            except Exception as e:
-                logger.warning(f"Audio merge failed for IG: {e}")
-
-        return {
-            "file_path": single_dest,
-            "is_photo": True,
-            "platform": "instagram",
-            "title": title or "Instagram Фото",
-            "author": author or "Instagram",
-            "filesize": os.path.getsize(single_dest) if os.path.exists(single_dest) else 0
-        }
-    except Exception as e:
-        logger.warning(f"Single photo download failed: {e}")
-
-    return None
-
-
-
-
-def normalize_cookie_line(line: str) -> str:
-    """
-    Нормализует строку куки в валидный Netscape формат.
-    Если при вставке в веб-интерфейс Render знаки табуляции (\\t) превратились
-    в пробелы, восстанавливает правильное разделение на 7 колонок.
-    """
-    line_s = line.strip()
-    if not line_s or line_s.startswith("#"):
-        return line_s
-    parts = line_s.split("\t")
-    if len(parts) >= 7:
-        return "\t".join(parts[:7])
-    # Разбиваем по пробельным символам (максимум 7 частей)
-    space_parts = line_s.split(None, 6)
-    if len(space_parts) == 7:
-        return "\t".join(space_parts)
-    return line_s
-
-
-def setup_cookies_file(platform: str = None):
-    """
-    Создает файл cookies.txt для yt-dlp ТОЛЬКО ЕСЛИ пользователь передал
-    INSTAGRAM_COOKIES, YOUTUBE_COOKIES или YTDLP_COOKIES в переменных окружения.
-    """
-    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-    raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
-    raw_yt = os.environ.get("YOUTUBE_COOKIES", "").strip() or os.environ.get("YTDLP_COOKIES", "").strip()
-
-    # Если явных cookies нет — удаляем старый файл cookies.txt, чтобы не использовать капчу
-    if not raw_ig and not raw_yt:
-        if os.path.exists(cookies_path):
-            try:
-                os.remove(cookies_path)
-            except Exception:
-                pass
-        return None
-
-    if platform == "youtube" and not raw_yt:
-        return None
-    if platform == "instagram" and not raw_ig:
-        return None
-
-    try:
-        with open(cookies_path, "w", encoding="utf-8") as cf:
-            cf.write("# Netscape HTTP Cookie File\n")
-            if raw_yt:
-                cleaned_yt = raw_yt.replace("\\n", "\n")
-                if "\t" in cleaned_yt or "\n" in cleaned_yt or " " in cleaned_yt:
-                    for line in cleaned_yt.splitlines():
-                        norm_line = normalize_cookie_line(line)
-                        if norm_line:
-                            cf.write(norm_line + "\n")
-                else:
-                    for part in cleaned_yt.replace("Cookie:", "").split(";"):
-                        if "=" in part:
-                            k, v = part.strip().split("=", 1)
-                            cf.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-            if raw_ig:
-                cleaned_ig = raw_ig.replace("\\n", "\n")
-                if "\t" in cleaned_ig or "\n" in cleaned_ig or " " in cleaned_ig:
-                    for line in cleaned_ig.splitlines():
-                        norm_line = normalize_cookie_line(line)
-                        if norm_line:
-                            cf.write(norm_line + "\n")
-                else:
-                    for part in cleaned_ig.replace("Cookie:", "").split(";"):
-                        if "=" in part:
-                            k, v = part.strip().split("=", 1)
-                            cf.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
-        return cookies_path
-    except Exception as ce:
-        logger.warning(f"Could not setup cookies file: {ce}")
-        return None
+    return await instagram_service._try_download_instagram_embed_media(
+        shortcode,
+        output_prefix,
+        allow_photo,
+        proxy_url,
+        download_file_from_url,
+        is_valid_mp4_file,
+        ffmpeg_path=FFMPEG_PATH
+    )
 
 
 def _cleanup_prefix(output_prefix: str):
@@ -847,228 +478,24 @@ def _download_ytdlp_sync(
 
 
 async def _download_youtube(clean_url: str, output_prefix: str):
-    """YouTube-ветка: WARP -> прямой IP -> понижение качества."""
-    # 2. YOUTUBE SHORTS / Обычные видео:
-    # Главный приём: WARP-прокси (usque) подменяет IP Render на Cloudflare,
-    # поэтому YouTube не показывает "Sign in to confirm you're not a bot".
-    # Никакой регистрации, cookies и аккаунта Google не требуется.
-    is_short = "/shorts/" in clean_url
-    # У вертикальных Shorts 720p — это 720x1280 (height=1280).
-    # Для обычных видео ограничиваемся 720p по высоте.
-    heights = [1280, 480, 360] if is_short else [720, 480, 360]
-
-    manual_proxy = (
-        os.getenv("YTDLP_PROXY")
-        or os.getenv("YOUTUBE_PROXY")
-        or os.getenv("PROXY")
-        or os.getenv("HTTPS_PROXY")
-        or ""
-    ).strip()
-
-    strategies = []
-
-    warp_ready = False
-    if warp_proxy.warp.enabled and warp_proxy.warp.supported:
-        try:
-            warp_ready = await warp_proxy.warp.ensure_ready()
-        except Exception as e:
-            logger.warning(f"WARP init error: {e}")
-    if warp_ready and warp_proxy.warp.proxy_url:
-        strategies.append(("warp", warp_proxy.warp.proxy_url))
-
-    # Ручной прокси — только запасной вариант после WARP. Если он остался
-    # в env с прошлых экспериментов и умер, он не должен задерживать YouTube.
-    if manual_proxy:
-        strategies.append(("manual-proxy", manual_proxy))
-
-    # Всегда оставляем прямой запасной вариант.
-    strategies.append(("direct", ""))
-
-    if not strategies:
-        strategies = [("direct", "")]
-
-    last_error = None
-    size_error = False
-    visionos_args = {'youtube': {'player_client': ['visionos']}}
-    attempted = set()
-
-    for height in heights:
-        for strategy_name, strategy_proxy in strategies:
-            key = (height, strategy_name)
-            if key in attempted:
-                continue
-            attempted.add(key)
-            try:
-                res = await asyncio.to_thread(
-                    _download_ytdlp_sync,
-                    clean_url,
-                    output_prefix,
-                    height,
-                    extractor_args=visionos_args,
-                    use_cookies=False,
-                    proxy_url=strategy_proxy,
-                )
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"[YouTube] {strategy_name} {height}p failed for {clean_url}: {e}"
-                )
-                # Если завис именно туннель WARP — сбросим его, чтобы
-                # следующий запрос поднял прокси заново.
-                if strategy_name == "warp" and any(
-                    token in str(e).lower()
-                    for token in (
-                        "proxy", "tunnel", "timed out", "connection", "403",
-                        "not a bot", "sign in", "login_required",
-                    )
-                ):
-                    try:
-                        await warp_proxy.warp.mark_unhealthy()
-                    except Exception:
-                        pass
-                continue
-
-            if not res or not res.get("file_path"):
-                last_error = Exception("empty download result")
-                continue
-
-            size = res.get("filesize") or 0
-            if size > 50 * 1024 * 1024:
-                size_error = True
-                logger.warning(
-                    f"[YouTube] {strategy_name} {height}p: файл {size / 1048576:.1f} МБ > 50 МБ, пробую ниже"
-                )
-                try:
-                    if os.path.exists(res["file_path"]):
-                        os.remove(res["file_path"])
-                except OSError:
-                    pass
-                continue
-
-            res["platform"] = "youtube"
-            if height < heights[0]:
-                res["low_quality_notice"] = True
-            logger.info(
-                f"✅ [YouTube] Скачано через {strategy_name} ({height}p, {size / 1048576:.1f} МБ)"
-            )
-            return res
-
-        # Если на этом качестве всё упало по размеру — сразу пробуем ниже.
-        # Если же были сетевые ошибки, тоже пробуем ниже: 360p часто проходит.
-        continue
-
-    if size_error and last_error is None:
-        raise Exception("file_too_large: видео больше 50 МБ даже в 360p")
-    raise Exception(f"youtube_bot_detection: {last_error}")
-
-
-_INSTAGRAM_HEIGHTS = [1280, 720, 480]
+    return await youtube_service.download_youtube(
+        clean_url,
+        output_prefix,
+        _download_ytdlp_sync,
+        warp_proxy
+    )
 
 
 async def _download_instagram(clean_url: str, output_prefix: str):
-    """
-    Instagram Reels: yt-dlp с curl_cffi-имперсонацией, затем WARP,
-    затем (только для /p/) — фото/альбомный fallback.
-    Для /reel/ обложка вместо видео не отдаётся ни при каких условиях.
-    """
-    is_reel = bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', clean_url, re.I))
-
-    strategies = []
-    if warp_proxy.warp.enabled and warp_proxy.warp.supported:
-        try:
-            if await warp_proxy.warp.ensure_ready() and warp_proxy.warp.proxy_url:
-                # WARP первым: прямой заход в Instagram с дата-центра Render
-                # часто упирается в login wall и висит на connect-timeout.
-                strategies.append(("warp", warp_proxy.warp.proxy_url))
-        except Exception as e:
-            logger.warning(f"Instagram WARP init error: {e}")
-    strategies.append(("direct", ""))
-
-    last_error = None
-    size_error = False
-    no_video = False
-
-    for height in _INSTAGRAM_HEIGHTS:
-        for strategy_name, strategy_proxy in strategies:
-            try:
-                extra = {"socket_timeout": 8} if strategy_name == "direct" else {}
-                res = await asyncio.to_thread(
-                    _download_ytdlp_sync,
-                    clean_url,
-                    output_prefix,
-                    height,
-                    platform="instagram",
-                    # WARP идёт анонимно (Polaris logged-out), чтобы старые
-                    # cookies не ломали загрузку; прямой заход — с cookies, если заданы.
-                    use_cookies=(strategy_name == "direct"),
-                    proxy_url=strategy_proxy,
-                    **extra,
-                )
-            except Exception as e:
-                last_error = e
-                logger.warning(f"[Instagram] {strategy_name} {height}p failed: {e}")
-                if "no video in this post" in str(e).lower():
-                    no_video = True
-                    break
-                continue
-
-            if not res or not res.get("file_path"):
-                last_error = Exception("empty download result")
-                continue
-
-            size = res.get("filesize") or 0
-            if size > 50 * 1024 * 1024:
-                size_error = True
-                logger.warning(f"[Instagram] {strategy_name} {height}p: {size / 1048576:.1f} МБ > 50 МБ")
-                try:
-                    if os.path.exists(res["file_path"]):
-                        os.remove(res["file_path"])
-                except OSError:
-                    pass
-                continue
-
-            res["platform"] = "instagram"
-            if height < _INSTAGRAM_HEIGHTS[0]:
-                res["low_quality_notice"] = True
-            logger.info(
-                f"✅ [Instagram] Скачано через {strategy_name} ({height}p, {size / 1048576:.1f} МБ)"
-            )
-            return res
-
-        if no_video:
-            break
-        # Если ошибка не связана с превышением 50 МБ, повтор на 720p/480p не поможет.
-        if not size_error:
-            break
-
-    # Фото/карусель — только для обычных постов /p/, но не для /reel/.
-    m = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', clean_url)
-    if m:
-        try:
-            logger.info(f"Instagram photo fallback for {m.group(1)} (allow_photo={not is_reel})")
-            media_res = await try_download_instagram_media(
-                m.group(1),
-                output_prefix,
-                allow_photo=not is_reel,
-                proxy_url=warp_proxy.warp.proxy_url,
-            )
-            if media_res:
-                return media_res
-        except Exception as fb_err:
-            logger.warning(f"Instagram media fallback failed: {fb_err}")
-            last_error = last_error or fb_err
-
-    if size_error and last_error is None:
-        raise Exception("file_too_large: Instagram-видео больше 50 МБ даже в 480p")
-
-    err_text = str(last_error or "").lower()
-    if "login" in err_text or "rate-limit" in err_text or "rate limit" in err_text:
-        raise Exception(f"instagram_login_required: {last_error}")
-    if "no video in this post" in err_text:
-        raise Exception("is_photo_post")
-    if "available to everyone" in err_text or "certain audiences" in err_text:
-        raise Exception("instagram_age_restricted")
-    raise Exception(f"instagram_video_unavailable: {last_error}")
+    return await instagram_service.download_instagram(
+        clean_url,
+        output_prefix,
+        _download_ytdlp_sync,
+        warp_proxy,
+        download_file_from_url,
+        is_valid_mp4_file,
+        ffmpeg_path=FFMPEG_PATH
+    )
 
 
 async def download_video(url: str, user_id: int):
@@ -1088,123 +515,35 @@ async def download_video(url: str, user_id: int):
     uid = str(uuid.uuid4())[:8]
     output_prefix = os.path.join(DOWNLOAD_DIR, f"vid_{user_id}_{uid}")
 
-    # 1. TIKTOK: Fast TikWM API
+    # 1. TIKTOK: полностью независимая система
     if platform == "tiktok":
-        tikwm_data = await parse_tiktok_tikwm(clean_url)
-        if tikwm_data:
-            if tikwm_data.get("video_url"):
-                dest_file = f"{output_prefix}.mp4"
-                try:
-                    await download_file_from_url(tikwm_data["video_url"], dest_file)
-                    return {
-                        "file_path": dest_file,
-                        "title": tikwm_data.get("title", "TikTok"),
-                        "author": tikwm_data.get("author", "TikTok"),
-                        "duration": tikwm_data.get("duration", 0),
-                        "platform": "tiktok",
-                        "direct_url": tikwm_data["video_url"],
-                        "cover": tikwm_data.get("cover", ""),
-                        "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
-                    }
-                except Exception as e:
-                    logger.warning(f"TikWM stream download failed: {e}, falling back to yt-dlp...")
-                    if os.path.exists(dest_file):
-                        os.remove(dest_file)
-            elif tikwm_data.get("is_photo") and tikwm_data.get("photo_urls"):
-                photo_urls = tikwm_data["photo_urls"]
-                # Если несколько картинок в слайдшоу TikTok — формируем альбом
-                if len(photo_urls) > 1:
-                    album_photos = []
-                    for idx, img_u in enumerate(photo_urls[:10]):
-                        dest = f"{output_prefix}_{idx}.jpg"
-                        try:
-                            await download_file_from_url(img_u, dest)
-                            if os.path.exists(dest) and os.path.getsize(dest) > 1000:
-                                album_photos.append(dest)
-                        except Exception as dl_err:
-                            logger.warning(f"TikTok album slide download error: {dl_err}")
-                    if len(album_photos) > 1:
-                        return {
-                            "is_album": True,
-                            "photos": album_photos,
-                            "platform": "tiktok",
-                            "title": tikwm_data.get("title", "TikTok Слайдшоу"),
-                            "author": tikwm_data.get("author", "TikTok")
-                        }
+        return await tiktok_service.download_tiktok(
+            clean_url,
+            output_prefix,
+            download_locally=True,
+            ffmpeg_path=FFMPEG_PATH
+        )
 
-                # Если одна картинка — пробуем наложить звук
-                dest_file = f"{output_prefix}.jpg"
-                try:
-                    await download_file_from_url(photo_urls[0], dest_file)
-                    music_url = tikwm_data.get("music")
-                    if music_url and FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
-                        audio_file = f"{output_prefix}.mp3"
-                        mp4_file = f"{output_prefix}.mp4"
-                        try:
-                            await download_file_from_url(music_url, audio_file)
-                            merged = await asyncio.to_thread(_merge_image_audio_sync, dest_file, audio_file, mp4_file)
-                            if merged and os.path.exists(mp4_file):
-                                if os.path.exists(audio_file): os.remove(audio_file)
-                                if os.path.exists(dest_file): os.remove(dest_file)
-                                return {
-                                    "file_path": mp4_file,
-                                    "platform": "tiktok",
-                                    "title": tikwm_data.get("title", "TikTok Видео (Фото со звуком)"),
-                                    "author": tikwm_data.get("author", "TikTok"),
-                                    "filesize": os.path.getsize(mp4_file)
-                                }
-                        except Exception as m_err:
-                            logger.warning(f"TikTok music merge error: {m_err}")
-
-                    return {
-                        "file_path": dest_file,
-                        "is_photo": True,
-                        "title": tikwm_data.get("title", "TikTok Фото"),
-                        "author": tikwm_data.get("author", "TikTok"),
-                        "platform": "tiktok",
-                        "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
-                    }
-                except Exception as e:
-                    logger.warning(f"TikTok photo download failed: {e}")
-
-    # 2. YOUTUBE SHORTS / Обычные видео:
-    # WARP-прокси подменяет IP Render на Cloudflare, чтобы YouTube не показывал
-    # "Sign in to confirm you're not a bot". Без регистрации, cookies и аккаунта.
+    # 2. YOUTUBE SHORTS / Обычные видео: полностью независимая система
     if platform == "youtube":
-        async with _youtube_download_lock:
-            return await _download_youtube(clean_url, output_prefix)
+        return await youtube_service.download_youtube(
+            clean_url,
+            output_prefix,
+            _download_ytdlp_sync,
+            warp_proxy
+        )
 
-    # 3. INSTAGRAM REELS:
+    # 3. INSTAGRAM REELS: полностью независимая система
     if platform == "instagram":
-        return await _download_instagram(clean_url, output_prefix)
-
-    # 4. TIKTOK FALLBACK: yt-dlp напрямую (WARP для TikTok не нужен)
-    try:
-        res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 720)
-        if res and is_valid_mp4_file(res.get("file_path")):
-            res["platform"] = platform
-            return res
-    except Exception as e:
-        err_msg = str(e)
-        logger.warning(f"Download 720p failed for {clean_url}: {e}")
-
-        # Если в публикации нет видео (это фотопост или карусель)
-        if "no video in this post" in err_msg.lower():
-            raise Exception("is_photo_post")
-
-        # If file too large, retry in lower resolution (360p)
-        if "max_filesize" in err_msg or "too large" in err_msg.lower():
-            try:
-                logger.info(f"Retrying in lower resolution (360p) for {clean_url}...")
-                res = await asyncio.to_thread(_download_ytdlp_sync, clean_url, output_prefix, 360)
-                if res and is_valid_mp4_file(res.get("file_path")):
-                    res["platform"] = platform
-                    res["low_quality_notice"] = True
-                    return res
-            except Exception as e2:
-                raise Exception(f"file_too_large: {e2}")
-
-        raise e
+        return await instagram_service.download_instagram(
+            clean_url,
+            output_prefix,
+            _download_ytdlp_sync,
+            warp_proxy,
+            download_file_from_url,
+            is_valid_mp4_file,
+            ffmpeg_path=FFMPEG_PATH
+        )
 
     raise Exception("download_failed")
 
