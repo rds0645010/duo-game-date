@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import sqlite3
 import logging
@@ -431,6 +432,45 @@ def save_cached_media(url: str, file_id: str, media_type: str, title: str, platf
     conn.close()
 
 
+def is_instagram_reel_url(url: str) -> bool:
+    """Reels — это всегда видео. Фото-кэш для такого URL считается битым."""
+    return bool(re.search(r'instagram\.com/(?:reel|reels)/', url or "", re.IGNORECASE))
+
+
+def delete_cached_media(url: str):
+    """Удаляет запись видео-кэша для URL (включая канонический ключ ig_<code>)."""
+    if not url:
+        return
+    clean_u = url.split("?")[0].strip().rstrip("/")
+    canon_k = get_canonical_media_key(url)
+    keys = [k for k in {clean_u, canon_k} if k]
+    if not keys:
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.executemany("DELETE FROM video_cache WHERE url = ?", [(k,) for k in keys])
+        conn.commit()
+        conn.close()
+        logging.info(f"Removed cached media for {url}")
+    except Exception as e:
+        logging.warning(f"Could not delete cached media for {url}: {e}")
+
+
+def drop_poisoned_instagram_photo_cache(url: str, cached: dict = None):
+    """
+    Если для reel в кэше лежит photo (обложка), выкидываем её и качаем заново.
+    Возвращает True, если кэш был сброшен.
+    """
+    if not cached or not cached.get("file_id"):
+        return False
+    if cached.get("media_type") == "photo" and is_instagram_reel_url(url):
+        logging.info(f"Dropping poisoned Instagram photo cache for reel: {url}")
+        delete_cached_media(url)
+        return True
+    return False
+
+
 def save_cached_video(url: str, file_id: str, title: str, platform: str, author: str = ""):
     save_cached_media(url, file_id, "video", title, platform, author)
 
@@ -696,6 +736,18 @@ def format_friendly_error(e: Exception) -> str:
             "Бот специализируется на загрузке видеороликов из <b>Reels, TikTok и YouTube Shorts</b>. "
             "Если автор опубликовал статичную картинку или фото-карусель, видео в ней отсутствует."
         )
+    elif "instagram_video_unavailable" in err_text:
+        return (
+            "🎬 <b>Instagram не отдал сам видеофайл.</b>\n\n"
+            "Бот больше не подменяет видео обложкой. Попробуй отправить ссылку ещё раз "
+            "через 10–20 секунд — Instagram часто отдаёт ролик со второй попытки."
+        )
+    elif "instagram_login_required" in err_text:
+        return (
+            "🔒 <b>Instagram временно ограничил анонимный доступ к этому ролику.</b>\n\n"
+            "Подожди пару минут и попробуй снова. Если повторяется — администратор может "
+            "добавить cookies аккаунта в <code>INSTAGRAM_COOKIES</code>."
+        )
     elif "private" in err_text or "login" in err_text or "401" in err_text or "403" in err_text:
         return (
             "🔒 <b>Это видео из закрытого (приватного) профиля.</b>\n\n"
@@ -760,6 +812,8 @@ async def process_video_download(message: types.Message, url: str):
     )
 
     cached = get_cached_media(clean_url)
+    if drop_poisoned_instagram_photo_cache(clean_url, cached):
+        cached = None
     if cached and cached.get("file_id"):
         title_esc = html.escape(cached.get("title") or "Медиа")
         plat_esc = html.escape(cached.get('platform', 'Медиа').capitalize())
@@ -1571,6 +1625,8 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     # ─── 2. КЭШ: если видео уже есть — МГНОВЕННО ───
     cached = get_cached_media(clean_url)
+    if drop_poisoned_instagram_photo_cache(clean_url, cached):
+        cached = None
     if cached and cached.get("file_id"):
         m_type = cached.get("media_type", "video")
         cap = _make_caption(cached.get("title"), is_photo=(m_type == "photo"))
@@ -1686,6 +1742,11 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
         cached = get_cached_media(url)
         file_id = cached.get("file_id") if cached else None
         is_photo = (cached.get("media_type") == "photo") if cached else False
+        if file_id and is_photo and is_instagram_reel_url(url):
+            logging.info(f"Dropping poisoned Instagram photo cache in inline: {url}")
+            delete_cached_media(url)
+            file_id = None
+            is_photo = False
 
         if not file_id:
             try:

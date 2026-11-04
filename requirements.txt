@@ -3,3 +3,6 @@ aiohttp>=3.9.0
 python-dotenv>=1.0.0
 yt-dlp>=2026.10.0
 imageio-ffmpeg>=0.5.1
+# Impersonation для Instagram: без него yt-dlp не проходит логин-стену
+# и бот сваливается на обложку видео вместо самого ролика.
+curl-cffi>=0.7.0
