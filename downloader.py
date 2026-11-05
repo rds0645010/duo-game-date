@@ -149,7 +149,7 @@ async def parse_tiktok_tikwm(url: str):
     return await tiktok_service.parse_tiktok(url)
 
 
-def is_valid_mp4_file(file_path: str, allow_audio: bool = False) -> bool:
+def is_valid_mp4_file(file_path: str, allow_audio: bool = True) -> bool:
     """
     Проверяет, что скачанный файл действительно является бинарным медиафайлом (MP4/WebM/MKV/M4A/MP3),
     а не HTML/JSON страницей с ошибкой 403/502 от прокси.

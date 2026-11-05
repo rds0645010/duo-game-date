@@ -42,7 +42,8 @@ from downloader import (
     FFMPEG_PATH,
     DOWNLOAD_DIR,
     extract_direct_video_info,
-    parse_instagram_embed
+    parse_instagram_embed,
+    is_valid_mp4_file
 )
 import warp_proxy
 
