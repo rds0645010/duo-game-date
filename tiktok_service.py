@@ -64,16 +64,8 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
     Возвращает словарь с метаданными и прямой ссылкой на поток.
     """
     target_url = url
-    if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
-        try:
-            async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as s:
-                async with s.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=3)) as r:
-                    if r.url and "video" in str(r.url):
-                        target_url = str(r.url).split("?")[0]
-        except Exception:
-            pass
 
-    # 1. Пробуем TikWM
+    # 1. Сначала пробуем TikWM напрямую с исходным URL (включая vt.tiktok.com/vm.tiktok.com)
     for endpoint in TIKWM_ENDPOINTS:
         try:
             async with aiohttp.ClientSession() as session:
@@ -81,7 +73,7 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                     endpoint,
                     data={"url": target_url},
                     headers=DEFAULT_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=4)
+                    timeout=aiohttp.ClientTimeout(total=3.5)
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -118,7 +110,48 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
             logger.debug(f"TikTok endpoint {endpoint} error: {e}")
             continue
 
-    # 2. Резервный парсер Tikmate (если TikWM выдал rate limit или недоступен)
+    # 2. Если прямой запрос не сработал и это короткая ссылка — пробуем развернуть редирект
+    if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
+        try:
+            async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as s:
+                async with s.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=2.5)) as r:
+                    if r.url and "video" in str(r.url):
+                        target_url = str(r.url).split("?")[0]
+                        # Пробуем TikWM ещё раз с развернутым URL
+                        for endpoint in TIKWM_ENDPOINTS:
+                            try:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.post(
+                                        endpoint,
+                                        data={"url": target_url},
+                                        headers=DEFAULT_HEADERS,
+                                        timeout=aiohttp.ClientTimeout(total=3)
+                                    ) as resp:
+                                        if resp.status == 200:
+                                            data = await resp.json()
+                                            if data.get("code") == 0 and data.get("data"):
+                                                d = data["data"]
+                                                video_url = d.get("play") or d.get("wmplay")
+                                                if video_url:
+                                                    if video_url.startswith("/"):
+                                                        video_url = "https://www.tikwm.com" + video_url
+                                                    return {
+                                                        "success": True,
+                                                        "platform": "tiktok",
+                                                        "is_video": True,
+                                                        "video_url": video_url,
+                                                        "title": d.get("title", "TikTok Video") or "TikTok Video",
+                                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                                        "cover": d.get("cover", ""),
+                                                        "duration": d.get("duration", 0),
+                                                        "size": d.get("size", 0)
+                                                    }
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+    # 3. Резервный парсер Tikmate (если TikWM выдал rate limit или недоступен)
     tikmate_res = await _parse_tikmate(target_url)
     if tikmate_res:
         return tikmate_res
@@ -126,10 +159,16 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def download_file_stream(url: str, output_path: str, max_size_bytes: int = 50 * 1024 * 1024) -> str:
+async def download_file_stream(
+    url: str,
+    output_path: str,
+    max_size_bytes: int = 50 * 1024 * 1024,
+    progress_callback = None
+) -> str:
     """
-    Высокоскоростная потоковая загрузка файла с буфером 512 КБ (быстрее в 3-5 раз, чем 64 КБ).
+    Высокоскоростная потоковая загрузка файла с буфером 1 МБ и поддержкой прогресс-бара.
     """
+    import time
     headers = {
         "User-Agent": DEFAULT_HEADERS["User-Agent"],
         "Accept": "*/*",
@@ -141,16 +180,28 @@ async def download_file_stream(url: str, output_path: str, max_size_bytes: int =
                 raise Exception(f"HTTP {resp.status} while downloading TikTok stream")
 
             content_length = resp.headers.get("Content-Length")
-            if content_length and int(content_length) > max_size_bytes:
+            total = int(content_length) if content_length and content_length.isdigit() else 0
+            if total > max_size_bytes:
                 raise Exception("file_too_large")
 
             downloaded = 0
+            t0 = time.time()
             with open(output_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(512 * 1024):
+                async for chunk in resp.content.iter_chunked(1024 * 1024):
                     downloaded += len(chunk)
                     if downloaded > max_size_bytes:
                         raise Exception("file_too_large")
                     f.write(chunk)
+                    if progress_callback:
+                        elapsed = time.time() - t0
+                        speed = downloaded / elapsed if elapsed > 0.05 else 0
+                        eta = (total - downloaded) / speed if (speed > 0 and total > downloaded) else 0
+                        try:
+                            cb_res = progress_callback(downloaded, total, speed, eta)
+                            if asyncio.iscoroutine(cb_res):
+                                await cb_res
+                        except Exception:
+                            pass
     return output_path
 
 
@@ -158,7 +209,8 @@ async def download_tiktok(
     clean_url: str,
     output_prefix: Optional[str] = None,
     download_locally: bool = True,
-    ffmpeg_path: str = None
+    ffmpeg_path: str = None,
+    progress_callback = None
 ) -> Dict[str, Any]:
     """
     Полностью независимый конвейер загрузки TikTok:
@@ -189,7 +241,7 @@ async def download_tiktok(
 
         if download_locally:
             try:
-                await download_file_stream(video_url, dest_file)
+                await download_file_stream(video_url, dest_file, progress_callback=progress_callback)
                 filesize = os.path.getsize(dest_file) if os.path.exists(dest_file) else filesize
             except Exception as dl_err:
                 logger.warning(f"TikTok local stream download failed: {dl_err}")

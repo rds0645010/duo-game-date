@@ -127,7 +127,8 @@ async def download_instagram(
     warp_proxy_module=None,
     download_file_func=None,
     is_valid_mp4_func=None,
-    ffmpeg_path: str = None
+    ffmpeg_path: str = None,
+    progress_callback = None
 ) -> Dict[str, Any]:
     """
     Полностью независимый конвейер загрузки Instagram:
@@ -140,6 +141,7 @@ async def download_instagram(
         import tempfile, uuid
         output_prefix = os.path.join(tempfile.gettempdir(), f"ig_{uuid.uuid4().hex[:8]}")
     is_reel = is_reel_url(clean_url)
+    loop = asyncio.get_running_loop()
 
     strategies = []
     if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
@@ -167,6 +169,8 @@ async def download_instagram(
                 use_cookies=True,
                 proxy_url=strategy_proxy,
                 socket_timeout=socket_timeout,
+                progress_callback=progress_callback,
+                event_loop=loop,
             )
         except Exception as e:
             last_error = e
@@ -206,6 +210,8 @@ async def download_instagram(
                     use_cookies=True,
                     proxy_url=strategy_proxy,
                     socket_timeout=socket_timeout,
+                    progress_callback=progress_callback,
+                    event_loop=loop,
                 )
                 if res and res.get("file_path") and (res.get("filesize") or 0) <= 50 * 1024 * 1024:
                     res["platform"] = "instagram"

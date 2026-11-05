@@ -149,9 +149,9 @@ async def parse_tiktok_tikwm(url: str):
     return await tiktok_service.parse_tiktok(url)
 
 
-def is_valid_mp4_file(file_path: str) -> bool:
+def is_valid_mp4_file(file_path: str, allow_audio: bool = False) -> bool:
     """
-    Проверяет, что скачанный файл действительно является бинарным медиафайлом (MP4/WebM/MKV),
+    Проверяет, что скачанный файл действительно является бинарным медиафайлом (MP4/WebM/MKV/M4A/MP3),
     а не HTML/JSON страницей с ошибкой 403/502 от прокси.
     Исключает появление плашки 'Unknown Track' в Telegram.
     """
@@ -163,8 +163,16 @@ def is_valid_mp4_file(file_path: str) -> bool:
     try:
         with open(file_path, "rb") as f:
             header = f.read(32)
-        # MP4/MOV: ftyp в первых байтах; WebM/MKV: EBML.
+        # MP4/MOV/M4A: ftyp в первых байтах; WebM/MKV: EBML.
         if b"ftyp" in header[:16] or header.startswith(b"\x1a\x45\xdf\xa3"):
+            return True
+        if allow_audio and (
+            header.startswith(b"ID3")
+            or header.startswith(b"\xff\xfb")
+            or header.startswith(b"\xff\xf3")
+            or header.startswith(b"\xff\xf2")
+            or header.startswith(b"OggS")
+        ):
             return True
         # Картинки (в т.ч. обложки Instagram) — не видео.
         if header.startswith((
@@ -190,9 +198,15 @@ def extract_youtube_id(url: str):
     return m.group(1) if m else None
 
 
-async def download_file_from_url(url: str, output_path: str, max_size_bytes: int = 50 * 1024 * 1024, proxy: str = None):
+async def download_file_from_url(
+    url: str,
+    output_path: str,
+    max_size_bytes: int = 50 * 1024 * 1024,
+    proxy: str = None,
+    progress_callback = None
+):
     """
-    Streams a direct video URL to output_path while enforcing max size.
+    Streams a direct video URL to output_path while enforcing max size and updating progress.
     Для Instagram CDN обязателен Referer, иначе отдаёт 403/HTML вместо MP4.
     proxy — необязательный HTTP-прокси (например, локальный WARP).
     """
@@ -217,16 +231,28 @@ async def download_file_from_url(url: str, output_path: str, max_size_bytes: int
                 raise Exception(f"Expected media, got {content_type or 'unknown content type'}")
 
             content_length = resp.headers.get("Content-Length")
-            if content_length and int(content_length) > max_size_bytes:
+            total = int(content_length) if content_length and content_length.isdigit() else 0
+            if total > max_size_bytes:
                 raise Exception("file_too_large")
 
             downloaded = 0
+            t0 = time.time()
             with open(output_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(512 * 1024):
+                async for chunk in resp.content.iter_chunked(1024 * 1024):
                     downloaded += len(chunk)
                     if downloaded > max_size_bytes:
                         raise Exception("file_too_large")
                     f.write(chunk)
+                    if progress_callback:
+                        elapsed = time.time() - t0
+                        spd = downloaded / elapsed if elapsed > 0.05 else 0
+                        eta = (total - downloaded) / spd if (spd > 0 and total > downloaded) else 0
+                        try:
+                            cb_res = progress_callback(downloaded, total, spd, eta)
+                            if asyncio.iscoroutine(cb_res):
+                                await cb_res
+                        except Exception:
+                            pass
     return output_path
 
 
@@ -382,6 +408,9 @@ def _download_ytdlp_sync(
     use_cookies: bool = True,
     proxy_url: str = None,
     socket_timeout: float = 25,
+    progress_callback = None,
+    event_loop = None,
+    audio_only: bool = False,
 ):
     """
     Синхронное скачивание через yt-dlp (запускается в asyncio.to_thread).
@@ -411,9 +440,12 @@ def _download_ytdlp_sync(
 
     has_ffmpeg = bool(FFMPEG_PATH and os.path.exists(FFMPEG_PATH))
 
-    # Для Instagram видео всегда идет единым готовым mp4-потоком.
-    # Для YouTube/TikTok при наличии FFmpeg берем адаптивные потоки H.264+AAC.
-    if plat == "instagram":
+    # Для аудио-режима (длинные YouTube видео/подкасты): скачиваем чистую аудиодорожку
+    if audio_only:
+        format_spec = (
+            "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
+        )
+    elif plat == "instagram":
         format_spec = (
             f"best[height<={height_limit}][ext=mp4]/"
             f"best[ext=mp4]/"
@@ -450,13 +482,38 @@ def _download_ytdlp_sync(
         'retries': 0 if (plat == "instagram" and not proxy) else 2,
         'fragment_retries': 2,
         'socket_timeout': socket_timeout,
-        'concurrent_fragment_downloads': 4,
+        'concurrent_fragment_downloads': 8,
+        'buffersize': 1024 * 1024,
+        'http_chunk_size': 10485760,
         'overwrites': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
+
+    if progress_callback and event_loop:
+        def _ytdlp_progress_hook(d):
+            try:
+                st = d.get('status')
+                if st == 'downloading':
+                    dl = d.get('downloaded_bytes') or 0
+                    tot = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                    spd = d.get('speed') or 0
+                    eta = d.get('eta') or 0
+                    if tot > 0:
+                        asyncio.run_coroutine_threadsafe(
+                            progress_callback(dl, tot, spd, eta),
+                            event_loop
+                        )
+                elif st == 'finished':
+                    asyncio.run_coroutine_threadsafe(
+                        progress_callback(-1, -1, 0, 0),
+                        event_loop
+                    )
+            except Exception:
+                pass
+        ydl_opts['progress_hooks'] = [_ytdlp_progress_hook]
 
     if proxy:
         ydl_opts['proxy'] = proxy
@@ -495,17 +552,21 @@ def _download_ytdlp_sync(
 
     if has_ffmpeg:
         ydl_opts['ffmpeg_location'] = FFMPEG_PATH
-        ydl_opts['merge_output_format'] = 'mp4'
-        ydl_opts['postprocessor_args'] = {
-            'ffmpeg': ['-movflags', '+faststart']
-        }
+        if not audio_only:
+            ydl_opts['merge_output_format'] = 'mp4'
+            ydl_opts['postprocessor_args'] = {
+                'ffmpeg': ['-movflags', '+faststart']
+            }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
         # Ищем именно результат текущей попытки (prefix чистился выше).
-        candidates = [f"{output_prefix}.{ext}" for ext in ("mp4", "mkv", "webm")]
+        candidates = [
+            f"{output_prefix}.{ext}"
+            for ext in ("mp4", "mkv", "webm", "m4a", "mp3", "opus", "aac")
+        ]
         try:
             prefix_files = [
                 os.path.join(DOWNLOAD_DIR, name)
@@ -518,16 +579,17 @@ def _download_ytdlp_sync(
         candidates.extend(prefix_files)
 
         for cand in candidates:
-            if is_valid_mp4_file(cand):
+            if is_valid_mp4_file(cand, allow_audio=audio_only):
                 return {
                     "file_path": cand,
-                    "title": info.get("title", "Video") if info else "Video",
+                    "title": info.get("title", "Audio" if audio_only else "Video") if info else "Media",
                     "duration": info.get("duration", 0) if info else 0,
                     "author": (
                         (info.get("uploader") or info.get("channel") or "Creator")
                         if info else "Creator"
                     ),
                     "filesize": os.path.getsize(cand),
+                    "is_audio": audio_only,
                 }
         raise Exception("Downloaded file not valid or not found on disk")
     except Exception:
@@ -535,16 +597,17 @@ def _download_ytdlp_sync(
         raise
 
 
-async def _download_youtube(clean_url: str, output_prefix: str):
+async def _download_youtube(clean_url: str, output_prefix: str, progress_callback=None):
     return await youtube_service.download_youtube(
         clean_url,
         output_prefix,
         _download_ytdlp_sync,
-        warp_proxy
+        warp_proxy,
+        progress_callback=progress_callback
     )
 
 
-async def _download_instagram(clean_url: str, output_prefix: str):
+async def _download_instagram(clean_url: str, output_prefix: str, progress_callback=None):
     return await instagram_service.download_instagram(
         clean_url,
         output_prefix,
@@ -552,16 +615,17 @@ async def _download_instagram(clean_url: str, output_prefix: str):
         warp_proxy,
         download_file_from_url,
         is_valid_mp4_file,
-        ffmpeg_path=FFMPEG_PATH
+        ffmpeg_path=FFMPEG_PATH,
+        progress_callback=progress_callback
     )
 
 
-async def download_video(url: str, user_id: int):
+async def download_video(url: str, user_id: int, progress_callback=None):
     """
     Главный диспетчер скачивания:
-    - TikTok -> быстрый TikWM API (без водяного знака);
-    - YouTube Shorts / видео -> WARP-прокси + yt-dlp (visionos client),
-      без cookies и регистрации, с fallback на прямой IP и понижение качества;
+    - TikTok -> быстрый TikWM API (без водяного знака) + live progress;
+    - YouTube Shorts / видео / подкасты -> WARP-прокси + yt-dlp (visionos client),
+      с авто-переходом в MP3/M4A аудио при превышении 50 МБ (для 1-2 часовых роликов);
     - Instagram -> yt-dlp + embed/photo fallback.
     """
     platform = detect_platform(url)
@@ -579,16 +643,18 @@ async def download_video(url: str, user_id: int):
             clean_url,
             output_prefix,
             download_locally=True,
-            ffmpeg_path=FFMPEG_PATH
+            ffmpeg_path=FFMPEG_PATH,
+            progress_callback=progress_callback
         )
 
-    # 2. YOUTUBE SHORTS / Обычные видео: полностью независимая система
+    # 2. YOUTUBE SHORTS / Обычные видео / Подкасты: полностью независимая система
     if platform == "youtube":
         return await youtube_service.download_youtube(
             clean_url,
             output_prefix,
             _download_ytdlp_sync,
-            warp_proxy
+            warp_proxy,
+            progress_callback=progress_callback
         )
 
     # 3. INSTAGRAM REELS: полностью независимая система
@@ -600,7 +666,8 @@ async def download_video(url: str, user_id: int):
             warp_proxy,
             download_file_from_url,
             is_valid_mp4_file,
-            ffmpeg_path=FFMPEG_PATH
+            ffmpeg_path=FFMPEG_PATH,
+            progress_callback=progress_callback
         )
 
     raise Exception("download_failed")

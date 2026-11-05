@@ -25,7 +25,8 @@ async def download_youtube(
     clean_url: str,
     output_prefix: Optional[str] = None,
     ytdlp_sync_func=None,
-    warp_proxy_module=None
+    warp_proxy_module=None,
+    progress_callback=None
 ) -> Dict[str, Any]:
     """
     Полностью независимый конвейер загрузки YouTube:
@@ -34,6 +35,8 @@ async def download_youtube(
     - visionos-клиент обходит ограничения SABR и PO-token.
     - Никаких cookies и аккаунта Google не требуется.
     - Автоматический каскад качества: 1280 (вертикальный 720p) -> 480 -> 360.
+    - Автоматический fallback на аудио (MP3/M4A подкаст) для длинных 1-2 часовых видео,
+      если размер видео превышает 50 МБ (лимит Telegram Bot API).
     """
     if not output_prefix:
         import tempfile, uuid
@@ -72,6 +75,7 @@ async def download_youtube(
     size_error = False
     visionos_args = {'youtube': {'player_client': ['visionos']}}
     attempted = set()
+    loop = asyncio.get_running_loop()
 
     for height in heights:
         for strategy_name, strategy_proxy in strategies:
@@ -89,6 +93,9 @@ async def download_youtube(
                     platform="youtube",
                     use_cookies=False,
                     proxy_url=strategy_proxy,
+                    progress_callback=progress_callback,
+                    event_loop=loop,
+                    audio_only=False
                 )
             except Exception as e:
                 last_error = e
@@ -138,6 +145,41 @@ async def download_youtube(
         if not size_error:
             break
 
+    # Если видео даже в 360p превышает 50 МБ (длинный ролик на 1-2 часа) —
+    # пробуем скачать чистую аудиодорожку (M4A/MP3), чтобы пользователь получил контент
+    if size_error:
+        logger.info(f"[YouTube] Видео превышает 50 МБ даже в 360p. Скачиваю аудиодорожку...")
+        for strategy_name, strategy_proxy in strategies:
+            try:
+                audio_res = await asyncio.to_thread(
+                    ytdlp_sync_func,
+                    clean_url,
+                    output_prefix,
+                    360,
+                    extractor_args=visionos_args,
+                    platform="youtube",
+                    use_cookies=False,
+                    proxy_url=strategy_proxy,
+                    progress_callback=progress_callback,
+                    event_loop=loop,
+                    audio_only=True
+                )
+                if audio_res and audio_res.get("file_path"):
+                    sz = audio_res.get("filesize") or 0
+                    if sz <= 50 * 1024 * 1024:
+                        audio_res["platform"] = "youtube"
+                        audio_res["is_audio"] = True
+                        logger.info(f"✅ [YouTube] Скачана аудиодорожка ({sz / 1048576:.1f} МБ)")
+                        return audio_res
+                    else:
+                        try:
+                            if os.path.exists(audio_res["file_path"]):
+                                os.remove(audio_res["file_path"])
+                        except OSError:
+                            pass
+            except Exception as a_err:
+                logger.warning(f"[YouTube] Audio download failed ({strategy_name}): {a_err}")
+
     if size_error and last_error is None:
-        raise Exception("file_too_large: видео больше 50 МБ даже в 360p")
+        raise Exception("file_too_large: видео и аудио больше 50 МБ (превышает лимит Telegram)")
     raise Exception(f"youtube_bot_detection: {last_error}")

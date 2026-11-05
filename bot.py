@@ -12,6 +12,7 @@ import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.enums import ChatAction
 from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -735,6 +736,74 @@ async def safe_edit_status(msg: types.Message, text: str):
         logging.debug(f"Status edit ignored: {e}")
 
 
+def create_progress_reporter(status_msg: types.Message, platform_name: str, throttle_seconds: float = 1.3):
+    """
+    Создает троттлинговый прогресс-репортер для редактирования статусного сообщения Telegram.
+    Троттлинг 1.3-1.5 сек предотвращает ошибки Telegram 429 Flood Control.
+    """
+    last_update = 0.0
+    last_rendered_pct = -1.0
+
+    async def update_progress(downloaded: int, total: int, speed: float = 0.0, eta: float = 0.0):
+        nonlocal last_update, last_rendered_pct
+        if not status_msg:
+            return
+
+        now = time.time()
+
+        # Финализация / склейка потоков
+        if downloaded == -1:
+            if now - last_update >= 1.0:
+                last_update = now
+                await safe_edit_status(
+                    status_msg,
+                    f"⚙️ <b>Обрабатываю {platform_name}...</b>\n"
+                    f"<code>[████████████] 100%</code>\n"
+                    f"Финализирую файл и готовлю к отправке..."
+                )
+            return
+
+        if total <= 0:
+            if now - last_update >= throttle_seconds:
+                last_update = now
+                cur_mb = downloaded / (1024 * 1024)
+                spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
+                await safe_edit_status(
+                    status_msg,
+                    f"⚡ <b>Скачиваю {platform_name}...</b>\n"
+                    f"📊 Загружено: {cur_mb:.1f} МБ{spd_str}"
+                )
+            return
+
+        pct = min(100.0, max(0.0, (downloaded / total) * 100.0))
+
+        # Не спамим правками, если прошло мало времени и процент почти не изменился
+        if (now - last_update < throttle_seconds) and abs(pct - last_rendered_pct) < 15:
+            return
+
+        last_update = now
+        last_rendered_pct = pct
+
+        bar_len = 12
+        filled = int(round(bar_len * pct / 100.0))
+        bar = "█" * filled + "░" * (bar_len - filled)
+
+        cur_mb = downloaded / (1024 * 1024)
+        tot_mb = total / (1024 * 1024)
+
+        spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
+        eta_str = f"\n⏱ Осталось: ~{max(1, int(round(eta)))} сек" if eta > 0 else ""
+
+        text = (
+            f"⚡ <b>Скачиваю {platform_name}...</b>\n"
+            f"<code>[{bar}] {int(pct)}%</code>\n"
+            f"📊 {cur_mb:.1f} из {tot_mb:.1f} МБ{spd_str}{eta_str}"
+        )
+        await safe_edit_status(status_msg, text)
+
+    return update_progress
+
+
 def format_friendly_error(e: Exception) -> str:
     """Преобразует любые технические ошибки в понятные объяснения для пользователя."""
     err_text = str(e).lower()
@@ -927,8 +996,9 @@ async def process_video_download(message: types.Message, url: str):
                     youtube_waiting_count -= 1
             await safe_edit_status(status_msg, f"⚡ <b>Скачиваю {p_name}...</b>\nОчищаю от водяных знаков и готовлю к отправке...")
 
-        # Выполняем скачивание
-        res = await download_video(clean_url, user_id)
+        # Выполняем скачивание с живым прогресс-баром
+        progress_cb = create_progress_reporter(status_msg, p_name)
+        res = await download_video(clean_url, user_id, progress_callback=progress_cb)
         if not res or not isinstance(res, dict):
             await safe_edit_status(status_msg, "❌ <b>Не удалось скачать видео.</b>\nВозможно, видео удалено или автор ограничил доступ.")
             return
@@ -938,18 +1008,7 @@ async def process_video_download(message: types.Message, url: str):
             await safe_edit_status(status_msg, "❌ Не удалось загрузить видео файл. Возможно, видео удалено или автор ограничил доступ.")
             return
 
-        # Проверка размера (Telegram Bot API лимит 50 МБ)
         file_size = os.path.getsize(file_path)
-        if file_size > 50 * 1024 * 1024:
-            await safe_edit_status(
-                status_msg,
-                f"⚠️ <b>Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)</b>\n\n"
-                f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
-                f"Попробуй более короткое видео или шортс."
-            )
-            return
-
-        await safe_edit_status(status_msg, "📤 <b>Отправляю чистое видео в Telegram...</b>")
 
         platform_names = {
             "tiktok": "TikTok",
@@ -962,6 +1021,56 @@ async def process_video_download(message: types.Message, url: str):
         author_raw = (res.get("author") or "")[:50]
         title_esc = html.escape(title_raw)
         author_esc = html.escape(author_raw)
+
+        # 🎧 Если это длинный ролик YouTube, сконвертированный в аудио-подкаст
+        if res.get("is_audio"):
+            try:
+                await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VOICE)
+            except Exception:
+                pass
+            file_size_mb = round(file_size / (1024 * 1024), 1)
+            await safe_edit_status(
+                status_msg,
+                f"🎧 <b>Отправляю аудиодорожку в Telegram ({file_size_mb} МБ)...</b>"
+            )
+            audio_caption = (
+                f"🎧 <b>{title_esc}</b>\n\n"
+                f"📱 <b>Источник:</b> {plat_str} (Аудио / Подкаст)\n"
+                f"ℹ️ <i>(Ролик больше 50 МБ — видео-лимит Telegram, поэтому отправлен как чистая аудиозапись для удобного прослушивания)</i>\n"
+                f"✨ <i>Скачано через @duo_play_date_bot</i>"
+            )
+            audio_input = FSInputFile(file_path)
+            sent = await message.answer_audio(
+                audio=audio_input,
+                caption=audio_caption,
+                title=title_raw[:80],
+                performer=author_raw[:50],
+                duration=int(res.get("duration", 0)),
+                reply_markup=share_kb,
+                parse_mode="HTML"
+            )
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            return
+
+        # Проверка размера (Telegram Bot API лимит 50 МБ)
+        if file_size > 50 * 1024 * 1024:
+            await safe_edit_status(
+                status_msg,
+                f"⚠️ <b>Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)</b>\n\n"
+                f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
+                f"Попробуй более короткое видео или шортс."
+            )
+            return
+
+        file_size_mb = round(file_size / (1024 * 1024), 1)
+        await safe_edit_status(status_msg, f"📤 <b>Отправляю чистое видео в Telegram ({file_size_mb} МБ)...</b>")
+        try:
+            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
+        except Exception:
+            pass
 
         # 🖼 Если это альбом / карусель из нескольких слайдов
         if res.get("is_album") and res.get("photos"):
