@@ -744,17 +744,17 @@ def format_friendly_error(e: Exception) -> str:
             "Бот специализируется на загрузке видеороликов из <b>Reels, TikTok и YouTube Shorts</b>. "
             "Если автор опубликовал статичную картинку или фото-карусель, видео в ней отсутствует."
         )
+    elif "instagram_login_required" in err_text or "empty media response" in err_text:
+        return (
+            "🔒 <b>Instagram ограничил доступ к этому ролику.</b>\n\n"
+            "Instagram закрыл анонимный просмотр этого видео (ролик 18+, из закрытого аккаунта или ограничен автором для незарегистрированных пользователей).\n\n"
+            "💡 <i>Ролики из TikTok и YouTube Shorts скачиваются всегда и без ограничений!</i>"
+        )
     elif "instagram_video_unavailable" in err_text:
         return (
-            "🎬 <b>Instagram не отдал сам видеофайл.</b>\n\n"
-            "Бот больше не подменяет видео обложкой. Попробуй отправить ссылку ещё раз "
-            "через 10–20 секунд — Instagram часто отдаёт ролик со второй попытки."
-        )
-    elif "instagram_login_required" in err_text:
-        return (
-            "🔒 <b>Instagram временно ограничил анонимный доступ к этому ролику.</b>\n\n"
-            "Подожди пару минут и попробуй снова. Если повторяется — администратор может "
-            "добавить cookies аккаунта в <code>INSTAGRAM_COOKIES</code>."
+            "🎬 <b>Instagram не отдал видеофайл.</b>\n\n"
+            "Сервер Instagram не предоставил доступ к потоку этого ролика (возможно, он удален или закрыт для прямого скачивания).\n\n"
+            "💡 <i>Попробуй отправить ролик из TikTok или YouTube Shorts — они работают моментально!</i>"
         )
     elif "private" in err_text or "login" in err_text or "401" in err_text or "403" in err_text:
         return (

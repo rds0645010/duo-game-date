@@ -7,6 +7,7 @@ import logging
 import aiohttp
 import yt_dlp
 import imageio_ffmpeg
+from typing import Optional, Dict, Any, List
 
 import warp_proxy
 import tiktok_service
@@ -321,6 +322,56 @@ def _cleanup_stale_downloads(max_age_seconds: int = 2 * 60 * 60):
         pass
 
 
+def setup_cookies_file(platform: str = None) -> Optional[str]:
+    """
+    Создает или находит cookies.txt для yt-dlp.
+    Поддерживает как Netscape-формат, так и строку cookies из браузера (sessionid=...; ds_user_id=...).
+    """
+    raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
+    raw_yt = (
+        os.environ.get("YOUTUBE_COOKIES", "").strip()
+        or os.environ.get("YTDLP_COOKIES", "").strip()
+    )
+
+    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
+    if platform == "youtube" and not raw_yt:
+        return None
+    if platform == "instagram" and not raw_ig:
+        return None
+
+    raw = raw_yt if platform == "youtube" else raw_ig
+    if not raw:
+        return None
+
+    try:
+        # Если это уже существующий путь к файлу
+        if os.path.exists(raw):
+            return raw
+
+        # Если это Netscape-формат
+        if "# Netscape" in raw or "\t" in raw:
+            content = raw
+        else:
+            # Преобразуем строку вида "sessionid=xyz; ds_user_id=123" в Netscape cookies
+            domain = ".youtube.com" if platform == "youtube" else ".instagram.com"
+            lines = ["# Netscape HTTP Cookie File", f"# Generated for {domain}"]
+            for part in raw.split(";"):
+                part = part.strip()
+                if not part or "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\t{k.strip()}\t{v.strip()}")
+            content = "\n".join(lines) + "\n"
+
+        with open(cookies_path, "w", encoding="utf-8") as cf:
+            cf.write(content)
+        return cookies_path
+    except Exception as e:
+        logger.warning(f"Error setting up cookies file: {e}")
+        return None
+
+
 def _download_ytdlp_sync(
     url: str,
     output_prefix: str,
@@ -360,10 +411,17 @@ def _download_ytdlp_sync(
 
     has_ffmpeg = bool(FFMPEG_PATH and os.path.exists(FFMPEG_PATH))
 
-    # Для Telegram лучше H.264 + AAC (mp4), иначе часть клиентов показывает
-    # "битое" видео. При наличии FFmpeg сначала берём адаптивные потоки
-    # (качество выше), иначе — готовый muxed-поток.
-    if has_ffmpeg:
+    # Для Instagram видео всегда идет единым готовым mp4-потоком.
+    # Для YouTube/TikTok при наличии FFmpeg берем адаптивные потоки H.264+AAC.
+    if plat == "instagram":
+        format_spec = (
+            f"best[height<={height_limit}][ext=mp4]/"
+            f"best[ext=mp4]/"
+            f"best"
+        )
+        if socket_timeout == 25:
+            socket_timeout = 10
+    elif has_ffmpeg:
         format_spec = (
             f"bestvideo[height<={height_limit}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"

@@ -151,62 +151,89 @@ async def download_instagram(
     strategies.append(("direct", ""))
 
     last_error = None
-    size_error = False
     no_video = False
 
-    for height in INSTAGRAM_HEIGHTS:
-        for strategy_name, strategy_proxy in strategies:
+    # Выполняем ровно 1 попытку yt-dlp на каждую стратегию (без тройного цикла по разрешениям).
+    # yt-dlp сам выбирает наилучшее доступное качество (до 1280p) через format_spec.
+    for strategy_name, strategy_proxy in strategies:
+        try:
+            socket_timeout = 8 if strategy_name == "direct" else 10
+            res = await asyncio.to_thread(
+                ytdlp_sync_func,
+                clean_url,
+                output_prefix,
+                1280,
+                platform="instagram",
+                use_cookies=True,
+                proxy_url=strategy_proxy,
+                socket_timeout=socket_timeout,
+            )
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            logger.warning(f"[Instagram] {strategy_name} download failed: {e}")
+            if "no video in this post" in err_str:
+                no_video = True
+                break
+            # Если Instagram уже авторитетно ответил, что медиа требует входа или не отдается гостям —
+            # не тратим время на повторные стратегии (они дадут тот же отказ)
+            if any(k in err_str for k in [
+                "empty media response",
+                "checkpoint_required",
+                "restricted video",
+                "not granting access"
+            ]):
+                break
+            continue
+
+        if not res or not res.get("file_path"):
+            last_error = Exception("empty download result")
+            continue
+
+        size = res.get("filesize") or 0
+        if size > 50 * 1024 * 1024:
+            # Только если файл реально больше 50 МБ — пробуем понизить качество до 480p
+            logger.warning(f"[Instagram] {strategy_name}: {size / 1048576:.1f} МБ > 50 МБ, пробуем 480p")
             try:
-                extra = {"socket_timeout": 8} if strategy_name == "direct" else {}
+                if os.path.exists(res["file_path"]):
+                    os.remove(res["file_path"])
                 res = await asyncio.to_thread(
                     ytdlp_sync_func,
                     clean_url,
                     output_prefix,
-                    height,
+                    480,
                     platform="instagram",
-                    use_cookies=(strategy_name == "direct"),
+                    use_cookies=True,
                     proxy_url=strategy_proxy,
-                    **extra,
+                    socket_timeout=socket_timeout,
                 )
-            except Exception as e:
-                last_error = e
-                logger.warning(f"[Instagram] {strategy_name} {height}p failed: {e}")
-                if "no video in this post" in str(e).lower():
-                    no_video = True
-                    break
-                continue
+                if res and res.get("file_path") and (res.get("filesize") or 0) <= 50 * 1024 * 1024:
+                    res["platform"] = "instagram"
+                    res["low_quality_notice"] = True
+                    return res
+            except Exception as e_low:
+                logger.warning(f"[Instagram] 480p retry failed: {e_low}")
+            continue
 
-            if not res or not res.get("file_path"):
-                last_error = Exception("empty download result")
-                continue
+        res["platform"] = "instagram"
+        logger.info(
+            f"✅ [Instagram] Скачано через {strategy_name} ({size / 1048576:.1f} МБ)"
+        )
+        return res
 
-            size = res.get("filesize") or 0
-            if size > 50 * 1024 * 1024:
-                size_error = True
-                logger.warning(f"[Instagram] {strategy_name} {height}p: {size / 1048576:.1f} МБ > 50 МБ")
-                try:
-                    if os.path.exists(res["file_path"]):
-                        os.remove(res["file_path"])
-                except OSError:
-                    pass
-                continue
+    if no_video:
+        raise Exception("is_photo_post")
 
-            res["platform"] = "instagram"
-            if height < INSTAGRAM_HEIGHTS[0]:
-                res["low_quality_notice"] = True
-            logger.info(
-                f"✅ [Instagram] Скачано через {strategy_name} ({height}p, {size / 1048576:.1f} МБ)"
-            )
-            return res
+    err_text = str(last_error or "").lower()
+    is_login_wall = any(k in err_text for k in [
+        "empty media response", "login", "logged-in", "rate-limit",
+        "rate limit", "media cannot be found", "not granting access",
+        "checkpoint_required", "restricted video"
+    ])
 
-        if no_video:
-            break
-        if not size_error:
-            break
-
-    # Фото/карусель — только для обычных постов /p/, но не для /reel/.
+    # Фото/карусель — только для обычных постов /p/, если не обнаружена стена логина.
     shortcode = extract_shortcode(clean_url)
-    if shortcode:
+    if shortcode and not is_login_wall:
         try:
             proxy_url = warp_proxy_module.warp.proxy_url if warp_proxy_module else None
             media_res = await _try_download_instagram_embed_media(
@@ -224,15 +251,14 @@ async def download_instagram(
             logger.warning(f"Instagram media fallback failed: {fb_err}")
             last_error = last_error or fb_err
 
-    if size_error and last_error is None:
-        raise Exception("file_too_large: Instagram-видео больше 50 МБ даже в 480p")
-
-    err_text = str(last_error or "").lower()
-    if "login" in err_text or "rate-limit" in err_text or "rate limit" in err_text:
+    if is_login_wall:
         raise Exception(f"instagram_login_required: {last_error}")
     if "no video in this post" in err_text:
         raise Exception("is_photo_post")
-    if "available to everyone" in err_text or "certain audiences" in err_text:
+    if any(k in err_text for k in [
+        "available to everyone", "certain audiences", "age-restricted",
+        "confirm your age"
+    ]):
         raise Exception("instagram_age_restricted")
     raise Exception(f"instagram_video_unavailable: {last_error}")
 
@@ -246,53 +272,77 @@ async def _try_download_instagram_embed_media(
     is_valid_mp4_func,
     ffmpeg_path: str = None
 ) -> Dict[str, Any]:
-    """Вспомогательный парсер embed для скачивания постов /p/"""
-    embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    """Вспомогательный парсер embed для скачивания постов /p/ и Reels"""
+    embed_urls = [
+        f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
+        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
+    ]
     direct_video_urls = []
     img_urls = []
     title = ""
     author = ""
 
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(embed_url, headers=EMBED_HEADERS, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    html_text = await resp.text()
-                    import html as py_html
+        for embed_url in embed_urls:
+            # Сначала с прокси (если есть), затем напрямую при неудаче
+            proxies_to_try = [proxy_url] if proxy_url else [None]
+            if proxy_url:
+                proxies_to_try.append(None)
 
-                    owner_match = re.search(r'"username":\s*"([^"]+)"', html_text)
-                    if owner_match:
-                        author = py_html.unescape(owner_match.group(1)).strip()
+            for cur_proxy in proxies_to_try:
+                try:
+                    async with session.get(
+                        embed_url,
+                        headers=EMBED_HEADERS,
+                        proxy=cur_proxy,
+                        timeout=aiohttp.ClientTimeout(total=4)
+                    ) as resp:
+                        if resp.status == 200:
+                            html_text = await resp.text()
+                            import html as py_html
 
-                    cap_match = re.search(r'class="Caption"[^>]*>.*?<div[^>]*>([^<]+)<', html_text, re.DOTALL)
-                    if cap_match:
-                        title = py_html.unescape(cap_match.group(1)).strip()
+                            owner_match = re.search(r'"username":\s*"([^"]+)"', html_text)
+                            if owner_match:
+                                author = py_html.unescape(owner_match.group(1)).strip()
 
-                    # Поиск кандидатов на видео
-                    candidates = []
-                    for pat in (r'"video_url"\s*:\s*"([^"]+)"', r'"playable_url"\s*:\s*"([^"]+)"'):
-                        candidates.extend(re.findall(pat, html_text))
-                    for arr in re.findall(r'"video_versions"\s*:\s*\[(.*?)\]', html_text, re.S):
-                        candidates.extend(re.findall(r'"url"\s*:\s*"([^"]+)"', arr))
+                            cap_match = re.search(r'class="Caption"[^>]*>.*?<div[^>]*>([^<]+)<', html_text, re.DOTALL)
+                            if cap_match:
+                                title = py_html.unescape(cap_match.group(1)).strip()
 
-                    seen_v = set()
-                    for u in candidates:
-                        cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
-                        if cleaned.startswith("http") and cleaned not in seen_v:
-                            seen_v.add(cleaned)
-                            direct_video_urls.append(cleaned)
+                            candidates = []
+                            for pat in (
+                                r'"video_url"\s*:\s*"([^"]+)"',
+                                r'"playable_url"\s*:\s*"([^"]+)"',
+                                r'video_url&quot;:&quot;([^&]+)&quot;',
+                                r'"playback_url"\s*:\s*"([^"]+)"',
+                                r'src="(https://[^"]+?\.mp4[^"]*)"',
+                            ):
+                                candidates.extend(re.findall(pat, html_text))
+                            for arr in re.findall(r'"video_versions"\s*:\s*\[(.*?)\]', html_text, re.S):
+                                candidates.extend(re.findall(r'"url"\s*:\s*"([^"]+)"', arr))
 
-                    # Картинки
-                    raw_imgs = re.findall(r'"display_url":\s*"([^"]+)"', html_text)
-                    if not raw_imgs:
-                        raw_imgs = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text)
-                    for u in raw_imgs:
-                        cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
-                        base = cleaned.split("?")[0]
-                        if base not in img_urls:
-                            img_urls.append(cleaned)
-        except Exception as e:
-            logger.debug(f"Embed HTML fetch error: {e}")
+                            seen_v = set()
+                            for u in candidates:
+                                cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
+                                if cleaned.startswith("http") and cleaned not in seen_v:
+                                    seen_v.add(cleaned)
+                                    direct_video_urls.append(cleaned)
+
+                            raw_imgs = re.findall(r'"display_url":\s*"([^"]+)"', html_text)
+                            if not raw_imgs:
+                                raw_imgs = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text)
+                            for u in raw_imgs:
+                                cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
+                                base = cleaned.split("?")[0]
+                                if base not in img_urls:
+                                    img_urls.append(cleaned)
+
+                            if direct_video_urls:
+                                break
+                except Exception as e:
+                    logger.debug(f"Embed HTML fetch error for {embed_url} (proxy={cur_proxy}): {e}")
+            if direct_video_urls:
+                break
 
     # Пробуем прямое видео из embed
     for video_url in direct_video_urls:

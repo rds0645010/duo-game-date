@@ -31,14 +31,23 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
     Опрашивает эндпоинты с коротким таймаутом (< 3 сек).
     Возвращает словарь с метаданными и прямой ссылкой на поток.
     """
-    clean_url = url.split("?")[0] if "?" in url else url
+    target_url = url
+    if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=3)) as r:
+                    if r.url and "video" in str(r.url):
+                        target_url = str(r.url)
+        except Exception:
+            pass
+
     # Пробуем несколько зеркал
     for endpoint in TIKWM_ENDPOINTS:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     endpoint,
-                    data={"url": url},
+                    data={"url": target_url},
                     headers=DEFAULT_HEADERS,
                     timeout=aiohttp.ClientTimeout(total=4)
                 ) as resp:
