@@ -222,6 +222,24 @@ async def download_instagram(
         return res
 
     if no_video:
+        # Это публикация с фотографией или каруселью фотографий. Скачиваем фото/альбом!
+        shortcode = extract_shortcode(clean_url)
+        if shortcode:
+            try:
+                proxy_url = warp_proxy_module.warp.proxy_url if warp_proxy_module else None
+                media_res = await _try_download_instagram_embed_media(
+                    shortcode,
+                    output_prefix,
+                    allow_photo=True,
+                    proxy_url=proxy_url,
+                    download_file_func=download_file_func,
+                    is_valid_mp4_func=is_valid_mp4_func,
+                    ffmpeg_path=ffmpeg_path
+                )
+                if media_res:
+                    return media_res
+            except Exception as photo_err:
+                logger.warning(f"Instagram photo fallback error: {photo_err}")
         raise Exception("is_photo_post")
 
     err_text = str(last_error or "").lower()

@@ -25,23 +25,55 @@ DEFAULT_HEADERS = {
 }
 
 
+async def _parse_tikmate(url: str) -> Optional[Dict[str, Any]]:
+    """Резервный парсер через Tikmate API (без водяных знаков)"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.tikmate.app/api/lookup",
+                data={"url": url},
+                headers={"User-Agent": DEFAULT_HEADERS["User-Agent"]},
+                timeout=aiohttp.ClientTimeout(total=4)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    token = data.get("token")
+                    vid_id = data.get("id")
+                    if token and vid_id:
+                        dl_url = f"https://tikmate.app/download/{token}/{vid_id}.mp4"
+                        return {
+                            "success": True,
+                            "platform": "tiktok",
+                            "is_video": True,
+                            "video_url": dl_url,
+                            "title": data.get("author_name") or "TikTok Video",
+                            "author": data.get("author_id") or "TikTok",
+                            "cover": "",
+                            "duration": 0,
+                            "size": 0
+                        }
+    except Exception as e:
+        logger.debug(f"Tikmate parser error: {e}")
+    return None
+
+
 async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
     """
-    Быстрый парсер TikTok через TikWM API (без водяных знаков).
+    Быстрый парсер TikTok через TikWM API и резервный Tikmate API (без водяных знаков).
     Опрашивает эндпоинты с коротким таймаутом (< 3 сек).
     Возвращает словарь с метаданными и прямой ссылкой на поток.
     """
     target_url = url
     if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=3)) as r:
+            async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as s:
+                async with s.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=3)) as r:
                     if r.url and "video" in str(r.url):
-                        target_url = str(r.url)
+                        target_url = str(r.url).split("?")[0]
         except Exception:
             pass
 
-    # Пробуем несколько зеркал
+    # 1. Пробуем TikWM
     for endpoint in TIKWM_ENDPOINTS:
         try:
             async with aiohttp.ClientSession() as session:
@@ -70,7 +102,6 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                     "duration": d.get("duration", 0),
                                     "size": d.get("size", 0)
                                 }
-                            # Поддержка фото-слайдшоу TikTok
                             images = d.get("images") or []
                             if images:
                                 return {
@@ -86,6 +117,11 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"TikTok endpoint {endpoint} error: {e}")
             continue
+
+    # 2. Резервный парсер Tikmate (если TikWM выдал rate limit или недоступен)
+    tikmate_res = await _parse_tikmate(target_url)
+    if tikmate_res:
+        return tikmate_res
 
     return None
 
@@ -134,6 +170,15 @@ async def download_tiktok(
         output_prefix = os.path.join(tempfile.gettempdir(), f"tt_{uuid.uuid4().hex[:8]}")
     tikwm_data = await parse_tiktok(clean_url)
     if not tikwm_data:
+        # Резервный fallback на yt-dlp, если внешние API не ответили
+        try:
+            import downloader
+            res = await asyncio.to_thread(downloader._download_ytdlp_sync, clean_url, output_prefix, 720, platform="tiktok")
+            if res and res.get("file_path"):
+                res["platform"] = "tiktok"
+                return res
+        except Exception as yt_err:
+            logger.warning(f"TikTok yt-dlp fallback error: {yt_err}")
         raise Exception("tiktok_parse_failed: не удалось извлечь данные ролика")
 
     # Сценарий 1: Обычное видео MP4

@@ -423,11 +423,11 @@ def _download_ytdlp_sync(
             socket_timeout = 10
     elif has_ffmpeg:
         format_spec = (
+            f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={height_limit}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"
-            f"bestvideo[height<={height_limit}][vcodec^=avc1]+bestaudio/"
-            f"bestvideo[height<={height_limit}]+bestaudio/"
             f"best[height<={height_limit}][ext=mp4]/"
+            f"bestvideo[height<={height_limit}]+bestaudio/"
             f"best[height<={height_limit}]/"
             f"best"
         )
@@ -450,7 +450,7 @@ def _download_ytdlp_sync(
         'retries': 0 if (plat == "instagram" and not proxy) else 2,
         'fragment_retries': 2,
         'socket_timeout': socket_timeout,
-        'concurrent_fragment_downloads': 1,
+        'concurrent_fragment_downloads': 4,
         'overwrites': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
