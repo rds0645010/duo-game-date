@@ -25,6 +25,64 @@ DEFAULT_HEADERS = {
 }
 
 
+async def _parse_ssstik(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Высоконадежный парсер TikTok через SSSTik (для фото-слайдшоу, каруселей и музыки).
+    Работает мгновенно (< 1 сек) и не блокируется облачными IP.
+    """
+    clean_target = url.split("?")[0] if ("/photo/" in url or "/video/" in url) else url
+    post_data = {"id": clean_target, "locale": "en", "tt": "0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Hx-Request": "true",
+        "Hx-Target": "target",
+        "Hx-Current-Url": "https://ssstik.io/en",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://ssstik.io",
+        "Referer": "https://ssstik.io/en"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://ssstik.io/abc?url=dl",
+                data=post_data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=8.0)
+            ) as resp:
+                if resp.status == 200:
+                    html_text = await resp.text()
+                    all_links = re.findall(r'href=[\"\'](https://tikcdn\.io/ssstik/[^\s\"\']+)[\"\']', html_text)
+                    if not all_links:
+                        all_links = re.findall(r'href=[\"\'](https://[^\s\"\']+)[\"\'][^>]*class=[\"\'][^\"\']*download[^\"]*', html_text)
+                    
+                    photo_links = [l for l in all_links if "/m/" not in l]
+                    music_links = [l for l in all_links if "/m/" in l]
+                    music_url = music_links[0] if music_links else None
+
+                    title_match = re.search(r'<p[^>]*class=[\"\'][^\"\']*maintext[^\"\']*[\"\'][^>]*>(.*?)</p>', html_text, re.DOTALL)
+                    post_title = py_html.unescape(title_match.group(1)).strip() if title_match else "TikTok Слайдшоу"
+
+                    if photo_links:
+                        return {
+                            "success": True,
+                            "platform": "tiktok",
+                            "is_photo": True,
+                            "is_album": len(photo_links) > 1,
+                            "photo_urls": photo_links,
+                            "music": music_url,
+                            "music_info": {"title": post_title, "author": "TikTok"} if music_url else None,
+                            "title": post_title,
+                            "author": "TikTok",
+                            "cover": photo_links[0],
+                            "digg_count": 0,
+                            "comment_count": 0,
+                            "share_count": 0
+                        }
+    except Exception as err:
+        logger.debug(f"SSSTik parse error: {err}")
+    return None
+
+
 async def _parse_tikmate(url: str) -> Optional[Dict[str, Any]]:
     """Резервный парсер через Tikmate API (без водяных знаков)"""
     try:
@@ -204,7 +262,12 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-    # 3. Резервный парсер Tikmate (если TikWM выдал rate limit или недоступен)
+    # 3. Высоконадежный резервный парсер SSSTik (для фото-каруселей и слайдшоу)
+    ssstik_res = await _parse_ssstik(target_url)
+    if ssstik_res:
+        return ssstik_res
+
+    # 4. Резервный парсер Tikmate (если TikWM выдал rate limit или недоступен)
     tikmate_res = await _parse_tikmate(target_url)
     if tikmate_res:
         return tikmate_res
@@ -222,10 +285,11 @@ async def download_file_stream(
     Высокоскоростная потоковая загрузка файла с буфером 1 МБ и поддержкой прогресс-бара.
     """
     import time
+    ref = "https://ssstik.io/" if ("tikcdn.io" in url or "ssstik" in url) else "https://www.tiktok.com/"
     headers = {
         "User-Agent": DEFAULT_HEADERS["User-Agent"],
         "Accept": "*/*",
-        "Referer": "https://www.tiktok.com/",
+        "Referer": ref,
     }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:

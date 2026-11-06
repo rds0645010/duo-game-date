@@ -923,30 +923,42 @@ def format_count(n) -> str:
 
 
 def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
-    """Генерирует аккуратную подпись к слайду фото-карусели."""
+    """
+    Генерирует аккуратную, компактную подпись к слайду фото-карусели:
+    без кучи пустых строк и без дублирования номера слайда (номер уже показан на кнопке).
+    """
     plat_raw = (data.get("platform") or "TikTok").capitalize()
-    default_title = f"{plat_raw} Альбом"
-    title_raw = (data.get("title") or default_title)[:200]
-    title_esc = html.escape(title_raw)
-    author_raw = (data.get("author") or "")[:50]
+    title_raw = (data.get("title") or "").strip()
+
+    # Схлопываем множественные переносы строк, заменяя на пробел или одну строку
+    title_clean = re.sub(r'[\r\n]+', ' ', title_raw).strip()
+    if len(title_clean) > 200:
+        title_clean = title_clean[:200].rstrip() + "..."
+
+    title_esc = html.escape(title_clean)
+    author_raw = (data.get("author") or "").strip()[:50]
     author_esc = html.escape(author_raw)
-    caption = (
-        f"📸 <b>{title_esc}</b>\n\n"
-        f"📱 <b>Источник:</b> {plat_raw}"
-    )
+
+    lines = []
+    if title_esc and title_esc.lower() not in ("instagram альбом", "tiktok слайдшоу", "медиа", "tiktok фото", "instagram публикация"):
+        lines.append(f"📸 <b>{title_esc}</b>")
+
+    meta = f"📱 <b>Источник:</b> {plat_raw}"
     if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
-        caption += f" | {author_esc}"
-    caption += f"\n🖼 <b>Слайд:</b> {current_idx + 1} из {total}\n"
-    caption += "✨ <i>Скачано через @duo_play_date_bot</i>"
-    return caption
+        meta += f" | {author_esc}"
+    lines.append(meta)
+
+    lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
+    return "\n\n".join(lines)
 
 
 def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False) -> InlineKeyboardMarkup:
     """
-    Создает интерактивную клавиатуру управления слайдшоу точно как в @SavXBot:
+    Создает интерактивную клавиатуру управления слайдшоу:
     Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
-    Ряд 2: [ ❤️ 51.2K ]  [ 💬 368 ↗ ]  [ 💌 ⤴ ]  [ 🎵 ↗ ]
+    Ряд 2: [ 💌 Поделиться ] (и [ 🎵 Звук ] если есть трек)
     Ряд 3 (только в ЛС): [ 📥 Скачать все слайды альбомом ] (и [ 🎧 Скачать MP3 ] если есть трек)
+    Без счетчиков лайков и комментариев.
     """
     # Ряд 1: Интерактивная навигация (активные стрелки / неактивные точки)
     btn_prev = InlineKeyboardButton(
@@ -963,48 +975,28 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
     )
     row1 = [btn_prev, btn_counter, btn_next]
 
-    # Ряд 2: Статистика, комментарии, шеринг, музыка
-    digg_cnt = data.get("digg_count", 0)
-    comm_cnt = data.get("comment_count", 0)
+    # Ряд 2: Быстрый шеринг и звук (без лишних счетчиков лайков/комментов)
     orig_url = data.get("original_url") or ""
-
-    btn_likes = InlineKeyboardButton(
-        text=f"❤️ {format_count(digg_cnt)}",
-        callback_data=f"stat:{sid}"
-    )
-
-    if orig_url and orig_url.startswith("http"):
-        btn_comments = InlineKeyboardButton(
-            text=f"💬 {format_count(comm_cnt)}",
-            url=orig_url
-        )
-    else:
-        btn_comments = InlineKeyboardButton(
-            text=f"💬 {format_count(comm_cnt)}",
-            callback_data=f"stat:{sid}"
-        )
-
     btn_share = InlineKeyboardButton(
-        text="💌",
+        text="💌 Поделиться",
         switch_inline_query=orig_url
     )
 
-    # Музыка: ссылка на страницу трека в TikTok (SavXBot открывает звук по стрелке ↗)
     m_info = data.get("music_info") or {}
     m_id = m_info.get("id") if isinstance(m_info, dict) else None
     music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
 
-    row2 = [btn_likes, btn_comments, btn_share]
+    row2 = [btn_share]
     if m_id:
-        row2.append(InlineKeyboardButton(text="🎵", url=f"https://www.tiktok.com/music/-{m_id}"))
+        row2.append(InlineKeyboardButton(text="🎵 Звук", url=f"https://www.tiktok.com/music/-{m_id}"))
     elif music_u and str(music_u).startswith("http"):
-        row2.append(InlineKeyboardButton(text="🎵", url=str(music_u)))
+        row2.append(InlineKeyboardButton(text="🎵 Звук", url=str(music_u)))
     elif music_u:
-        row2.append(InlineKeyboardButton(text="🎵", callback_data=f"music:{sid}"))
+        row2.append(InlineKeyboardButton(text="🎵 Звук", callback_data=f"music:{sid}"))
 
     rows = [row1, row2]
 
-    # Ряд 3: Только для личного чата (в инлайне как в SavXBot — компактные 2 ряда)
+    # Ряд 3: Только для личного чата (в инлайне — аккуратный компактный вид)
     if not is_inline:
         row3 = [
             InlineKeyboardButton(
@@ -2129,16 +2121,18 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     first_fid = await upload_media_to_telegram(first_file, is_photo=not is_vid, target_user_id=user_id)
                     if first_fid:
                         _slideshow_cache[sid]["file_ids"][0] = first_fid
-                        caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
-                        kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid], is_inline=True)
-                        media_cls = InputMediaVideo if is_vid else InputMediaPhoto
+                    caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
+                    kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid], is_inline=True)
+                    media_cls = InputMediaVideo if is_vid else InputMediaPhoto
+                    media_target = first_fid or (FSInputFile(first_file) if os.path.exists(first_file) else None)
+                    if media_target:
                         await bot.edit_message_media(
                             inline_message_id=inline_message_id,
-                            media=media_cls(media=first_fid, caption=caption, parse_mode="HTML"),
+                            media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
                             reply_markup=kb
                         )
-                        _stream_files.pop(token, None)
-                        return
+                    _stream_files.pop(token, None)
+                    return
 
                 if res and isinstance(res, dict) and res.get("file_path"):
                     is_photo = bool(res.get("is_photo"))
@@ -2307,12 +2301,13 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
             cached_fid = await upload_media_to_telegram(file_path, is_photo=not is_vid)
             if cached_fid:
                 data["file_ids"][new_idx] = cached_fid
-        if cached_fid:
+        media_target = cached_fid or (FSInputFile(file_path) if file_path and os.path.exists(file_path) else None)
+        if media_target:
             media_cls = InputMediaVideo if is_vid else InputMediaPhoto
             try:
                 await bot.edit_message_media(
                     inline_message_id=callback.inline_message_id,
-                    media=media_cls(media=cached_fid, caption=caption, parse_mode="HTML"),
+                    media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
                     reply_markup=kb
                 )
             except Exception as in_err:
