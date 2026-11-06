@@ -251,9 +251,18 @@ async def _download_from_instagram_meta(
         valid_files = [f for f in album_files if f]
 
         if len(valid_files) > 1:
+            p_urls = []
+            for t in targets:
+                if isinstance(t, dict):
+                    u = t.get("url") or t.get("display_url")
+                    if not u and t.get("thumbnails"):
+                        u = t["thumbnails"][-1].get("url")
+                    if u:
+                        p_urls.append(u)
             return {
                 "is_album": True,
                 "photos": valid_files,
+                "photo_urls": p_urls,
                 "file_path": valid_files[0],
                 "platform": "instagram",
                 "title": title,
@@ -650,6 +659,7 @@ async def _try_download_instagram_embed_media(
             return {
                 "is_album": True,
                 "photos": valid_photos,
+                "photo_urls": targets,
                 "file_path": valid_photos[0],
                 "platform": "instagram",
                 "title": title or "Instagram Альбом",

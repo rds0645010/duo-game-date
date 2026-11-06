@@ -123,11 +123,21 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
     """
     # Очищаем трекинговые параметры (_r, u_code, sharer_language), которые ломают парсинг в облаке
     target_url = url.split("?")[0] if ("/photo/" in url or "/video/" in url) else url
+
+    # Для фотопостов (/photo/) SSSTik работает быстрее всего (< 1 сек) и надежно отдает все слайды
+    if "/photo/" in url or "/photo/" in target_url:
+        try:
+            ss_fast = await _parse_ssstik(target_url)
+            if ss_fast and ss_fast.get("photo_urls"):
+                return ss_fast
+        except Exception as e:
+            logger.debug(f"Fast SSSTik parse error: {e}")
+
     urls_to_try = [target_url]
     if target_url != url:
         urls_to_try.append(url)
 
-    # 1. Сначала пробуем TikWM напрямую (увеличенный таймаут 10s для надежности на Render)
+    # 1. Пробуем TikWM (таймаут 4.5s)
     for u_candidate in urls_to_try:
         for endpoint in TIKWM_ENDPOINTS:
             try:
@@ -136,7 +146,7 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                         endpoint,
                         data={"url": u_candidate, "hd": "1"},
                         headers=DEFAULT_HEADERS,
-                        timeout=aiohttp.ClientTimeout(total=10.0)
+                        timeout=aiohttp.ClientTimeout(total=4.5)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -411,21 +421,21 @@ async def download_tiktok(
             await asyncio.gather(*[_dl_slide(i, u) for i, u in enumerate(targets)])
             valid_photos = [p for p in album_photos if p]
 
-            if len(valid_photos) > 1:
-                return {
-                    "is_album": True,
-                    "photos": valid_photos,
-                    "file_path": valid_photos[0],
-                    "platform": "tiktok",
-                    "title": tikwm_data.get("title", "TikTok Слайдшоу"),
-                    "author": tikwm_data.get("author", "TikTok"),
-                    "digg_count": digg_cnt,
-                    "comment_count": comm_cnt,
-                    "share_count": share_cnt,
-                    "music": music_url,
-                    "music_info": music_inf,
-                    "original_url": clean_url
-                }
+            return {
+                "is_album": True,
+                "photos": valid_photos,
+                "photo_urls": targets,
+                "file_path": valid_photos[0] if valid_photos else None,
+                "platform": "tiktok",
+                "title": tikwm_data.get("title", "TikTok Слайдшоу"),
+                "author": tikwm_data.get("author", "TikTok"),
+                "digg_count": digg_cnt,
+                "comment_count": comm_cnt,
+                "share_count": share_cnt,
+                "music": music_url,
+                "music_info": music_inf,
+                "original_url": clean_url
+            }
 
         # Одиночный слайд
         dest_file = f"{output_prefix}.jpg"

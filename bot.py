@@ -187,8 +187,93 @@ def init_db():
         cursor.execute("ALTER TABLE user_settings ADD COLUMN save_inline_to_pm INTEGER DEFAULT 0")
     except Exception:
         pass
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS slideshow_sessions (
+            sid TEXT PRIMARY KEY,
+            url TEXT,
+            platform TEXT,
+            title TEXT,
+            author TEXT,
+            total INTEGER,
+            file_ids_json TEXT,
+            photo_urls_json TEXT,
+            music TEXT,
+            music_info_json TEXT,
+            chat_id INTEGER,
+            created_at REAL
+        )
+    """)
     conn.commit()
     conn.close()
+
+
+def save_slideshow_session_db(sid: str, data: dict):
+    """Персистентно сохраняет сессию слайдшоу в SQLite (переживает перезапуски Render)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO slideshow_sessions 
+            (sid, url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            sid,
+            data.get("original_url", ""),
+            data.get("platform", ""),
+            data.get("title", ""),
+            data.get("author", ""),
+            data.get("total", 0),
+            json.dumps(data.get("file_ids", [])),
+            json.dumps(data.get("photo_urls", [])),
+            data.get("music", ""),
+            json.dumps(data.get("music_info") or {}),
+            data.get("chat_id", 0),
+            data.get("created_at", time.time())
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.warning(f"Failed to save slideshow session {sid}: {e}")
+
+
+def get_slideshow_session_db(sid: str) -> Optional[dict]:
+    """Загружает сессию слайдшоу: сначала из RAM, а при перезапуске — из SQLite."""
+    data = _slideshow_cache.get(sid)
+    if data:
+        return data
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at
+            FROM slideshow_sessions WHERE sid = ?
+        """, (sid,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            u, plat, title, author, total, fids_j, urls_j, mus, mus_inf_j, chat_id, cr_at = row
+            fids = json.loads(fids_j) if fids_j else []
+            urls = json.loads(urls_j) if urls_j else []
+            mus_inf = json.loads(mus_inf_j) if mus_inf_j else {}
+            restored = {
+                "photos": [],
+                "file_ids": fids,
+                "photo_urls": urls,
+                "total": total,
+                "title": title,
+                "author": author,
+                "platform": plat,
+                "original_url": u,
+                "music": mus,
+                "music_info": mus_inf,
+                "chat_id": chat_id,
+                "created_at": cr_at
+            }
+            _slideshow_cache[sid] = restored
+            return restored
+    except Exception as e:
+        logging.warning(f"Failed to load slideshow session {sid}: {e}")
+    return None
 
 
 def record_user_download(user_id: int, url: str, file_id: str, media_type: str, title: str, platform: str):
@@ -1040,11 +1125,9 @@ async def process_video_download(message: types.Message, url: str):
     cached = get_cached_media(clean_url)
     if drop_poisoned_instagram_photo_cache(clean_url, cached):
         cached = None
-    if cached and cached.get("media_type") == "photo":
-        # Если ссылка на пост TikTok /photo/ или Instagram /p/ — не отдаем одиночное фото из кэша, чтобы гарантировать полную карусель
-        if "/photo/" in clean_url or "/p/" in clean_url:
-            logging.info(f"Bypassing single photo cache for potential album: {clean_url}")
-            cached = None
+    if cached and ("/photo/" in clean_url or "/p/" in clean_url):
+        logging.info(f"Bypassing cache for potential album: {clean_url}")
+        cached = None
     if cached and cached.get("file_id"):
         title_esc = html.escape(cached.get("title") or "Медиа")
         plat_esc = html.escape(cached.get('platform', 'Медиа').capitalize())
@@ -1158,58 +1241,53 @@ async def process_video_download(message: types.Message, url: str):
             return
 
         # 🖼 СНАЧАЛА проверяем: если это фото-слайдшоу (альбом картинок)
-        if res.get("is_album") and res.get("photos"):
-            photos = res["photos"]
+        if res.get("is_album") and (res.get("photos") or res.get("photo_urls")):
+            photos = res.get("photos") or []
+            photo_urls = res.get("photo_urls") or []
+            total_slides = max(len(photos), len(photo_urls))
             sid = uuid.uuid4().hex[:10]
             plat_name = res.get("platform", "tiktok")
             default_ttl = f"{plat_name.capitalize()} Слайдшоу"
             _slideshow_cache[sid] = {
                 "photos": photos,
-                "file_ids": [None] * len(photos),
-                "total": len(photos),
+                "photo_urls": photo_urls,
+                "file_ids": [None] * total_slides,
+                "total": total_slides,
                 "title": res.get("title") or default_ttl,
                 "author": res.get("author") or "",
                 "platform": plat_name,
                 "original_url": clean_url,
-                "digg_count": res.get("digg_count", 0),
-                "comment_count": res.get("comment_count", 0),
-                "share_count": res.get("share_count", 0),
                 "music": res.get("music"),
                 "music_info": res.get("music_info"),
+                "chat_id": message.chat.id,
                 "created_at": time.time()
             }
-            # Фоновое удаление через 1 час и фоновая предзагрузка всех file_id
-            asyncio.create_task(_expire_slideshow_session(sid, 3600))
-            asyncio.create_task(_preupload_slideshow_file_ids(sid))
-            # Очистка устаревших записей в кэше
-            if len(_slideshow_cache) > 200:
-                cutoff = time.time() - 7200
-                to_del = [k for k, v in _slideshow_cache.items() if v.get("created_at", 0) < cutoff]
-                for k in to_del:
-                    _slideshow_cache.pop(k, None)
+            save_slideshow_session_db(sid, _slideshow_cache[sid])
 
-            first_file = photos[0]
-            caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
-            kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid])
-            is_vid = first_file.lower().endswith((".mp4", ".mov", ".m4v"))
+            first_media = FSInputFile(photos[0]) if (photos and os.path.exists(photos[0])) else photo_urls[0]
+            caption = make_slide_caption(_slideshow_cache[sid], 0, total_slides)
+            kb = build_slideshow_keyboard(sid, 0, total_slides, _slideshow_cache[sid])
+            is_vid = str(first_media).lower().endswith((".mp4", ".mov", ".m4v"))
             if is_vid:
                 sent = await message.answer_video(
-                    video=FSInputFile(first_file),
+                    video=first_media,
                     caption=caption,
                     reply_markup=kb,
                     parse_mode="HTML"
                 )
                 if sent and sent.video:
                     _slideshow_cache[sid]["file_ids"][0] = sent.video.file_id
+                    save_slideshow_session_db(sid, _slideshow_cache[sid])
             else:
                 sent = await message.answer_photo(
-                    photo=FSInputFile(first_file),
+                    photo=first_media,
                     caption=caption,
                     reply_markup=kb,
                     parse_mode="HTML"
                 )
                 if sent and sent.photo:
                     _slideshow_cache[sid]["file_ids"][0] = sent.photo[-1].file_id
+                    save_slideshow_session_db(sid, _slideshow_cache[sid])
 
             try:
                 await status_msg.delete()
@@ -1953,11 +2031,9 @@ async def inline_query_handler(inline_query: InlineQuery):
     cached = get_cached_media(clean_url)
     if drop_poisoned_instagram_photo_cache(clean_url, cached):
         cached = None
-    if cached and cached.get("media_type") == "photo":
-        # Если ссылка на пост TikTok /photo/ или Instagram /p/ — не отдаем одиночное фото из кэша, чтобы гарантировать полную карусель
-        if "/photo/" in clean_url or "/p/" in clean_url:
-            logging.info(f"Bypassing single photo cache for potential album: {clean_url}")
-            cached = None
+    if cached and ("/photo/" in clean_url or "/p/" in clean_url):
+        logging.info(f"Bypassing cache for potential album: {clean_url}")
+        cached = None
     if cached and cached.get("file_id"):
         m_type = cached.get("media_type", "video")
         cap = _make_caption(cached.get("title"), is_photo=(m_type == "photo"))
@@ -2093,38 +2169,41 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     res = await download_video(url, user_id)
 
                 # 🖼 Обработка каруселей/слайдшоу в инлайн-режиме
-                if res and isinstance(res, dict) and res.get("is_album") and res.get("photos"):
-                    photos = res["photos"]
+                if res and isinstance(res, dict) and res.get("is_album") and (res.get("photos") or res.get("photo_urls")):
+                    photos = res.get("photos") or []
+                    photo_urls = res.get("photo_urls") or []
+                    total_slides = max(len(photos), len(photo_urls))
                     sid = uuid.uuid4().hex[:10]
                     plat_name = res.get("platform", "tiktok")
                     default_ttl = f"{plat_name.capitalize()} Слайдшоу"
                     _slideshow_cache[sid] = {
                         "photos": photos,
-                        "file_ids": [None] * len(photos),
-                        "total": len(photos),
+                        "photo_urls": photo_urls,
+                        "file_ids": [None] * total_slides,
+                        "total": total_slides,
                         "title": res.get("title") or default_ttl,
                         "author": res.get("author") or "",
                         "platform": plat_name,
                         "original_url": url,
-                        "digg_count": res.get("digg_count", 0),
-                        "comment_count": res.get("comment_count", 0),
-                        "share_count": res.get("share_count", 0),
                         "music": res.get("music"),
                         "music_info": res.get("music_info"),
+                        "chat_id": 0,
                         "created_at": time.time()
                     }
-                    asyncio.create_task(_expire_slideshow_session(sid, 3600))
-                    asyncio.create_task(_preupload_slideshow_file_ids(sid))
+                    save_slideshow_session_db(sid, _slideshow_cache[sid])
 
-                    first_file = photos[0]
-                    is_vid = first_file.lower().endswith((".mp4", ".mov", ".m4v"))
-                    first_fid = await upload_media_to_telegram(first_file, is_photo=not is_vid, target_user_id=user_id)
+                    first_file = photos[0] if (photos and os.path.exists(photos[0])) else None
+                    first_u = photo_urls[0] if photo_urls else None
+                    first_fid = await upload_media_to_telegram(first_file, is_photo=True, target_user_id=user_id) if first_file else None
                     if first_fid:
                         _slideshow_cache[sid]["file_ids"][0] = first_fid
-                    caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
-                    kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid], is_inline=True)
+                        save_slideshow_session_db(sid, _slideshow_cache[sid])
+
+                    media_target = first_fid or first_u or (FSInputFile(first_file) if first_file else None)
+                    caption = make_slide_caption(_slideshow_cache[sid], 0, total_slides)
+                    kb = build_slideshow_keyboard(sid, 0, total_slides, _slideshow_cache[sid], is_inline=True)
+                    is_vid = str(media_target).lower().endswith((".mp4", ".mov", ".m4v"))
                     media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-                    media_target = first_fid or (FSInputFile(first_file) if os.path.exists(first_file) else None)
                     if media_target:
                         await bot.edit_message_media(
                             inline_message_id=inline_message_id,
@@ -2273,12 +2352,24 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
         await callback.answer()
         return
 
-    data = _slideshow_cache.get(sid)
+    data = get_slideshow_session_db(sid)
     if not data:
-        await callback.answer("⚠️ Сессия слайдшоу устарела. Отправьте ссылку повторно.", show_alert=True)
+        # Сессия не найдена в памяти и БД (например, старое сообщение до обновления)
+        # Добавляем кнопку прямо в сообщение для перезагрузки!
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Загрузить слайды заново", callback_data=f"refresh_slide:{sid}")
+        ]])
+        try:
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=kb)
+            elif callback.inline_message_id:
+                await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
+        except Exception:
+            pass
+        await callback.answer("⚠️ Сессия устарела. Нажмите '🔄 Загрузить слайды заново' 👇", show_alert=True)
         return
 
-    total = data["total"]
+    total = data.get("total", 1)
     if new_idx < 0 or new_idx >= total:
         await callback.answer()
         return
@@ -2287,22 +2378,32 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
     is_in = bool(callback.inline_message_id)
     kb = build_slideshow_keyboard(sid, new_idx, total, data, is_inline=is_in)
 
-    cached_fid = data["file_ids"][new_idx]
-    file_path = data["photos"][new_idx]
-    if not os.path.exists(file_path) and not cached_fid:
-        await callback.answer("❌ Файл слайда больше не доступен на сервере.", show_alert=True)
-        return
+    file_ids = data.get("file_ids") or []
+    photo_urls = data.get("photo_urls") or []
+    photos = data.get("photos") or []
 
-    is_vid = file_path.lower().endswith((".mp4", ".mov", ".m4v"))
+    cached_fid = file_ids[new_idx] if new_idx < len(file_ids) else None
+    photo_u = photo_urls[new_idx] if new_idx < len(photo_urls) else None
+    file_path = photos[new_idx] if new_idx < len(photos) else None
 
-    # Если переключение происходит в инлайн-сообщении
+    # Приоритет источника:
+    # 1. Telegram file_id (самый быстрый, проверенный CDN)
+    # 2. Прямой CDN URL фото (Telegram загружает сам напрямую)
+    # 3. Локальный файл на диске
+    media_target = cached_fid or photo_u
+
+    # Если переключение в инлайне
     if callback.inline_message_id:
-        if not cached_fid and file_path and os.path.exists(file_path):
-            cached_fid = await upload_media_to_telegram(file_path, is_photo=not is_vid)
+        if not media_target and file_path and os.path.exists(file_path):
+            cached_fid = await upload_media_to_telegram(file_path, is_photo=True)
             if cached_fid:
-                data["file_ids"][new_idx] = cached_fid
-        media_target = cached_fid or (FSInputFile(file_path) if file_path and os.path.exists(file_path) else None)
+                if new_idx < len(file_ids):
+                    data["file_ids"][new_idx] = cached_fid
+                    save_slideshow_session_db(sid, data)
+                media_target = cached_fid
+
         if media_target:
+            is_vid = str(media_target).lower().endswith((".mp4", ".mov", ".m4v"))
             media_cls = InputMediaVideo if is_vid else InputMediaPhoto
             try:
                 await bot.edit_message_media(
@@ -2316,24 +2417,63 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
         return
 
     # Если переключение в личном чате или группе
-    media_target = cached_fid or FSInputFile(file_path)
-    if is_vid:
-        media_obj = InputMediaVideo(media=media_target, caption=caption, parse_mode="HTML")
-    else:
-        media_obj = InputMediaPhoto(media=media_target, caption=caption, parse_mode="HTML")
+    if not media_target and file_path and os.path.exists(file_path):
+        media_target = FSInputFile(file_path)
+
+    if not media_target:
+        await callback.answer("❌ Слайд временно недоступен.", show_alert=True)
+        return
+
+    is_vid = str(file_path or media_target).lower().endswith((".mp4", ".mov", ".m4v"))
+    media_cls = InputMediaVideo if is_vid else InputMediaPhoto
+    media_obj = media_cls(media=media_target, caption=caption, parse_mode="HTML")
 
     try:
         if callback.message:
             res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
-            if res_msg:
-                if is_vid and res_msg.video:
-                    data["file_ids"][new_idx] = res_msg.video.file_id
-                elif res_msg.photo:
-                    data["file_ids"][new_idx] = res_msg.photo[-1].file_id
+            if res_msg and res_msg.photo and new_idx < len(data["file_ids"]):
+                data["file_ids"][new_idx] = res_msg.photo[-1].file_id
+                save_slideshow_session_db(sid, data)
         await callback.answer()
     except Exception as e:
-        logging.debug(f"Slide edit media error: {e}")
+        logging.warning(f"Slide edit media error: {e}")
+        # Если Telegram отклонил FSInputFile в edit_media — загружаем через send_photo и подменяем по file_id
+        if file_path and os.path.exists(file_path) and callback.message:
+            try:
+                tmp_sent = await bot.send_photo(chat_id=callback.message.chat.id, photo=FSInputFile(file_path), disable_notification=True)
+                if tmp_sent and tmp_sent.photo:
+                    new_fid = tmp_sent.photo[-1].file_id
+                    await tmp_sent.delete()
+                    if new_idx < len(data["file_ids"]):
+                        data["file_ids"][new_idx] = new_fid
+                        save_slideshow_session_db(sid, data)
+                    await callback.message.edit_media(
+                        media=InputMediaPhoto(media=new_fid, caption=caption, parse_mode="HTML"),
+                        reply_markup=kb
+                    )
+            except Exception as retry_err:
+                logging.debug(f"Slide edit media retry error: {retry_err}")
         await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("refresh_slide:"))
+async def handle_refresh_slide_callback(callback: CallbackQuery):
+    sid = callback.data.split(":")[1] if ":" in callback.data else ""
+    await callback.answer("🔄 Проверяю сессию...", show_alert=False)
+    data = get_slideshow_session_db(sid)
+    if data:
+        total = data.get("total", 1)
+        is_in = bool(callback.inline_message_id)
+        kb = build_slideshow_keyboard(sid, 0, total, data, is_inline=is_in)
+        try:
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=kb)
+            elif callback.inline_message_id:
+                await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
+        except Exception:
+            pass
+    else:
+        await callback.answer("ℹ️ Отправьте ссылку заново в чат, чтобы создать новую активную сессию.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("stat:"))
