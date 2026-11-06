@@ -702,7 +702,7 @@ IS_ON_RENDER = bool(
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 if not RENDER_EXTERNAL_URL:
-    RENDER_EXTERNAL_URL = "https://duo-game-date-bot.onrender.com"
+    RENDER_EXTERNAL_URL = "https://duo-game-date.onrender.com"
 if not RENDER_EXTERNAL_URL.startswith("http://") and not RENDER_EXTERNAL_URL.startswith("https://"):
     RENDER_EXTERNAL_URL = f"https://{RENDER_EXTERNAL_URL}"
 RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
@@ -872,6 +872,35 @@ def format_friendly_error(e: Exception) -> str:
 # 🖼 КЭШ СЛАЙДШОУ (КАРУСЕЛЕЙ) И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 _slideshow_cache = {}
 
+async def _expire_slideshow_session(sid: str, delay_seconds: int = 3600):
+    """Удаляет временные файлы со слайдами через 1 час, когда сессия просмотра завершена."""
+    await asyncio.sleep(delay_seconds)
+    data = _slideshow_cache.pop(sid, None)
+    if data and data.get("photos"):
+        for p in data["photos"]:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+async def _preupload_slideshow_file_ids(sid: str):
+    """Фоновая предварительная загрузка всех слайдов в Telegram для мгновенного перелистывания без лагов."""
+    data = _slideshow_cache.get(sid)
+    if not data or not data.get("photos"):
+        return
+    for idx, p_path in enumerate(data["photos"]):
+        if idx >= len(data.get("file_ids", [])):
+            break
+        if data["file_ids"][idx] is None and p_path and os.path.exists(p_path):
+            try:
+                is_vid = p_path.lower().endswith((".mp4", ".mov", ".m4v"))
+                fid = await upload_media_to_telegram(p_path, is_photo=not is_vid)
+                if fid and sid in _slideshow_cache:
+                    _slideshow_cache[sid]["file_ids"][idx] = fid
+            except Exception as up_err:
+                logging.debug(f"Preupload slide #{idx} failed: {up_err}")
+
 def format_count(n) -> str:
     """Форматирует число в компактный вид: 368 -> 368, 51200 -> 51.2K, 1500000 -> 1.5M"""
     try:
@@ -1017,6 +1046,11 @@ async def process_video_download(message: types.Message, url: str):
     cached = get_cached_media(clean_url)
     if drop_poisoned_instagram_photo_cache(clean_url, cached):
         cached = None
+    if cached and cached.get("media_type") == "photo":
+        # Если ссылка на пост TikTok /photo/ или Instagram /p/ — не отдаем одиночное фото из кэша, чтобы гарантировать полную карусель
+        if "/photo/" in clean_url or "/p/" in clean_url:
+            logging.info(f"Bypassing single photo cache for potential album: {clean_url}")
+            cached = None
     if cached and cached.get("file_id"):
         title_esc = html.escape(cached.get("title") or "Медиа")
         plat_esc = html.escape(cached.get('platform', 'Медиа').capitalize())
@@ -1150,6 +1184,9 @@ async def process_video_download(message: types.Message, url: str):
                 "music_info": res.get("music_info"),
                 "created_at": time.time()
             }
+            # Фоновое удаление через 1 час и фоновая предзагрузка всех file_id
+            asyncio.create_task(_expire_slideshow_session(sid, 3600))
+            asyncio.create_task(_preupload_slideshow_file_ids(sid))
             # Очистка устаревших записей в кэше
             if len(_slideshow_cache) > 200:
                 cutoff = time.time() - 7200
@@ -1378,19 +1415,14 @@ async def process_video_download(message: types.Message, url: str):
         # Освобождаем независимый семафор соответствующей платформы
         if queue_acquired and not is_vip:
             sem.release()
-        # Удаляем временные файлы с диска
-        if res and isinstance(res, dict):
-            # Удаляем фото из альбома
-            if res.get("photos"):
-                for p in res["photos"]:
-                    if p and os.path.exists(p):
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
-            # Удаляем одиночный файл
-            if res.get("file_path"):
-                fp = res["file_path"]
+        # Удаляем временные файлы с диска ТОЛЬКО для одиночных роликов (альбомы живут в _slideshow_cache 1 час)
+        if res and isinstance(res, dict) and not res.get("is_album"):
+            fp = res.get("file_path")
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
                 if os.path.exists(fp):
                     try:
                         os.remove(fp)
@@ -1927,6 +1959,11 @@ async def inline_query_handler(inline_query: InlineQuery):
     cached = get_cached_media(clean_url)
     if drop_poisoned_instagram_photo_cache(clean_url, cached):
         cached = None
+    if cached and cached.get("media_type") == "photo":
+        # Если ссылка на пост TikTok /photo/ или Instagram /p/ — не отдаем одиночное фото из кэша, чтобы гарантировать полную карусель
+        if "/photo/" in clean_url or "/p/" in clean_url:
+            logging.info(f"Bypassing single photo cache for potential album: {clean_url}")
+            cached = None
     if cached and cached.get("file_id"):
         m_type = cached.get("media_type", "video")
         cap = _make_caption(cached.get("title"), is_photo=(m_type == "photo"))
@@ -2060,6 +2097,46 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     }
                 else:
                     res = await download_video(url, user_id)
+
+                # 🖼 Обработка каруселей/слайдшоу в инлайн-режиме
+                if res and isinstance(res, dict) and res.get("is_album") and res.get("photos"):
+                    photos = res["photos"]
+                    sid = uuid.uuid4().hex[:10]
+                    plat_name = res.get("platform", "tiktok")
+                    default_ttl = f"{plat_name.capitalize()} Слайдшоу"
+                    _slideshow_cache[sid] = {
+                        "photos": photos,
+                        "file_ids": [None] * len(photos),
+                        "total": len(photos),
+                        "title": res.get("title") or default_ttl,
+                        "author": res.get("author") or "",
+                        "platform": plat_name,
+                        "original_url": url,
+                        "digg_count": res.get("digg_count", 0),
+                        "comment_count": res.get("comment_count", 0),
+                        "share_count": res.get("share_count", 0),
+                        "music": res.get("music"),
+                        "music_info": res.get("music_info"),
+                        "created_at": time.time()
+                    }
+                    asyncio.create_task(_expire_slideshow_session(sid, 3600))
+                    asyncio.create_task(_preupload_slideshow_file_ids(sid))
+
+                    first_file = photos[0]
+                    is_vid = first_file.lower().endswith((".mp4", ".mov", ".m4v"))
+                    first_fid = await upload_media_to_telegram(first_file, is_photo=not is_vid, target_user_id=user_id)
+                    if first_fid:
+                        _slideshow_cache[sid]["file_ids"][0] = first_fid
+                        caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
+                        kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid])
+                        media_cls = InputMediaVideo if is_vid else InputMediaPhoto
+                        await bot.edit_message_media(
+                            inline_message_id=inline_message_id,
+                            media=media_cls(media=first_fid, caption=caption, parse_mode="HTML"),
+                            reply_markup=kb
+                        )
+                        _stream_files.pop(token, None)
+                        return
 
                 if res and isinstance(res, dict) and res.get("file_path"):
                     is_photo = bool(res.get("is_photo"))
@@ -2220,6 +2297,27 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
         return
 
     is_vid = file_path.lower().endswith((".mp4", ".mov", ".m4v"))
+
+    # Если переключение происходит в инлайн-сообщении
+    if callback.inline_message_id:
+        if not cached_fid and file_path and os.path.exists(file_path):
+            cached_fid = await upload_media_to_telegram(file_path, is_photo=not is_vid)
+            if cached_fid:
+                data["file_ids"][new_idx] = cached_fid
+        if cached_fid:
+            media_cls = InputMediaVideo if is_vid else InputMediaPhoto
+            try:
+                await bot.edit_message_media(
+                    inline_message_id=callback.inline_message_id,
+                    media=media_cls(media=cached_fid, caption=caption, parse_mode="HTML"),
+                    reply_markup=kb
+                )
+            except Exception as in_err:
+                logging.debug(f"Inline slide edit error: {in_err}")
+        await callback.answer()
+        return
+
+    # Если переключение в личном чате или группе
     media_target = cached_fid or FSInputFile(file_path)
     if is_vid:
         media_obj = InputMediaVideo(media=media_target, caption=caption, parse_mode="HTML")
@@ -2227,12 +2325,13 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
         media_obj = InputMediaPhoto(media=media_target, caption=caption, parse_mode="HTML")
 
     try:
-        res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
-        if res_msg:
-            if is_vid and res_msg.video:
-                data["file_ids"][new_idx] = res_msg.video.file_id
-            elif res_msg.photo:
-                data["file_ids"][new_idx] = res_msg.photo[-1].file_id
+        if callback.message:
+            res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
+            if res_msg:
+                if is_vid and res_msg.video:
+                    data["file_ids"][new_idx] = res_msg.video.file_id
+                elif res_msg.photo:
+                    data["file_ids"][new_idx] = res_msg.photo[-1].file_id
         await callback.answer()
     except Exception as e:
         logging.debug(f"Slide edit media error: {e}")
@@ -2284,7 +2383,9 @@ async def handle_slide_music_callback(callback: CallbackQuery):
         if not os.path.exists(tmp_audio):
             await tiktok_service.download_file_stream(music_url, tmp_audio)
         audio_file = FSInputFile(tmp_audio)
-        await callback.message.reply_audio(
+        target_chat = callback.message.chat.id if callback.message else callback.from_user.id
+        await bot.send_audio(
+            chat_id=target_chat,
             audio=audio_file,
             title=m_title,
             performer=m_author,
@@ -2294,7 +2395,11 @@ async def handle_slide_music_callback(callback: CallbackQuery):
         )
     except Exception as e:
         logging.warning(f"Failed to send tiktok audio: {e}")
-        await callback.message.answer(f"⚠️ Не удалось отправить аудиодорожку: {e}")
+        target_chat = callback.message.chat.id if callback.message else callback.from_user.id
+        try:
+            await bot.send_message(chat_id=target_chat, text=f"⚠️ Не удалось отправить аудиодорожку: {e}")
+        except Exception:
+            pass
 
 
 @dp.callback_query(F.data.startswith("album_all:"))
@@ -2338,7 +2443,8 @@ async def handle_slide_album_all_callback(callback: CallbackQuery):
                     media_group.append(media_cls(media=p_file))
         if media_group:
             try:
-                await callback.message.answer_media_group(media=media_group)
+                target_chat = callback.message.chat.id if callback.message else callback.from_user.id
+                await bot.send_media_group(chat_id=target_chat, media=media_group)
             except Exception as e:
                 logging.warning(f"Failed to send media group chunk: {e}")
 
@@ -2360,10 +2466,11 @@ async def handle_slide_noop_callback(callback: CallbackQuery):
 # ==========================================
 # 💬 ОБРАБОТЧИК СООБЩЕНИЙ В ЛС БОТА
 # ==========================================
-@dp.message(F.text)
+@dp.message(F.text | F.caption)
 async def handle_text_messages(message: types.Message):
-    # Проверяем наличие ссылок на видео
-    url = extract_url(message.text)
+    # Проверяем наличие ссылок на видео как в тексте, так и в подписи (при пересылке/шеринге)
+    raw_text = message.text or message.caption or ""
+    url = extract_url(raw_text)
     if url and detect_platform(url):
         await process_video_download(message, url)
         return

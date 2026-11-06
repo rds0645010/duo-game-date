@@ -203,6 +203,12 @@ async def _download_from_instagram_meta(
 
     # 1. Сценарий: Карусель (альбом из нескольких слайдов)
     raw_entries = info.get("entries")
+    if raw_entries:
+        if not isinstance(raw_entries, list):
+            try:
+                raw_entries = list(raw_entries)
+            except Exception:
+                raw_entries = []
     if raw_entries and isinstance(raw_entries, list) and len(raw_entries) > 1:
         targets = raw_entries[:30]
         album_files = [None] * len(targets)
@@ -223,13 +229,18 @@ async def _download_from_instagram_meta(
                 except Exception as dl_err:
                     logger.debug(f"Instagram carousel slide {idx} video download failed: {dl_err}")
 
-            # Иначе берем лучшее фото
+            # Иначе берем лучшее фото (из thumbnails, url или display_url)
             thumbs = item.get("thumbnails", [])
+            photo_url = None
             if thumbs:
                 best_t = max(thumbs, key=lambda t: (t.get("width") or 0) * (t.get("height") or 0))
+                photo_url = best_t.get("url")
+            if not photo_url:
+                photo_url = item.get("url") or item.get("display_url")
+            if photo_url:
                 dest = f"{output_prefix}_{idx}.jpg"
                 try:
-                    await download_file_func(best_t["url"], dest, proxy=proxy_url)
+                    await download_file_func(photo_url, dest, proxy=proxy_url)
                     if os.path.exists(dest) and os.path.getsize(dest) > 1000:
                         album_files[idx] = dest
                         return
