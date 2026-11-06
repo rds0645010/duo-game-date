@@ -919,9 +919,9 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict)
     Создает интерактивную клавиатуру управления слайдшоу точно как в @SavXBot:
     Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
     Ряд 2: [ ❤️ 51.2K ]  [ 💬 368 ↗ ]  [ 💌 ⤴ ]  [ 🎵 ↗ ]
-    Ряд 3: [ 📥 Скачать все слайды альбомом ]
+    Ряд 3: [ 📥 Скачать все слайды альбомом ] (и [ 🎧 Скачать MP3 ] если есть трек)
     """
-    # Ряд 1: Интерактивная навигация
+    # Ряд 1: Интерактивная навигация (активные стрелки / неактивные точки)
     btn_prev = InlineKeyboardButton(
         text="⬅️" if current_idx > 0 else "🔘",
         callback_data=f"slide:{sid}:{current_idx - 1}" if current_idx > 0 else "slide_noop"
@@ -953,7 +953,7 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict)
         )
     else:
         btn_comments = InlineKeyboardButton(
-            text=f"💬 {format_count(comm_cnt)} ↗",
+            text=f"💬 {format_count(comm_cnt)}",
             callback_data=f"stat:{sid}"
         )
 
@@ -962,19 +962,33 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict)
         switch_inline_query=orig_url
     )
 
-    btn_music = InlineKeyboardButton(
-        text="🎵 ↗",
-        callback_data=f"music:{sid}"
-    )
-    row2 = [btn_likes, btn_comments, btn_share, btn_music]
+    # Музыка: ссылка на страницу трека в TikTok (SavXBot открывает звук по стрелке ↗)
+    m_info = data.get("music_info") or {}
+    m_id = m_info.get("id") if isinstance(m_info, dict) else None
+    music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
 
-    # Ряд 3: Скачать все слайды альбомом
+    row2 = [btn_likes, btn_comments, btn_share]
+    if m_id:
+        row2.append(InlineKeyboardButton(text="🎵", url=f"https://www.tiktok.com/music/-{m_id}"))
+    elif music_u and str(music_u).startswith("http"):
+        row2.append(InlineKeyboardButton(text="🎵", url=str(music_u)))
+    elif music_u:
+        row2.append(InlineKeyboardButton(text="🎵", callback_data=f"music:{sid}"))
+
+    # Ряд 3: Скачать все слайды альбомом (+ скачать MP3)
     row3 = [
         InlineKeyboardButton(
             text="📥 Скачать все слайды альбомом",
             callback_data=f"album_all:{sid}"
         )
     ]
+    if music_u:
+        row3.append(
+            InlineKeyboardButton(
+                text="🎧 Скачать MP3",
+                callback_data=f"music:{sid}"
+            )
+        )
 
     return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
 
@@ -1852,12 +1866,12 @@ async def inline_query_handler(inline_query: InlineQuery):
                 thumbnail_url="https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png",
                 input_message_content=InputTextMessageContent(
                     message_text=(
-                        "💡 **Как отправить видео другу через @duo_play_date_bot:**\n\n"
-                        "Вставь ссылку на TikTok, Shorts или Reels после имени бота:\n"
-                        "`@duo_play_date_bot https://...`\n\n"
-                        "И нажми на появившуюся кнопку — чистое видео улетит прямо в чат!"
+                        "💡 <b>Как отправить видео или фото другу через @duo_play_date_bot:</b>\n\n"
+                        "Вставь ссылку на TikTok, Shorts или Instagram после имени бота:\n"
+                        "<code>@duo_play_date_bot https://...</code>\n\n"
+                        "И нажми на появившуюся кнопку — чистое медиа улетит прямо в чат!"
                     ),
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
             )
         ]

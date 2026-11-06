@@ -150,22 +150,29 @@ def _extract_instagram_metadata_sync(url: str, proxy_url: str = None, cookie_fil
     except Exception:
         pass
 
+    captured_data = {}
     orig_extract = InstagramIE._real_extract
     def _patched_extract(self, u):
         orig_raise = self.raise_no_formats
         self.raise_no_formats = lambda *a, **kw: None
         try:
-            return orig_extract(self, u)
+            res = orig_extract(self, u)
+            captured_data["result"] = res
+            return res
         finally:
             self.raise_no_formats = orig_raise
 
     InstagramIE._real_extract = _patched_extract
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=False)
+            try:
+                ydl.extract_info(url, download=False)
+            except Exception:
+                pass
+        return captured_data.get("result")
     except Exception as e:
         logger.debug(f"Instagram yt-dlp metadata error: {e}")
-        return None
+        return captured_data.get("result")
     finally:
         InstagramIE._real_extract = orig_extract
 

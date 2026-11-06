@@ -85,6 +85,24 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                             music_u = d.get("music")
                             music_inf = d.get("music_info")
 
+                            images = d.get("images") or []
+                            if images:
+                                return {
+                                    "success": True,
+                                    "platform": "tiktok",
+                                    "is_photo": True,
+                                    "is_album": len(images) > 1,
+                                    "photo_urls": images,
+                                    "music": music_u,
+                                    "music_info": music_inf,
+                                    "title": d.get("title", "TikTok Фото") or "TikTok Фото",
+                                    "author": d.get("author", {}).get("nickname", "TikTok"),
+                                    "cover": d.get("cover", ""),
+                                    "digg_count": digg,
+                                    "comment_count": comm,
+                                    "share_count": shares
+                                }
+
                             video_url = d.get("play") or d.get("wmplay")
                             if video_url:
                                 if video_url.startswith("/"):
@@ -105,23 +123,6 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                     "music": music_u,
                                     "music_info": music_inf
                                 }
-                            images = d.get("images") or []
-                            if images:
-                                return {
-                                    "success": True,
-                                    "platform": "tiktok",
-                                    "is_photo": True,
-                                    "is_album": len(images) > 1,
-                                    "photo_urls": images,
-                                    "music": music_u,
-                                    "music_info": music_inf,
-                                    "title": d.get("title", "TikTok Фото") or "TikTok Фото",
-                                    "author": d.get("author", {}).get("nickname", "TikTok"),
-                                    "cover": d.get("cover", ""),
-                                    "digg_count": digg,
-                                    "comment_count": comm,
-                                    "share_count": shares
-                                }
         except Exception as e:
             logger.debug(f"TikTok endpoint {endpoint} error: {e}")
             continue
@@ -131,7 +132,7 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
         try:
             async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as s:
                 async with s.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=2.5)) as r:
-                    if r.url and "video" in str(r.url):
+                    if r.url and ("video" in str(r.url) or "photo" in str(r.url)):
                         target_url = str(r.url).split("?")[0]
                         # Пробуем TikWM ещё раз с развернутым URL
                         for endpoint in TIKWM_ENDPOINTS:
@@ -153,6 +154,24 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                                 music_u = d.get("music")
                                                 music_inf = d.get("music_info")
 
+                                                images = d.get("images") or []
+                                                if images:
+                                                    return {
+                                                        "success": True,
+                                                        "platform": "tiktok",
+                                                        "is_photo": True,
+                                                        "is_album": len(images) > 1,
+                                                        "photo_urls": images,
+                                                        "music": music_u,
+                                                        "music_info": music_inf,
+                                                        "title": d.get("title", "TikTok Фото") or "TikTok Фото",
+                                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                                        "cover": d.get("cover", ""),
+                                                        "digg_count": digg,
+                                                        "comment_count": comm,
+                                                        "share_count": shares
+                                                    }
+
                                                 video_url = d.get("play") or d.get("wmplay")
                                                 if video_url:
                                                     if video_url.startswith("/"):
@@ -172,23 +191,6 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                                         "share_count": shares,
                                                         "music": music_u,
                                                         "music_info": music_inf
-                                                    }
-                                                images = d.get("images") or []
-                                                if images:
-                                                    return {
-                                                        "success": True,
-                                                        "platform": "tiktok",
-                                                        "is_photo": True,
-                                                        "is_album": len(images) > 1,
-                                                        "photo_urls": images,
-                                                        "music": music_u,
-                                                        "music_info": music_inf,
-                                                        "title": d.get("title", "TikTok Фото") or "TikTok Фото",
-                                                        "author": d.get("author", {}).get("nickname", "TikTok"),
-                                                        "cover": d.get("cover", ""),
-                                                        "digg_count": digg,
-                                                        "comment_count": comm,
-                                                        "share_count": shares
                                                     }
                             except Exception:
                                 pass
