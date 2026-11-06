@@ -40,6 +40,7 @@ from aiogram.types import (
 from downloader import (
     detect_platform,
     extract_url,
+    extract_all_media_urls,
     download_video,
     parse_tiktok_tikwm,
     FFMPEG_PATH,
@@ -1087,10 +1088,10 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
 
 def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False) -> InlineKeyboardMarkup:
     """
-    Создает клавиатуру управления слайдшоу в точности как у @SavXBot:
+    Создает клавиатуру управления слайдшоу:
     Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
-    Ряд 2: [ ❤️ 51.2K ↗️ ]  [ 💬 368 ↗️ ]  [ 💌 ⤴️ ]  [ 🎵 ↗️ ]
-    Ряд 3 (только в ЛС): [ 📥 Скачать все слайды альбомом ] (и [ 🎧 Скачать MP3 ] если есть трек)
+    Ряд 2 (в инлайн): [ 💌 Поделиться ] и [ 🎵 Звук ] (если есть аудио)
+    Ряд 2-3 (в ЛС): [ 📥 Скачать все слайды альбомом ] и [ 🎧 Скачать MP3 ]
     """
     # Ряд 1: Интерактивная навигация (активные стрелки / неактивные кружочки)
     btn_prev = InlineKeyboardButton(
@@ -1106,62 +1107,40 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
         callback_data=f"slide:{sid}:{current_idx + 1}" if current_idx < total - 1 else "slide_noop"
     )
     row1 = [btn_prev, btn_counter, btn_next]
+    rows = [row1]
 
-    # Ряд 2: Точно как у @SavXBot:
-    # 4 кнопки в одну строку: Лайки, Комментарии, Шеринг, Звук
     orig_url = data.get("original_url") or ""
-    post_url = orig_url if orig_url.startswith("http") else "https://t.me"
-
-    digg_cnt = data.get("digg_count") or data.get("likes") or 0
-    comm_cnt = data.get("comment_count") or data.get("comments") or 0
-
-    digg_str = format_count(digg_cnt)
-    comm_str = format_count(comm_cnt)
-
-    btn_likes = InlineKeyboardButton(
-        text=f"❤️ {digg_str}" if digg_str else "❤️",
-        url=post_url
-    )
-    btn_comments = InlineKeyboardButton(
-        text=f"💬 {comm_str}" if comm_str else "💬",
-        url=post_url
-    )
-    btn_share = InlineKeyboardButton(
-        text="💌",
-        switch_inline_query=orig_url
-    )
-
-    row2 = [btn_likes, btn_comments, btn_share]
-
     m_info = data.get("music_info") or {}
     m_id = m_info.get("id") if isinstance(m_info, dict) else None
     music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
 
-    if m_id:
-        row2.append(InlineKeyboardButton(text="🎵", url=f"https://www.tiktok.com/music/-{m_id}"))
-    elif music_u and str(music_u).startswith("http"):
-        row2.append(InlineKeyboardButton(text="🎵", url=str(music_u)))
-    elif music_u:
-        row2.append(InlineKeyboardButton(text="🎵", callback_data=f"music:{sid}"))
-
-    rows = [row1, row2]
-
-    # Ряд 3: Только для личного чата
-    if not is_inline:
-        row3 = [
+    if is_inline:
+        # Для инлайн-режима: кнопка поделиться и звук (без лишних счетчиков лайков/комментов)
+        row2 = []
+        if orig_url:
+            row2.append(InlineKeyboardButton(text="💌 Поделиться", switch_inline_query=orig_url))
+        if m_id:
+            row2.append(InlineKeyboardButton(text="🎵 Звук", url=f"https://www.tiktok.com/music/-{m_id}"))
+        elif music_u and str(music_u).startswith("http"):
+            row2.append(InlineKeyboardButton(text="🎵 Звук", url=str(music_u)))
+        if row2:
+            rows.append(row2)
+    else:
+        # Для личного чата
+        row_pm = [
             InlineKeyboardButton(
                 text="📥 Скачать все слайды альбомом",
                 callback_data=f"album_all:{sid}"
             )
         ]
         if music_u:
-            row3.append(
+            row_pm.append(
                 InlineKeyboardButton(
                     text="🎧 Скачать MP3",
                     callback_data=f"music:{sid}"
                 )
             )
-        rows.append(row3)
+        rows.append(row_pm)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2677,18 +2656,79 @@ async def handle_slide_noop_callback(callback: CallbackQuery):
 # ==========================================
 # 💬 ОБРАБОТЧИК СООБЩЕНИЙ В ЛС БОТА
 # ==========================================
+_user_active_downloads: Dict[int, int] = {}
+_user_recent_links: Dict[int, Dict[str, float]] = {}
+_user_last_msg_ts: Dict[int, float] = {}
+_user_last_download_ts: Dict[int, float] = {}
+_user_last_welcome_ts: Dict[int, float] = {}
+
+CHATTER_WORDS = {
+    "привет", "хай", "ку", "hello", "hi", "спасибо", "спс", "спс)", "ок", "круто", 
+    "топ", "хаха", "ахах", "лол", "вай", "кайф", "норм", "класс", "ого", "ппц", 
+    "жесть", "👍", "🔥", "❤️", "😂", "ясно", "понял", "понятно", "супер", "от души"
+}
+
 @dp.message(F.text | F.caption)
 async def handle_text_messages(message: types.Message):
     # Проверяем наличие ссылок на видео как в тексте, так и в подписи (при пересылке/шеринге)
     raw_text = message.text or message.caption or ""
-    u_name = message.from_user.username or message.from_user.first_name or "no_user"
-    logging.info(f"📩 [ЛС от {message.from_user.id} (@{u_name})]: {raw_text[:120]}")
-    url = extract_url(raw_text)
-    if url and detect_platform(url):
-        await process_video_download(message, url)
+    user_id = message.from_user.id if message.from_user else 0
+    u_name = (message.from_user.username or message.from_user.first_name or "no_user") if message.from_user else "unknown"
+    logging.info(f"📩 [ЛС от {user_id} (@{u_name})]: {raw_text[:120]}")
+
+    now = time.time()
+    media_urls = extract_all_media_urls(raw_text)
+
+    if media_urls:
+        # Берём только ПЕРВУЮ уникальную ссылку (не качаем кучу ссылок разом и не устраиваем спам)
+        url = media_urls[0]
+        clean_u = url.split("?")[0].strip().rstrip("/")
+
+        # 1. Защита от дубликатов: проверяем, не скачивал ли пользователь эту же ссылку за последние 60 сек
+        user_links = _user_recent_links.setdefault(user_id, {})
+        for k in list(user_links.keys()):
+            if now - user_links[k] > 300:
+                user_links.pop(k, None)
+
+        if clean_u in user_links and (now - user_links[clean_u] < 60):
+            logging.info(f"⏭ [ДУБЛИКАТ] Пропускаю повторную ссылку от {user_id}: {clean_u}")
+            return
+
+        # 2. Защита от спама ссылками подряд (если у пользователя уже идёт активное скачивание)
+        if _user_active_downloads.get(user_id, 0) >= 1:
+            if now - _user_last_msg_ts.get(user_id, 0) < 5:
+                logging.info(f"⏭ [ОЧЕРЕДЬ] Пропускаю ссылку подряд от {user_id} (загрузка уже в процессе): {clean_u}")
+                return
+
+        _user_last_msg_ts[user_id] = now
+        _user_recent_links[user_id][clean_u] = now
+        _user_last_download_ts[user_id] = now
+
+        _user_active_downloads[user_id] = _user_active_downloads.get(user_id, 0) + 1
+        try:
+            await process_video_download(message, url)
+        finally:
+            _user_active_downloads[user_id] = max(0, _user_active_downloads.get(user_id, 0) - 1)
         return
 
-    # Если обычное текстовое сообщение
+    # Если в сообщении нет ссылок на медиа:
+    # 1. Если пользователь активно скачивал видео в последние 15 минут — не спамим приветствием на каждый текст!
+    if now - _user_last_download_ts.get(user_id, 0) < 900:
+        logging.info(f"ℹ️ Текст в активной сессии от {user_id}: '{raw_text[:50]}' (без спама)")
+        return
+
+    # 2. Если это короткий чаттер или реакция ("спасибо", "круто", "👍" и т.п.) — не спамим приветствием!
+    text_strip = raw_text.strip().lower()
+    if text_strip in CHATTER_WORDS or len(text_strip) <= 6:
+        logging.info(f"ℹ️ Чаттер от {user_id}: '{text_strip}' (без спама)")
+        return
+
+    # 3. Не отправляем приветствие чаще одного раза в 12 часов одному пользователю
+    if now - _user_last_welcome_ts.get(user_id, 0) < 43200:
+        logging.info(f"ℹ️ Приветствие уже отправлялось {user_id} недавно, пропускаю")
+        return
+
+    _user_last_welcome_ts[user_id] = now
     app_link = get_app_url()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[

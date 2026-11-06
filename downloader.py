@@ -142,11 +142,28 @@ def extract_url(text: str):
     return None
 
 
+def extract_all_media_urls(text: str) -> List[str]:
+    """
+    Извлекает все уникальные поддерживаемые ссылки (TikTok, Reels, Shorts) из текста.
+    Сохраняет порядок следования и отсекает дубликаты.
+    """
+    if not text:
+        return []
+    found = []
+    # Находим все совпадения по тексту
+    for pattern in [TIKTOK_REGEX, YOUTUBE_REGEX, INSTAGRAM_REGEX]:
+        for m in pattern.finditer(text):
+            u = m.group(0).rstrip(_URL_TRAILING)
+            if u and u not in found:
+                found.append(u)
+    return found
+
+
 async def parse_tiktok_tikwm(url: str):
     """
     Быстрый парсер TikTok без водяных знаков (делегирует в независимый tiktok_service).
     """
-    return await tiktok_service.parse_tiktok(url)
+    return await tiktok_service.parse_tiktok(url, warp_proxy_module=warp_proxy)
 
 
 def is_valid_mp4_file(file_path: str, allow_audio: bool = True) -> bool:
@@ -644,6 +661,7 @@ async def download_video(url: str, user_id: int, progress_callback=None):
             output_prefix,
             download_locally=True,
             ffmpeg_path=FFMPEG_PATH,
+            warp_proxy_module=warp_proxy,
             progress_callback=progress_callback
         )
 
