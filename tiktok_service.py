@@ -15,7 +15,7 @@ TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
 # Зеркала и эндпоинты API TikWM
 TIKWM_ENDPOINTS = [
     "https://www.tikwm.com/api/",
-    "https://tikwm.com/api/"
+    "https://tikwm.com/api/",
 ]
 
 DEFAULT_HEADERS = {
@@ -63,69 +63,76 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
     Опрашивает эндпоинты с коротким таймаутом (< 3 сек).
     Возвращает словарь с метаданными и прямой ссылкой на поток.
     """
-    target_url = url
+    # Очищаем трекинговые параметры (_r, u_code, sharer_language), которые ломают парсинг в облаке
+    target_url = url.split("?")[0] if ("/photo/" in url or "/video/" in url) else url
+    urls_to_try = [target_url]
+    if target_url != url:
+        urls_to_try.append(url)
 
-    # 1. Сначала пробуем TikWM напрямую с исходным URL (включая vt.tiktok.com/vm.tiktok.com)
-    for endpoint in TIKWM_ENDPOINTS:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    endpoint,
-                    data={"url": target_url},
-                    headers=DEFAULT_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=3.5)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("code") == 0 and data.get("data"):
-                            d = data["data"]
-                            digg = d.get("digg_count", 0)
-                            comm = d.get("comment_count", 0)
-                            shares = d.get("share_count", 0)
-                            music_u = d.get("music")
-                            music_inf = d.get("music_info")
+    # 1. Сначала пробуем TikWM напрямую (увеличенный таймаут 10s для надежности на Render)
+    for u_candidate in urls_to_try:
+        for endpoint in TIKWM_ENDPOINTS:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        endpoint,
+                        data={"url": u_candidate, "hd": "1"},
+                        headers=DEFAULT_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10.0)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("code") == 0 and data.get("data"):
+                                d = data["data"]
+                                digg = d.get("digg_count", 0)
+                                comm = d.get("comment_count", 0)
+                                shares = d.get("share_count", 0)
+                                music_u = d.get("music")
+                                music_inf = d.get("music_info")
 
-                            images = d.get("images") or []
-                            if images:
-                                return {
-                                    "success": True,
-                                    "platform": "tiktok",
-                                    "is_photo": True,
-                                    "is_album": len(images) > 1,
-                                    "photo_urls": images,
-                                    "music": music_u,
-                                    "music_info": music_inf,
-                                    "title": d.get("title", "TikTok Фото") or "TikTok Фото",
-                                    "author": d.get("author", {}).get("nickname", "TikTok"),
-                                    "cover": d.get("cover", ""),
-                                    "digg_count": digg,
-                                    "comment_count": comm,
-                                    "share_count": shares
-                                }
+                                images = d.get("images") or []
+                                if images:
+                                    return {
+                                        "success": True,
+                                        "platform": "tiktok",
+                                        "is_photo": True,
+                                        "is_album": len(images) > 1,
+                                        "photo_urls": images,
+                                        "music": music_u,
+                                        "music_info": music_inf,
+                                        "title": d.get("title", "TikTok Фото") or "TikTok Фото",
+                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                        "cover": d.get("cover", ""),
+                                        "digg_count": digg,
+                                        "comment_count": comm,
+                                        "share_count": shares
+                                    }
 
-                            video_url = d.get("play") or d.get("wmplay")
-                            if video_url:
-                                if video_url.startswith("/"):
-                                    video_url = "https://www.tikwm.com" + video_url
-                                return {
-                                    "success": True,
-                                    "platform": "tiktok",
-                                    "is_video": True,
-                                    "video_url": video_url,
-                                    "title": d.get("title", "TikTok Video") or "TikTok Video",
-                                    "author": d.get("author", {}).get("nickname", "TikTok"),
-                                    "cover": d.get("cover", ""),
-                                    "duration": d.get("duration", 0),
-                                    "size": d.get("size", 0),
-                                    "digg_count": digg,
-                                    "comment_count": comm,
-                                    "share_count": shares,
-                                    "music": music_u,
-                                    "music_info": music_inf
-                                }
-        except Exception as e:
-            logger.debug(f"TikTok endpoint {endpoint} error: {e}")
-            continue
+                                video_url = d.get("play") or d.get("wmplay")
+                                if video_url:
+                                    if video_url.startswith("/"):
+                                        video_url = "https://www.tikwm.com" + video_url
+                                    return {
+                                        "success": True,
+                                        "platform": "tiktok",
+                                        "is_video": True,
+                                        "video_url": video_url,
+                                        "title": d.get("title", "TikTok Video") or "TikTok Video",
+                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                        "cover": d.get("cover", ""),
+                                        "duration": d.get("duration", 0),
+                                        "size": d.get("size", 0),
+                                        "digg_count": digg,
+                                        "comment_count": comm,
+                                        "share_count": shares,
+                                        "music": music_u,
+                                        "music_info": music_inf
+                                    }
+                            else:
+                                logger.debug(f"TikWM {endpoint} code={data.get('code')}: {data.get('msg')}")
+            except Exception as e:
+                logger.debug(f"TikTok endpoint {endpoint} error: {e}")
+                continue
 
     # 2. Если прямой запрос не сработал и это короткая ссылка — пробуем развернуть редирект
     if "vm.tiktok.com" in url or "vt.tiktok.com" in url:

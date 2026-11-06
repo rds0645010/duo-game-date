@@ -707,15 +707,13 @@ if not RENDER_EXTERNAL_URL.startswith("http://") and not RENDER_EXTERNAL_URL.sta
     RENDER_EXTERNAL_URL = f"https://{RENDER_EXTERNAL_URL}"
 RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
 
-# Режим работы бота: Webhook (по умолчанию на Render) или Polling (по умолчанию локально)
+# Режим работы бота: Webhook или Polling (по умолчанию везде Polling для надёжной доставки ЛС и инлайна)
 # Принудительное управление через USE_WEBHOOK=true/false
 _use_wh_env = os.getenv("USE_WEBHOOK", "").strip().lower()
 if _use_wh_env in ("1", "true", "yes"):
     USE_WEBHOOK = True
-elif _use_wh_env in ("0", "false", "no"):
-    USE_WEBHOOK = False
 else:
-    USE_WEBHOOK = bool(IS_ON_RENDER)
+    USE_WEBHOOK = False  # По умолчанию всегда Polling (даже на Render) для стабильного ответа в ЛС
 
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip() or None
@@ -943,12 +941,12 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     return caption
 
 
-def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict) -> InlineKeyboardMarkup:
+def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False) -> InlineKeyboardMarkup:
     """
     Создает интерактивную клавиатуру управления слайдшоу точно как в @SavXBot:
     Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
     Ряд 2: [ ❤️ 51.2K ]  [ 💬 368 ↗ ]  [ 💌 ⤴ ]  [ 🎵 ↗ ]
-    Ряд 3: [ 📥 Скачать все слайды альбомом ] (и [ 🎧 Скачать MP3 ] если есть трек)
+    Ряд 3 (только в ЛС): [ 📥 Скачать все слайды альбомом ] (и [ 🎧 Скачать MP3 ] если есть трек)
     """
     # Ряд 1: Интерактивная навигация (активные стрелки / неактивные точки)
     btn_prev = InlineKeyboardButton(
@@ -1004,22 +1002,26 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict)
     elif music_u:
         row2.append(InlineKeyboardButton(text="🎵", callback_data=f"music:{sid}"))
 
-    # Ряд 3: Скачать все слайды альбомом (+ скачать MP3)
-    row3 = [
-        InlineKeyboardButton(
-            text="📥 Скачать все слайды альбомом",
-            callback_data=f"album_all:{sid}"
-        )
-    ]
-    if music_u:
-        row3.append(
-            InlineKeyboardButton(
-                text="🎧 Скачать MP3",
-                callback_data=f"music:{sid}"
-            )
-        )
+    rows = [row1, row2]
 
-    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
+    # Ряд 3: Только для личного чата (в инлайне как в SavXBot — компактные 2 ряда)
+    if not is_inline:
+        row3 = [
+            InlineKeyboardButton(
+                text="📥 Скачать все слайды альбомом",
+                callback_data=f"album_all:{sid}"
+            )
+        ]
+        if music_u:
+            row3.append(
+                InlineKeyboardButton(
+                    text="🎧 Скачать MP3",
+                    callback_data=f"music:{sid}"
+                )
+            )
+        rows.append(row3)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 
@@ -2128,7 +2130,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     if first_fid:
                         _slideshow_cache[sid]["file_ids"][0] = first_fid
                         caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
-                        kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid])
+                        kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid], is_inline=True)
                         media_cls = InputMediaVideo if is_vid else InputMediaPhoto
                         await bot.edit_message_media(
                             inline_message_id=inline_message_id,
@@ -2288,7 +2290,8 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
         return
 
     caption = make_slide_caption(data, new_idx, total)
-    kb = build_slideshow_keyboard(sid, new_idx, total, data)
+    is_in = bool(callback.inline_message_id)
+    kb = build_slideshow_keyboard(sid, new_idx, total, data, is_inline=is_in)
 
     cached_fid = data["file_ids"][new_idx]
     file_path = data["photos"][new_idx]
