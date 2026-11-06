@@ -8,6 +8,8 @@ import base64
 import html
 import time
 import shutil
+import uuid
+import tempfile
 import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
@@ -868,6 +870,115 @@ def format_friendly_error(e: Exception) -> str:
         return f"❌ <b>Не удалось скачать видео.</b>\n\n⚠️ Детали: <code>{html.escape(str(e)[:150])}</code>"
 
 
+# 🖼 КЭШ СЛАЙДШОУ (КАРУСЕЛЕЙ) И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+_slideshow_cache = {}
+
+def format_count(n) -> str:
+    """Форматирует число в компактный вид: 368 -> 368, 51200 -> 51.2K, 1500000 -> 1.5M"""
+    try:
+        val = int(n or 0)
+    except (ValueError, TypeError):
+        return "0"
+    if val < 0:
+        return "0"
+    if val < 1000:
+        return str(val)
+    if val < 1_000_000:
+        k_val = val / 1000.0
+        if k_val >= 100:
+            return f"{int(k_val)}K"
+        s = f"{k_val:.1f}K"
+        return s.replace(".0K", "K")
+    m_val = val / 1_000_000.0
+    if m_val >= 100:
+        return f"{int(m_val)}M"
+    s = f"{m_val:.1f}M"
+    return s.replace(".0M", "M")
+
+
+def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
+    """Генерирует аккуратную подпись к слайду фото-карусели."""
+    title_raw = (data.get("title") or "TikTok Фото")[:200]
+    title_esc = html.escape(title_raw)
+    author_raw = (data.get("author") or "TikTok")[:50]
+    author_esc = html.escape(author_raw)
+    plat_raw = (data.get("platform") or "TikTok").capitalize()
+    caption = (
+        f"📸 <b>{title_esc}</b>\n\n"
+        f"📱 <b>Источник:</b> {plat_raw}"
+    )
+    if author_esc and author_esc.lower() != "tiktok":
+        caption += f" | {author_esc}"
+    caption += f"\n🖼 <b>Слайд:</b> {current_idx + 1} из {total}\n"
+    caption += "✨ <i>Скачано через @duo_play_date_bot</i>"
+    return caption
+
+
+def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict) -> InlineKeyboardMarkup:
+    """
+    Создает интерактивную клавиатуру управления слайдшоу точно как в @SavXBot:
+    Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
+    Ряд 2: [ ❤️ 51.2K ]  [ 💬 368 ↗ ]  [ 💌 ⤴ ]  [ 🎵 ↗ ]
+    Ряд 3: [ 📥 Скачать все слайды альбомом ]
+    """
+    # Ряд 1: Интерактивная навигация
+    btn_prev = InlineKeyboardButton(
+        text="⬅️" if current_idx > 0 else "🔘",
+        callback_data=f"slide:{sid}:{current_idx - 1}" if current_idx > 0 else "slide_noop"
+    )
+    btn_counter = InlineKeyboardButton(
+        text=f"{current_idx + 1}/{total}",
+        callback_data=f"slide_info:{current_idx + 1}:{total}"
+    )
+    btn_next = InlineKeyboardButton(
+        text="➡️" if current_idx < total - 1 else "🔘",
+        callback_data=f"slide:{sid}:{current_idx + 1}" if current_idx < total - 1 else "slide_noop"
+    )
+    row1 = [btn_prev, btn_counter, btn_next]
+
+    # Ряд 2: Статистика, комментарии, шеринг, музыка
+    digg_cnt = data.get("digg_count", 0)
+    comm_cnt = data.get("comment_count", 0)
+    orig_url = data.get("original_url") or ""
+
+    btn_likes = InlineKeyboardButton(
+        text=f"❤️ {format_count(digg_cnt)}",
+        callback_data=f"stat:{sid}"
+    )
+
+    if orig_url and orig_url.startswith("http"):
+        btn_comments = InlineKeyboardButton(
+            text=f"💬 {format_count(comm_cnt)}",
+            url=orig_url
+        )
+    else:
+        btn_comments = InlineKeyboardButton(
+            text=f"💬 {format_count(comm_cnt)} ↗",
+            callback_data=f"stat:{sid}"
+        )
+
+    btn_share = InlineKeyboardButton(
+        text="💌",
+        switch_inline_query=orig_url
+    )
+
+    btn_music = InlineKeyboardButton(
+        text="🎵 ↗",
+        callback_data=f"music:{sid}"
+    )
+    row2 = [btn_likes, btn_comments, btn_share, btn_music]
+
+    # Ряд 3: Скачать все слайды альбомом
+    row3 = [
+        InlineKeyboardButton(
+            text="📥 Скачать все слайды альбомом",
+            callback_data=f"album_all:{sid}"
+        )
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
+
+
 
 async def process_video_download(message: types.Message, url: str):
     clean_url = extract_url(url) or url
@@ -1003,6 +1114,52 @@ async def process_video_download(message: types.Message, url: str):
         if not res or not isinstance(res, dict):
             await safe_edit_status(status_msg, "❌ <b>Не удалось скачать видео.</b>\nВозможно, видео удалено или автор ограничил доступ.")
             return
+
+        # 🖼 СНАЧАЛА проверяем: если это фото-слайдшоу (альбом картинок)
+        if res.get("is_album") and res.get("photos"):
+            photos = res["photos"]
+            sid = uuid.uuid4().hex[:10]
+            _slideshow_cache[sid] = {
+                "photos": photos,
+                "file_ids": [None] * len(photos),
+                "total": len(photos),
+                "title": res.get("title", "TikTok Слайдшоу"),
+                "author": res.get("author", "TikTok"),
+                "platform": res.get("platform", "tiktok"),
+                "original_url": clean_url,
+                "digg_count": res.get("digg_count", 0),
+                "comment_count": res.get("comment_count", 0),
+                "share_count": res.get("share_count", 0),
+                "music": res.get("music"),
+                "music_info": res.get("music_info"),
+                "created_at": time.time()
+            }
+            # Очистка устаревших записей в кэше
+            if len(_slideshow_cache) > 200:
+                cutoff = time.time() - 7200
+                to_del = [k for k, v in _slideshow_cache.items() if v.get("created_at", 0) < cutoff]
+                for k in to_del:
+                    _slideshow_cache.pop(k, None)
+
+            first_photo = photos[0]
+            caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
+            kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid])
+            photo_input = FSInputFile(first_photo)
+            sent = await message.answer_photo(
+                photo=photo_input,
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+            if sent and sent.photo:
+                _slideshow_cache[sid]["file_ids"][0] = sent.photo[-1].file_id
+
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            return
+
         file_path = res.get("file_path")
 
         if not file_path or not os.path.exists(file_path):
@@ -1072,48 +1229,6 @@ async def process_video_download(message: types.Message, url: str):
             await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
         except Exception:
             pass
-
-        # 🖼 Если это альбом / карусель из нескольких слайдов
-        if res.get("is_album") and res.get("photos"):
-            photos = res["photos"]
-            album_caption = (
-                f"📸 <b>{title_esc}</b>\n\n"
-                f"📱 <b>Источник:</b> {plat_str} | 🖼 Слайдов: {len(photos)}\n"
-                f"✨ <i>Листай слайды прямо в Telegram 👉</i>\n"
-                f"✨ <i>Скачано через @duo_play_date_bot</i>"
-            )
-            media_group = []
-            for i, p_path in enumerate(photos[:10]):
-                p_file = FSInputFile(p_path)
-                if i == 0:
-                    media_group.append(InputMediaPhoto(media=p_file, caption=album_caption, parse_mode="HTML"))
-                else:
-                    media_group.append(InputMediaPhoto(media=p_file))
-
-            sent_msgs = await message.answer_media_group(media=media_group)
-            if sent_msgs and len(sent_msgs) > 0 and sent_msgs[0].photo:
-                f_id = sent_msgs[0].photo[-1].file_id
-                save_cached_media(
-                    clean_url,
-                    f_id,
-                    "photo",
-                    res.get("title", ""),
-                    res.get("platform", ""),
-                    res.get("author", "")
-                )
-                record_user_download(
-                    user_id,
-                    clean_url,
-                    f_id,
-                    "photo",
-                    res.get("title", ""),
-                    res.get("platform", "")
-                )
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            return
 
         # 📸 Если в посте оказалась одиночная фотография
         if res.get("is_photo"):
@@ -2040,6 +2155,162 @@ async def handle_retry_callback(callback: CallbackQuery):
     except Exception:
         pass
     await execute_inline_delivery(callback.inline_message_id, token, callback.from_user.id)
+
+
+# ==========================================
+# 🖼 ОБРАБОТЧИКИ ИНТЕРАКТИВНОГО СЛАЙДШОУ (КАРУСЕЛИ)
+# ==========================================
+
+@dp.callback_query(F.data.startswith("slide:"))
+async def handle_slide_switch_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    sid = parts[1]
+    try:
+        new_idx = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+
+    data = _slideshow_cache.get(sid)
+    if not data:
+        await callback.answer("⚠️ Сессия слайдшоу устарела. Отправьте ссылку повторно.", show_alert=True)
+        return
+
+    total = data["total"]
+    if new_idx < 0 or new_idx >= total:
+        await callback.answer()
+        return
+
+    caption = make_slide_caption(data, new_idx, total)
+    kb = build_slideshow_keyboard(sid, new_idx, total, data)
+
+    cached_fid = data["file_ids"][new_idx]
+    if cached_fid:
+        media_obj = InputMediaPhoto(media=cached_fid, caption=caption, parse_mode="HTML")
+    else:
+        file_path = data["photos"][new_idx]
+        if not os.path.exists(file_path):
+            await callback.answer("❌ Файл слайда больше не доступен на сервере.", show_alert=True)
+            return
+        media_obj = InputMediaPhoto(media=FSInputFile(file_path), caption=caption, parse_mode="HTML")
+
+    try:
+        res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
+        if res_msg and res_msg.photo:
+            data["file_ids"][new_idx] = res_msg.photo[-1].file_id
+        await callback.answer()
+    except Exception as e:
+        logging.debug(f"Slide edit media error: {e}")
+        await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("stat:"))
+async def handle_slide_stat_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    sid = parts[1] if len(parts) > 1 else ""
+    data = _slideshow_cache.get(sid)
+    if not data:
+        await callback.answer("📊 Статистика недоступна", show_alert=False)
+        return
+    digg = data.get("digg_count", 0)
+    comm = data.get("comment_count", 0)
+    shares = data.get("share_count", 0)
+    alert_text = (
+        f"📊 Статистика публикации:\n\n"
+        f"❤️ Лайков: {digg:,}\n"
+        f"💬 Комментариев: {comm:,}\n"
+        f"🔄 Репостов: {shares:,}"
+    ).replace(",", " ")
+    await callback.answer(alert_text, show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("music:"))
+async def handle_slide_music_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    sid = parts[1] if len(parts) > 1 else ""
+    data = _slideshow_cache.get(sid)
+    if not data or not data.get("music"):
+        await callback.answer("🎵 В этом посте нет отдельной аудиодорожки.", show_alert=True)
+        return
+
+    music_url = data["music"]
+    music_info = data.get("music_info") or {}
+    m_title = (music_info.get("title") or data.get("title") or "TikTok Audio")[:80]
+    m_author = (music_info.get("author") or data.get("author") or "TikTok")[:50]
+    m_dur = int(music_info.get("duration", 0))
+
+    await callback.answer("🎵 Отправляю аудиодорожку...")
+    try:
+        import tiktok_service
+        tmp_audio = os.path.join(tempfile.gettempdir(), f"tt_music_{sid}.mp3")
+        if not os.path.exists(tmp_audio):
+            await tiktok_service.download_file_stream(music_url, tmp_audio)
+        audio_file = FSInputFile(tmp_audio)
+        await callback.message.reply_audio(
+            audio=audio_file,
+            title=m_title,
+            performer=m_author,
+            duration=m_dur,
+            caption=f"🎵 <b>{html.escape(m_title)}</b>\n👤 {html.escape(m_author)}\n✨ <i>@duo_play_date_bot</i>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.warning(f"Failed to send tiktok audio: {e}")
+        await callback.message.answer(f"⚠️ Не удалось отправить аудиодорожку: {e}")
+
+
+@dp.callback_query(F.data.startswith("album_all:"))
+async def handle_slide_album_all_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    sid = parts[1] if len(parts) > 1 else ""
+    data = _slideshow_cache.get(sid)
+    if not data or not data.get("photos"):
+        await callback.answer("⚠️ Сессия слайдшоу устарела.", show_alert=True)
+        return
+
+    photos = data["photos"]
+    await callback.answer("📥 Отправляю все фото альбомом...")
+    title_esc = html.escape((data.get("title") or "TikTok Слайдшоу")[:200])
+    author_esc = html.escape((data.get("author") or "TikTok")[:50])
+    album_caption = (
+        f"📸 <b>{title_esc}</b>\n\n"
+        f"📱 <b>Источник:</b> TikTok | {author_esc}\n"
+        f"🖼 <b>Всего слайдов:</b> {len(photos)}\n"
+        f"✨ <i>Скачано через @duo_play_date_bot</i>"
+    )
+
+    for chunk_start in range(0, len(photos), 10):
+        chunk = photos[chunk_start:chunk_start + 10]
+        media_group = []
+        for i, p_path in enumerate(chunk):
+            if os.path.exists(p_path):
+                p_file = FSInputFile(p_path)
+                if chunk_start == 0 and i == 0:
+                    media_group.append(InputMediaPhoto(media=p_file, caption=album_caption, parse_mode="HTML"))
+                else:
+                    media_group.append(InputMediaPhoto(media=p_file))
+        if media_group:
+            try:
+                await callback.message.answer_media_group(media=media_group)
+            except Exception as e:
+                logging.warning(f"Failed to send media group chunk: {e}")
+
+
+@dp.callback_query(F.data.startswith("slide_info:"))
+async def handle_slide_info_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) == 3:
+        await callback.answer(f"Слайд {parts[1]} из {parts[2]}", show_alert=False)
+    else:
+        await callback.answer()
+
+
+@dp.callback_query(F.data == "slide_noop")
+async def handle_slide_noop_callback(callback: CallbackQuery):
+    await callback.answer()
 
 
 # ==========================================

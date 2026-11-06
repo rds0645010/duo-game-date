@@ -79,6 +79,12 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                         data = await resp.json()
                         if data.get("code") == 0 and data.get("data"):
                             d = data["data"]
+                            digg = d.get("digg_count", 0)
+                            comm = d.get("comment_count", 0)
+                            shares = d.get("share_count", 0)
+                            music_u = d.get("music")
+                            music_inf = d.get("music_info")
+
                             video_url = d.get("play") or d.get("wmplay")
                             if video_url:
                                 if video_url.startswith("/"):
@@ -92,7 +98,12 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                     "author": d.get("author", {}).get("nickname", "TikTok"),
                                     "cover": d.get("cover", ""),
                                     "duration": d.get("duration", 0),
-                                    "size": d.get("size", 0)
+                                    "size": d.get("size", 0),
+                                    "digg_count": digg,
+                                    "comment_count": comm,
+                                    "share_count": shares,
+                                    "music": music_u,
+                                    "music_info": music_inf
                                 }
                             images = d.get("images") or []
                             if images:
@@ -100,11 +111,16 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                     "success": True,
                                     "platform": "tiktok",
                                     "is_photo": True,
+                                    "is_album": len(images) > 1,
                                     "photo_urls": images,
-                                    "music": d.get("music"),
+                                    "music": music_u,
+                                    "music_info": music_inf,
                                     "title": d.get("title", "TikTok Фото") or "TikTok Фото",
                                     "author": d.get("author", {}).get("nickname", "TikTok"),
-                                    "cover": d.get("cover", "")
+                                    "cover": d.get("cover", ""),
+                                    "digg_count": digg,
+                                    "comment_count": comm,
+                                    "share_count": shares
                                 }
         except Exception as e:
             logger.debug(f"TikTok endpoint {endpoint} error: {e}")
@@ -131,6 +147,12 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                             data = await resp.json()
                                             if data.get("code") == 0 and data.get("data"):
                                                 d = data["data"]
+                                                digg = d.get("digg_count", 0)
+                                                comm = d.get("comment_count", 0)
+                                                shares = d.get("share_count", 0)
+                                                music_u = d.get("music")
+                                                music_inf = d.get("music_info")
+
                                                 video_url = d.get("play") or d.get("wmplay")
                                                 if video_url:
                                                     if video_url.startswith("/"):
@@ -144,7 +166,29 @@ async def parse_tiktok(url: str) -> Optional[Dict[str, Any]]:
                                                         "author": d.get("author", {}).get("nickname", "TikTok"),
                                                         "cover": d.get("cover", ""),
                                                         "duration": d.get("duration", 0),
-                                                        "size": d.get("size", 0)
+                                                        "size": d.get("size", 0),
+                                                        "digg_count": digg,
+                                                        "comment_count": comm,
+                                                        "share_count": shares,
+                                                        "music": music_u,
+                                                        "music_info": music_inf
+                                                    }
+                                                images = d.get("images") or []
+                                                if images:
+                                                    return {
+                                                        "success": True,
+                                                        "platform": "tiktok",
+                                                        "is_photo": True,
+                                                        "is_album": len(images) > 1,
+                                                        "photo_urls": images,
+                                                        "music": music_u,
+                                                        "music_info": music_inf,
+                                                        "title": d.get("title", "TikTok Фото") or "TikTok Фото",
+                                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                                        "cover": d.get("cover", ""),
+                                                        "digg_count": digg,
+                                                        "comment_count": comm,
+                                                        "share_count": shares
                                                     }
                             except Exception:
                                 pass
@@ -260,35 +304,59 @@ async def download_tiktok(
             "duration": tikwm_data.get("duration", 0),
             "platform": "tiktok",
             "cover": tikwm_data.get("cover", ""),
-            "filesize": filesize
+            "filesize": filesize,
+            "digg_count": tikwm_data.get("digg_count", 0),
+            "comment_count": tikwm_data.get("comment_count", 0),
+            "share_count": tikwm_data.get("share_count", 0),
+            "music": tikwm_data.get("music"),
+            "music_info": tikwm_data.get("music_info"),
+            "original_url": clean_url
         }
 
     # Сценарий 2: Фото-слайдшоу (карусель)
     if tikwm_data.get("is_photo") and tikwm_data.get("photo_urls"):
         photo_urls = tikwm_data["photo_urls"]
+        digg_cnt = tikwm_data.get("digg_count", 0)
+        comm_cnt = tikwm_data.get("comment_count", 0)
+        share_cnt = tikwm_data.get("share_count", 0)
+        music_url = tikwm_data.get("music")
+        music_inf = tikwm_data.get("music_info")
+
         if len(photo_urls) > 1:
-            album_photos = []
-            for idx, img_u in enumerate(photo_urls[:10]):
+            targets = photo_urls[:30]
+            album_photos = [None] * len(targets)
+
+            async def _dl_slide(idx: int, img_u: str):
                 dest = f"{output_prefix}_{idx}.jpg"
                 try:
                     await download_file_stream(img_u, dest)
                     if os.path.exists(dest) and os.path.getsize(dest) > 1000:
-                        album_photos.append(dest)
+                        album_photos[idx] = dest
                 except Exception as dl_err:
-                    logger.warning(f"TikTok album slide download error: {dl_err}")
-            if len(album_photos) > 1:
+                    logger.warning(f"TikTok album slide {idx} download error: {dl_err}")
+
+            await asyncio.gather(*[_dl_slide(i, u) for i, u in enumerate(targets)])
+            valid_photos = [p for p in album_photos if p]
+
+            if len(valid_photos) > 1:
                 return {
                     "is_album": True,
-                    "photos": album_photos,
+                    "photos": valid_photos,
+                    "file_path": valid_photos[0],
                     "platform": "tiktok",
                     "title": tikwm_data.get("title", "TikTok Слайдшоу"),
-                    "author": tikwm_data.get("author", "TikTok")
+                    "author": tikwm_data.get("author", "TikTok"),
+                    "digg_count": digg_cnt,
+                    "comment_count": comm_cnt,
+                    "share_count": share_cnt,
+                    "music": music_url,
+                    "music_info": music_inf,
+                    "original_url": clean_url
                 }
 
         # Одиночный слайд
         dest_file = f"{output_prefix}.jpg"
         await download_file_stream(photo_urls[0], dest_file)
-        music_url = tikwm_data.get("music")
 
         # Если есть музыка и ffmpeg — склеиваем в видео MP4
         if music_url and ffmpeg_path and os.path.exists(ffmpeg_path):
@@ -316,7 +384,13 @@ async def download_tiktok(
                         "platform": "tiktok",
                         "title": tikwm_data.get("title", "TikTok Видео (Фото со звуком)"),
                         "author": tikwm_data.get("author", "TikTok"),
-                        "filesize": os.path.getsize(mp4_file)
+                        "filesize": os.path.getsize(mp4_file),
+                        "digg_count": digg_cnt,
+                        "comment_count": comm_cnt,
+                        "share_count": share_cnt,
+                        "music": music_url,
+                        "music_info": music_inf,
+                        "original_url": clean_url
                     }
             except Exception as m_err:
                 logger.warning(f"TikTok music merge error: {m_err}")
@@ -327,7 +401,13 @@ async def download_tiktok(
             "title": tikwm_data.get("title", "TikTok Фото"),
             "author": tikwm_data.get("author", "TikTok"),
             "platform": "tiktok",
-            "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0
+            "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0,
+            "digg_count": digg_cnt,
+            "comment_count": comm_cnt,
+            "share_count": share_cnt,
+            "music": music_url,
+            "music_info": music_inf,
+            "original_url": clean_url
         }
 
     raise Exception("tiktok_unsupported_content")
