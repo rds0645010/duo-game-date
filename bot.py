@@ -10,6 +10,7 @@ import time
 import shutil
 import uuid
 import tempfile
+from typing import Optional, Dict, Any, List
 import aiohttp
 from aiohttp import web
 from dotenv import load_dotenv
@@ -200,9 +201,19 @@ def init_db():
             music TEXT,
             music_info_json TEXT,
             chat_id INTEGER,
-            created_at REAL
+            created_at REAL,
+            digg_count INTEGER DEFAULT 0,
+            comment_count INTEGER DEFAULT 0
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE slideshow_sessions ADD COLUMN digg_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE slideshow_sessions ADD COLUMN comment_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -214,8 +225,8 @@ def save_slideshow_session_db(sid: str, data: dict):
         cursor = conn.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO slideshow_sessions 
-            (sid, url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (sid, url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at, digg_count, comment_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             sid,
             data.get("original_url", ""),
@@ -228,7 +239,9 @@ def save_slideshow_session_db(sid: str, data: dict):
             data.get("music", ""),
             json.dumps(data.get("music_info") or {}),
             data.get("chat_id", 0),
-            data.get("created_at", time.time())
+            data.get("created_at", time.time()),
+            data.get("digg_count", 0),
+            data.get("comment_count", 0)
         ))
         conn.commit()
         conn.close()
@@ -245,13 +258,13 @@ def get_slideshow_session_db(sid: str) -> Optional[dict]:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at
+            SELECT url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at, digg_count, comment_count
             FROM slideshow_sessions WHERE sid = ?
         """, (sid,))
         row = cursor.fetchone()
         conn.close()
         if row:
-            u, plat, title, author, total, fids_j, urls_j, mus, mus_inf_j, chat_id, cr_at = row
+            u, plat, title, author, total, fids_j, urls_j, mus, mus_inf_j, chat_id, cr_at, digg, comm = row
             fids = json.loads(fids_j) if fids_j else []
             urls = json.loads(urls_j) if urls_j else []
             mus_inf = json.loads(mus_inf_j) if mus_inf_j else {}
@@ -266,12 +279,43 @@ def get_slideshow_session_db(sid: str) -> Optional[dict]:
                 "original_url": u,
                 "music": mus,
                 "music_info": mus_inf,
+                "digg_count": digg or 0,
+                "comment_count": comm or 0,
                 "chat_id": chat_id,
                 "created_at": cr_at
             }
             _slideshow_cache[sid] = restored
             return restored
     except Exception as e:
+        # Fallback на случай старой таблицы
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at FROM slideshow_sessions WHERE sid = ?", (sid,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                u, plat, title, author, total, fids_j, urls_j, mus, mus_inf_j, chat_id, cr_at = row
+                restored = {
+                    "photos": [],
+                    "file_ids": json.loads(fids_j) if fids_j else [],
+                    "photo_urls": json.loads(urls_j) if urls_j else [],
+                    "total": total,
+                    "title": title,
+                    "author": author,
+                    "platform": plat,
+                    "original_url": u,
+                    "music": mus,
+                    "music_info": json.loads(mus_inf_j) if mus_inf_j else {},
+                    "digg_count": 0,
+                    "comment_count": 0,
+                    "chat_id": chat_id,
+                    "created_at": cr_at
+                }
+                _slideshow_cache[sid] = restored
+                return restored
+        except Exception:
+            pass
         logging.warning(f"Failed to load slideshow session {sid}: {e}")
     return None
 
@@ -787,7 +831,7 @@ IS_ON_RENDER = bool(
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 if not RENDER_EXTERNAL_URL:
-    RENDER_EXTERNAL_URL = "https://duo-game-date.onrender.com"
+    RENDER_EXTERNAL_URL = "https://duo-game-date-bot.onrender.com"
 if not RENDER_EXTERNAL_URL.startswith("http://") and not RENDER_EXTERNAL_URL.startswith("https://"):
     RENDER_EXTERNAL_URL = f"https://{RENDER_EXTERNAL_URL}"
 RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
@@ -989,9 +1033,9 @@ def format_count(n) -> str:
     try:
         val = int(n or 0)
     except (ValueError, TypeError):
-        return "0"
-    if val < 0:
-        return "0"
+        return ""
+    if val <= 0:
+        return ""
     if val < 1000:
         return str(val)
     if val < 1_000_000:
@@ -1015,7 +1059,7 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     plat_raw = (data.get("platform") or "TikTok").capitalize()
     title_raw = (data.get("title") or "").strip()
 
-    # Схлопываем множественные переносы строк, заменяя на пробел или одну строку
+    # Схлопываем множественные переносы строк в один пробел
     title_clean = re.sub(r'[\r\n]+', ' ', title_raw).strip()
     if len(title_clean) > 200:
         title_clean = title_clean[:200].rstrip() + "..."
@@ -1025,7 +1069,10 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     author_esc = html.escape(author_raw)
 
     lines = []
-    if title_esc and title_esc.lower() not in ("instagram альбом", "tiktok слайдшоу", "медиа", "tiktok фото", "instagram публикация"):
+    if title_esc and title_esc.lower() not in (
+        "instagram альбом", "tiktok слайдшоу", "медиа", "tiktok фото",
+        "instagram публикация", "публикация", "фото", "видео"
+    ):
         lines.append(f"📸 <b>{title_esc}</b>")
 
     meta = f"📱 <b>Источник:</b> {plat_raw}"
@@ -1034,18 +1081,18 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     lines.append(meta)
 
     lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
-    return "\n\n".join(lines)
+    # Используем \n вместо \n\n, чтобы не было гигантских пустых пробелов
+    return "\n".join(lines)
 
 
 def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False) -> InlineKeyboardMarkup:
     """
-    Создает интерактивную клавиатуру управления слайдшоу:
+    Создает клавиатуру управления слайдшоу в точности как у @SavXBot:
     Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
-    Ряд 2: [ 💌 Поделиться ] (и [ 🎵 Звук ] если есть трек)
+    Ряд 2: [ ❤️ 51.2K ↗️ ]  [ 💬 368 ↗️ ]  [ 💌 ⤴️ ]  [ 🎵 ↗️ ]
     Ряд 3 (только в ЛС): [ 📥 Скачать все слайды альбомом ] (и [ 🎧 Скачать MP3 ] если есть трек)
-    Без счетчиков лайков и комментариев.
     """
-    # Ряд 1: Интерактивная навигация (активные стрелки / неактивные точки)
+    # Ряд 1: Интерактивная навигация (активные стрелки / неактивные кружочки)
     btn_prev = InlineKeyboardButton(
         text="⬅️" if current_idx > 0 else "🔘",
         callback_data=f"slide:{sid}:{current_idx - 1}" if current_idx > 0 else "slide_noop"
@@ -1060,28 +1107,46 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
     )
     row1 = [btn_prev, btn_counter, btn_next]
 
-    # Ряд 2: Быстрый шеринг и звук (без лишних счетчиков лайков/комментов)
+    # Ряд 2: Точно как у @SavXBot:
+    # 4 кнопки в одну строку: Лайки, Комментарии, Шеринг, Звук
     orig_url = data.get("original_url") or ""
+    post_url = orig_url if orig_url.startswith("http") else "https://t.me"
+
+    digg_cnt = data.get("digg_count") or data.get("likes") or 0
+    comm_cnt = data.get("comment_count") or data.get("comments") or 0
+
+    digg_str = format_count(digg_cnt)
+    comm_str = format_count(comm_cnt)
+
+    btn_likes = InlineKeyboardButton(
+        text=f"❤️ {digg_str}" if digg_str else "❤️",
+        url=post_url
+    )
+    btn_comments = InlineKeyboardButton(
+        text=f"💬 {comm_str}" if comm_str else "💬",
+        url=post_url
+    )
     btn_share = InlineKeyboardButton(
-        text="💌 Поделиться",
+        text="💌",
         switch_inline_query=orig_url
     )
+
+    row2 = [btn_likes, btn_comments, btn_share]
 
     m_info = data.get("music_info") or {}
     m_id = m_info.get("id") if isinstance(m_info, dict) else None
     music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
 
-    row2 = [btn_share]
     if m_id:
-        row2.append(InlineKeyboardButton(text="🎵 Звук", url=f"https://www.tiktok.com/music/-{m_id}"))
+        row2.append(InlineKeyboardButton(text="🎵", url=f"https://www.tiktok.com/music/-{m_id}"))
     elif music_u and str(music_u).startswith("http"):
-        row2.append(InlineKeyboardButton(text="🎵 Звук", url=str(music_u)))
+        row2.append(InlineKeyboardButton(text="🎵", url=str(music_u)))
     elif music_u:
-        row2.append(InlineKeyboardButton(text="🎵 Звук", callback_data=f"music:{sid}"))
+        row2.append(InlineKeyboardButton(text="🎵", callback_data=f"music:{sid}"))
 
     rows = [row1, row2]
 
-    # Ряд 3: Только для личного чата (в инлайне — аккуратный компактный вид)
+    # Ряд 3: Только для личного чата
     if not is_inline:
         row3 = [
             InlineKeyboardButton(
@@ -1105,6 +1170,7 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
 async def process_video_download(message: types.Message, url: str):
     clean_url = extract_url(url) or url
     platform = detect_platform(clean_url)
+    logging.info(f"🚀 [СКАЧИВАНИЕ] Старт: {clean_url} (платформа: {platform}, от user: {message.from_user.id})")
     if not platform:
         await message.answer("⚠️ Не удалось определить платформу. Поддерживаются: TikTok, YouTube Shorts, Reels.")
         return
@@ -1259,6 +1325,8 @@ async def process_video_download(message: types.Message, url: str):
                 "original_url": clean_url,
                 "music": res.get("music"),
                 "music_info": res.get("music_info"),
+                "digg_count": res.get("digg_count", 0),
+                "comment_count": res.get("comment_count", 0),
                 "chat_id": message.chat.id,
                 "created_at": time.time()
             }
@@ -1505,6 +1573,7 @@ async def process_video_download(message: types.Message, url: str):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject = None):
     user = message.from_user
+    logging.info(f"🚀 [КОМАНДА /start] от {user.id} (@{user.username or user.first_name}) args={command.args if command else None}")
     save_user(
         user_id=user.id,
         username=user.username,
@@ -2187,6 +2256,8 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                         "original_url": url,
                         "music": res.get("music"),
                         "music_info": res.get("music_info"),
+                        "digg_count": res.get("digg_count", 0),
+                        "comment_count": res.get("comment_count", 0),
                         "chat_id": 0,
                         "created_at": time.time()
                     }
@@ -2351,6 +2422,8 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
     except ValueError:
         await callback.answer()
         return
+
+    logging.info(f"🖼 [СЛАЙДШОУ] Переключение: sid={sid}, на слайд={new_idx}")
 
     data = get_slideshow_session_db(sid)
     if not data:
@@ -2608,6 +2681,8 @@ async def handle_slide_noop_callback(callback: CallbackQuery):
 async def handle_text_messages(message: types.Message):
     # Проверяем наличие ссылок на видео как в тексте, так и в подписи (при пересылке/шеринге)
     raw_text = message.text or message.caption or ""
+    u_name = message.from_user.username or message.from_user.first_name or "no_user"
+    logging.info(f"📩 [ЛС от {message.from_user.id} (@{u_name})]: {raw_text[:120]}")
     url = extract_url(raw_text)
     if url and detect_platform(url):
         await process_video_download(message, url)
