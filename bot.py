@@ -810,17 +810,16 @@ def create_progress_reporter(status_msg: types.Message, platform_name: str, thro
 def format_friendly_error(e: Exception) -> str:
     """Преобразует любые технические ошибки в понятные объяснения для пользователя."""
     err_text = str(e).lower()
-    if "is_photo_post" in err_text or "no video in this post" in err_text:
+    if "is_photo_post" in err_text:
         return (
-            "📸 <b>В этой публикации находится фотография, а не видео.</b>\n\n"
-            "Бот специализируется на загрузке видеороликов из <b>Reels, TikTok и YouTube Shorts</b>. "
-            "Если автор опубликовал статичную картинку или фото-карусель, видео в ней отсутствует."
+            "📸 <b>Не удалось извлечь фото из этой публикации Instagram.</b>\n\n"
+            "Возможно, публикация удалена, является приватной или автор ограничил доступ для гостей."
         )
     elif "instagram_login_required" in err_text or "empty media response" in err_text:
         return (
-            "🔒 <b>Instagram ограничил доступ к этому ролику.</b>\n\n"
-            "Instagram закрыл анонимный просмотр этого видео (ролик 18+, из закрытого аккаунта или ограничен автором для незарегистрированных пользователей).\n\n"
-            "💡 <i>Ролики из TikTok и YouTube Shorts скачиваются всегда и без ограничений!</i>"
+            "🔒 <b>Instagram ограничил доступ к этой публикации.</b>\n\n"
+            "Instagram закрыл анонимный просмотр (публикация 18+, из закрытого аккаунта или автор ограничил доступ).\n\n"
+            "💡 <i>Публикации из TikTok и YouTube Shorts скачиваются всегда и без ограничений!</i>"
         )
     elif "instagram_video_unavailable" in err_text:
         return (
@@ -898,16 +897,17 @@ def format_count(n) -> str:
 
 def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     """Генерирует аккуратную подпись к слайду фото-карусели."""
-    title_raw = (data.get("title") or "TikTok Фото")[:200]
-    title_esc = html.escape(title_raw)
-    author_raw = (data.get("author") or "TikTok")[:50]
-    author_esc = html.escape(author_raw)
     plat_raw = (data.get("platform") or "TikTok").capitalize()
+    default_title = f"{plat_raw} Альбом"
+    title_raw = (data.get("title") or default_title)[:200]
+    title_esc = html.escape(title_raw)
+    author_raw = (data.get("author") or "")[:50]
+    author_esc = html.escape(author_raw)
     caption = (
         f"📸 <b>{title_esc}</b>\n\n"
         f"📱 <b>Источник:</b> {plat_raw}"
     )
-    if author_esc and author_esc.lower() != "tiktok":
+    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
         caption += f" | {author_esc}"
     caption += f"\n🖼 <b>Слайд:</b> {current_idx + 1} из {total}\n"
     caption += "✨ <i>Скачано через @duo_play_date_bot</i>"
@@ -1119,13 +1119,15 @@ async def process_video_download(message: types.Message, url: str):
         if res.get("is_album") and res.get("photos"):
             photos = res["photos"]
             sid = uuid.uuid4().hex[:10]
+            plat_name = res.get("platform", "tiktok")
+            default_ttl = f"{plat_name.capitalize()} Слайдшоу"
             _slideshow_cache[sid] = {
                 "photos": photos,
                 "file_ids": [None] * len(photos),
                 "total": len(photos),
-                "title": res.get("title", "TikTok Слайдшоу"),
-                "author": res.get("author", "TikTok"),
-                "platform": res.get("platform", "tiktok"),
+                "title": res.get("title") or default_ttl,
+                "author": res.get("author") or "",
+                "platform": plat_name,
                 "original_url": clean_url,
                 "digg_count": res.get("digg_count", 0),
                 "comment_count": res.get("comment_count", 0),
@@ -1141,18 +1143,28 @@ async def process_video_download(message: types.Message, url: str):
                 for k in to_del:
                     _slideshow_cache.pop(k, None)
 
-            first_photo = photos[0]
+            first_file = photos[0]
             caption = make_slide_caption(_slideshow_cache[sid], 0, len(photos))
             kb = build_slideshow_keyboard(sid, 0, len(photos), _slideshow_cache[sid])
-            photo_input = FSInputFile(first_photo)
-            sent = await message.answer_photo(
-                photo=photo_input,
-                caption=caption,
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
-            if sent and sent.photo:
-                _slideshow_cache[sid]["file_ids"][0] = sent.photo[-1].file_id
+            is_vid = first_file.lower().endswith((".mp4", ".mov", ".m4v"))
+            if is_vid:
+                sent = await message.answer_video(
+                    video=FSInputFile(first_file),
+                    caption=caption,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+                if sent and sent.video:
+                    _slideshow_cache[sid]["file_ids"][0] = sent.video.file_id
+            else:
+                sent = await message.answer_photo(
+                    photo=FSInputFile(first_file),
+                    caption=caption,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+                if sent and sent.photo:
+                    _slideshow_cache[sid]["file_ids"][0] = sent.photo[-1].file_id
 
             try:
                 await status_msg.delete()
@@ -2188,19 +2200,25 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
     kb = build_slideshow_keyboard(sid, new_idx, total, data)
 
     cached_fid = data["file_ids"][new_idx]
-    if cached_fid:
-        media_obj = InputMediaPhoto(media=cached_fid, caption=caption, parse_mode="HTML")
+    file_path = data["photos"][new_idx]
+    if not os.path.exists(file_path) and not cached_fid:
+        await callback.answer("❌ Файл слайда больше не доступен на сервере.", show_alert=True)
+        return
+
+    is_vid = file_path.lower().endswith((".mp4", ".mov", ".m4v"))
+    media_target = cached_fid or FSInputFile(file_path)
+    if is_vid:
+        media_obj = InputMediaVideo(media=media_target, caption=caption, parse_mode="HTML")
     else:
-        file_path = data["photos"][new_idx]
-        if not os.path.exists(file_path):
-            await callback.answer("❌ Файл слайда больше не доступен на сервере.", show_alert=True)
-            return
-        media_obj = InputMediaPhoto(media=FSInputFile(file_path), caption=caption, parse_mode="HTML")
+        media_obj = InputMediaPhoto(media=media_target, caption=caption, parse_mode="HTML")
 
     try:
         res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
-        if res_msg and res_msg.photo:
-            data["file_ids"][new_idx] = res_msg.photo[-1].file_id
+        if res_msg:
+            if is_vid and res_msg.video:
+                data["file_ids"][new_idx] = res_msg.video.file_id
+            elif res_msg.photo:
+                data["file_ids"][new_idx] = res_msg.photo[-1].file_id
         await callback.answer()
     except Exception as e:
         logging.debug(f"Slide edit media error: {e}")
@@ -2218,12 +2236,15 @@ async def handle_slide_stat_callback(callback: CallbackQuery):
     digg = data.get("digg_count", 0)
     comm = data.get("comment_count", 0)
     shares = data.get("share_count", 0)
+    plat = (data.get("platform") or "Публикации").capitalize()
     alert_text = (
-        f"📊 Статистика публикации:\n\n"
+        f"📊 Статистика {plat}:\n\n"
         f"❤️ Лайков: {digg:,}\n"
         f"💬 Комментариев: {comm:,}\n"
-        f"🔄 Репостов: {shares:,}"
-    ).replace(",", " ")
+    )
+    if shares > 0:
+        alert_text += f"🔄 Репостов: {shares:,}\n"
+    alert_text = alert_text.replace(",", " ")
     await callback.answer(alert_text, show_alert=True)
 
 
@@ -2272,13 +2293,20 @@ async def handle_slide_album_all_callback(callback: CallbackQuery):
         return
 
     photos = data["photos"]
-    await callback.answer("📥 Отправляю все фото альбомом...")
-    title_esc = html.escape((data.get("title") or "TikTok Слайдшоу")[:200])
-    author_esc = html.escape((data.get("author") or "TikTok")[:50])
+    await callback.answer("📥 Отправляю все слайды альбомом...")
+    plat_raw = (data.get("platform") or "Медиа").capitalize()
+    default_title = f"{plat_raw} Альбом"
+    title_esc = html.escape((data.get("title") or default_title)[:200])
+    author_raw = (data.get("author") or "")[:50]
+    author_esc = html.escape(author_raw)
     album_caption = (
         f"📸 <b>{title_esc}</b>\n\n"
-        f"📱 <b>Источник:</b> TikTok | {author_esc}\n"
-        f"🖼 <b>Всего слайдов:</b> {len(photos)}\n"
+        f"📱 <b>Источник:</b> {plat_raw}"
+    )
+    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
+        album_caption += f" | {author_esc}"
+    album_caption += (
+        f"\n🖼 <b>Всего слайдов:</b> {len(photos)}\n"
         f"✨ <i>Скачано через @duo_play_date_bot</i>"
     )
 
@@ -2288,10 +2316,12 @@ async def handle_slide_album_all_callback(callback: CallbackQuery):
         for i, p_path in enumerate(chunk):
             if os.path.exists(p_path):
                 p_file = FSInputFile(p_path)
+                is_vid = p_path.lower().endswith((".mp4", ".mov", ".m4v"))
+                media_cls = InputMediaVideo if is_vid else InputMediaPhoto
                 if chunk_start == 0 and i == 0:
-                    media_group.append(InputMediaPhoto(media=p_file, caption=album_caption, parse_mode="HTML"))
+                    media_group.append(media_cls(media=p_file, caption=album_caption, parse_mode="HTML"))
                 else:
-                    media_group.append(InputMediaPhoto(media=p_file))
+                    media_group.append(media_cls(media=p_file))
         if media_group:
             try:
                 await callback.message.answer_media_group(media=media_group)
