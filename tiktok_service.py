@@ -156,13 +156,52 @@ async def _parse_tikmate(url: str, proxy: Optional[str] = None) -> Optional[Dict
     return None
 
 
+async def _resolve_tiktok_shortlink(url: str, proxy: Optional[str] = None) -> str:
+    """
+    Разворачивает короткие ссылки vm.tiktok.com / vt.tiktok.com в полный URL,
+    чтобы сразу определить /photo/ или /video/ и передать в парсеры канонический адрес.
+    """
+    if "vm.tiktok.com" not in url and "vt.tiktok.com" not in url:
+        return url
+    try:
+        headers = {
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        attempts = [proxy, None] if proxy else [None]
+        for p in attempts:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url,
+                        allow_redirects=True,
+                        headers=headers,
+                        proxy=p,
+                        timeout=aiohttp.ClientTimeout(total=4.0)
+                    ) as resp:
+                        target = str(resp.url)
+                        if target and ("tiktok.com" in target) and (target != url):
+                            clean = target.split("?")[0]
+                            logger.info(f"🔗 Развернута короткая ссылка: {url} -> {clean}")
+                            return clean
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"Shortlink resolve error: {e}")
+    return url
+
+
 async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module = None) -> Optional[Dict[str, Any]]:
     """
     Быстрый и надежный парсер TikTok через SSSTik, TikWM API и Tikmate.
     Поддерживает Cloudflare WARP для обхода блокировок облачных дата-центров (Render).
     """
+    # 0. Если это короткая ссылка — сначала быстро разворачиваем её в полный URL
+    w_proxy = warp_proxy_module.warp.proxy_url if (warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported) else proxy
+    resolved_url = await _resolve_tiktok_shortlink(url, proxy=w_proxy)
+
     # Очищаем трекинговые параметры (_r, u_code, sharer_language), которые ломают парсинг в облаке
-    target_url = url.split("?")[0] if ("/photo/" in url or "/video/" in url) else url
+    target_url = resolved_url.split("?")[0] if ("/photo/" in resolved_url or "/video/" in resolved_url) else resolved_url
 
     # Формируем цепочку стратегий: WARP (если доступен), затем прямой доступ
     strategies = []
@@ -176,7 +215,7 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
         strategies.append(("proxy", proxy))
     strategies.append(("direct", None))
 
-    is_photo_post = "/photo/" in url or "/photo/" in target_url
+    is_photo_post = "/photo/" in url or "/photo/" in target_url or "/photo/" in resolved_url
 
     for strat_name, strat_proxy in strategies:
         # Для фотопостов (/photo/) SSSTik работает быстрее всего (< 1 сек) и надежно отдает все слайды
@@ -509,15 +548,42 @@ async def download_tiktok(
         if len(photo_urls) > 1:
             targets = photo_urls[:30]
             album_photos = [None] * len(targets)
+            total_slides = len(targets)
+            downloaded_count = 0
+            slide_lock = asyncio.Lock()
 
             async def _dl_slide(idx: int, img_u: str):
+                nonlocal downloaded_count
                 dest = f"{output_prefix}_{idx}.jpg"
                 try:
                     await download_file_stream(img_u, dest, proxy=proxy_url)
+                    # Если файл не скачался (например, 403 от cdn) и это ссылка tikcdn.io — пробуем оригинальный декодированный URL
+                    if (not os.path.exists(dest) or os.path.getsize(dest) < 1000) and "tikcdn.io" in img_u:
+                        m_b64 = re.search(r'tikcdn\.io/ssstik/(?:m/)?([A-Za-z0-9_-]+)', img_u)
+                        if m_b64:
+                            b = m_b64.group(1)
+                            b += '=' * ((4 - len(b) % 4) % 4)
+                            try:
+                                dec = base64.b64decode(b).decode('utf-8', errors='ignore')
+                                if dec.startswith("http"):
+                                    await download_file_stream(dec, dest, proxy=proxy_url)
+                            except Exception:
+                                pass
+
                     if os.path.exists(dest) and os.path.getsize(dest) > 1000:
                         album_photos[idx] = dest
                 except Exception as dl_err:
                     logger.warning(f"TikTok album slide {idx} download error: {dl_err}")
+                finally:
+                    async with slide_lock:
+                        downloaded_count += 1
+                        if progress_callback:
+                            try:
+                                cb = progress_callback(downloaded_count, total_slides, is_slide=True)
+                                if asyncio.iscoroutine(cb):
+                                    await cb
+                            except Exception:
+                                pass
 
             await asyncio.gather(*[_dl_slide(i, u) for i, u in enumerate(targets)])
             valid_photos = [p for p in album_photos if p]
@@ -541,43 +607,13 @@ async def download_tiktok(
         # Одиночный слайд
         dest_file = f"{output_prefix}.jpg"
         await download_file_stream(photo_urls[0], dest_file, proxy=proxy_url)
-
-        # Если есть музыка и ffmpeg — склеиваем в видео MP4
-        if music_url and ffmpeg_path and os.path.exists(ffmpeg_path):
-            audio_file = f"{output_prefix}.mp3"
-            mp4_file = f"{output_prefix}.mp4"
+        if progress_callback:
             try:
-                await download_file_stream(music_url, audio_file, proxy=proxy_url)
-                import subprocess
-                cmd = [
-                    ffmpeg_path, "-y", "-loop", "1", "-i", dest_file,
-                    "-i", audio_file, "-c:v", "libx264", "-tune", "stillimage",
-                    "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
-                    "-shortest", "-movflags", "+faststart", mp4_file
-                ]
-                proc = await asyncio.to_thread(
-                    subprocess.run, cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25
-                )
-                if proc.returncode == 0 and os.path.exists(mp4_file):
-                    for tmp in (audio_file, dest_file):
-                        if os.path.exists(tmp):
-                            try: os.remove(tmp)
-                            except OSError: pass
-                    return {
-                        "file_path": mp4_file,
-                        "platform": "tiktok",
-                        "title": tikwm_data.get("title", "TikTok Видео (Фото со звуком)"),
-                        "author": tikwm_data.get("author", "TikTok"),
-                        "filesize": os.path.getsize(mp4_file),
-                        "digg_count": digg_cnt,
-                        "comment_count": comm_cnt,
-                        "share_count": share_cnt,
-                        "music": music_url,
-                        "music_info": music_inf,
-                        "original_url": clean_url
-                    }
-            except Exception as m_err:
-                logger.warning(f"TikTok music merge error: {m_err}")
+                cb = progress_callback(1, 1, is_slide=True)
+                if asyncio.iscoroutine(cb):
+                    await cb
+            except Exception:
+                pass
 
         return {
             "file_path": dest_file,

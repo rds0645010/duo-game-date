@@ -132,6 +132,62 @@ def detect_platform(text: str):
         return "instagram"
     return None
 
+
+def detect_content_info(url: str) -> Dict[str, str]:
+    """
+    Возвращает платформу, вероятный тип контента, значок и понятную человеку метку.
+    Устраняет проблему, когда на фотопосты из Instagram или TikTok бот пишет 'Скачиваю Reels/ролик'.
+    """
+    u_lower = (url or "").lower()
+    if "tiktok.com" in u_lower:
+        if "/photo/" in u_lower:
+            return {
+                "platform": "tiktok",
+                "media_type": "photo",
+                "label": "фото-слайдшоу из TikTok",
+                "icon": "📸",
+            }
+        return {
+            "platform": "tiktok",
+            "media_type": "video",
+            "label": "видео из TikTok",
+            "icon": "🎬",
+        }
+    if "instagram.com" in u_lower:
+        if "/p/" in u_lower:
+            return {
+                "platform": "instagram",
+                "media_type": "post",
+                "label": "публикацию из Instagram",
+                "icon": "📸",
+            }
+        return {
+            "platform": "instagram",
+            "media_type": "reel",
+            "label": "Instagram Reels",
+            "icon": "🎬",
+        }
+    if "youtu.be" in u_lower or "youtube.com" in u_lower:
+        if "/shorts/" in u_lower:
+            return {
+                "platform": "youtube",
+                "media_type": "shorts",
+                "label": "YouTube Shorts",
+                "icon": "🎬",
+            }
+        return {
+            "platform": "youtube",
+            "media_type": "video",
+            "label": "видео из YouTube",
+            "icon": "🎬",
+        }
+    return {
+        "platform": "unknown",
+        "media_type": "media",
+        "label": "медиа",
+        "icon": "⚡",
+    }
+
 def extract_url(text: str):
     if not text:
         return None

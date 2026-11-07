@@ -183,7 +183,8 @@ async def _download_from_instagram_meta(
     clean_url: str,
     proxy_url: Optional[str],
     download_file_func,
-    is_valid_mp4_func = None
+    is_valid_mp4_func = None,
+    progress_callback = None
 ) -> Optional[Dict[str, Any]]:
     """
     Скачивает слайды карусели, фото или видео на основе структуры метаданных yt-dlp.
@@ -212,42 +213,55 @@ async def _download_from_instagram_meta(
     if raw_entries and isinstance(raw_entries, list) and len(raw_entries) > 1:
         targets = raw_entries[:30]
         album_files = [None] * len(targets)
+        total_slides = len(targets)
+        downloaded_slides = 0
+        slide_lock = asyncio.Lock()
 
         async def _dl_slide(idx: int, item: Dict[str, Any]):
+            nonlocal downloaded_slides
             if not item:
                 return
-            # Если в слайде есть видео
-            v_formats = [f for f in item.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
-            if v_formats:
-                best_v = max(v_formats, key=lambda f: f.get("height") or 0)
-                dest = f"{output_prefix}_{idx}.mp4"
-                try:
-                    await download_file_func(best_v["url"], dest, proxy=proxy_url)
-                    if os.path.exists(dest) and (not is_valid_mp4_func or is_valid_mp4_func(dest)):
-                        album_files[idx] = dest
-                        return
-                except Exception as dl_err:
-                    logger.debug(f"Instagram carousel slide {idx} video download failed: {dl_err}")
+            try:
+                # Если в слайде есть видео
+                v_formats = [f for f in item.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
+                if v_formats:
+                    best_v = max(v_formats, key=lambda f: f.get("height") or 0)
+                    dest = f"{output_prefix}_{idx}.mp4"
+                    try:
+                        await download_file_func(best_v["url"], dest, proxy=proxy_url)
+                        if os.path.exists(dest) and (not is_valid_mp4_func or is_valid_mp4_func(dest)):
+                            album_files[idx] = dest
+                            return
+                    except Exception as dl_err:
+                        logger.debug(f"Instagram carousel slide {idx} video download failed: {dl_err}")
 
-            # Иначе берем лучшее фото (из thumbnails, url или display_url)
-            thumbs = item.get("thumbnails", [])
-            photo_url = None
-            if thumbs:
-                best_t = max(thumbs, key=lambda t: (t.get("width") or 0) * (t.get("height") or 0))
-                photo_url = best_t.get("url")
-            if not photo_url:
-                photo_url = item.get("url") or item.get("display_url")
-            if photo_url:
-                dest = f"{output_prefix}_{idx}.jpg"
-                try:
-                    await download_file_func(photo_url, dest, proxy=proxy_url)
-                    if os.path.exists(dest) and os.path.getsize(dest) > 1000:
-                        album_files[idx] = dest
-                        return
-                except Exception as dl_err:
-                    logger.debug(f"Instagram carousel slide {idx} photo download failed: {dl_err}")
-
-        await asyncio.gather(*[_dl_slide(i, item) for i, item in enumerate(targets)])
+                # Иначе берем лучшее фото (из thumbnails, url или display_url)
+                thumbs = item.get("thumbnails", [])
+                photo_url = None
+                if thumbs:
+                    best_t = max(thumbs, key=lambda t: (t.get("width") or 0) * (t.get("height") or 0))
+                    photo_url = best_t.get("url")
+                if not photo_url:
+                    photo_url = item.get("url") or item.get("display_url")
+                if photo_url:
+                    dest = f"{output_prefix}_{idx}.jpg"
+                    try:
+                        await download_file_func(photo_url, dest, proxy=proxy_url)
+                        if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                            album_files[idx] = dest
+                            return
+                    except Exception as dl_err:
+                        logger.debug(f"Instagram carousel slide {idx} photo download failed: {dl_err}")
+            finally:
+                async with slide_lock:
+                    downloaded_slides += 1
+                    if progress_callback:
+                        try:
+                            cb = progress_callback(downloaded_slides, total_slides, is_slide=True)
+                            if asyncio.iscoroutine(cb):
+                                await cb
+                        except Exception:
+                            pass
         valid_files = [f for f in album_files if f]
 
         if len(valid_files) > 1:
@@ -385,7 +399,7 @@ async def download_instagram(
                 info = await asyncio.to_thread(_extract_instagram_metadata_sync, clean_url, strategy_proxy, cookie_file)
                 if info:
                     media_res = await _download_from_instagram_meta(
-                        info, output_prefix, clean_url, strategy_proxy, download_file_func, is_valid_mp4_func
+                        info, output_prefix, clean_url, strategy_proxy, download_file_func, is_valid_mp4_func, progress_callback=progress_callback
                     )
                     if media_res:
                         logger.info(f"✅ [Instagram] Фото/карусель получена через {strategy_name}")
@@ -478,7 +492,7 @@ async def download_instagram(
                 info = await asyncio.to_thread(_extract_instagram_metadata_sync, clean_url, strategy_proxy, cookie_file)
                 if info:
                     media_res = await _download_from_instagram_meta(
-                        info, output_prefix, clean_url, strategy_proxy, download_file_func, is_valid_mp4_func
+                        info, output_prefix, clean_url, strategy_proxy, download_file_func, is_valid_mp4_func, progress_callback=progress_callback
                     )
                     if media_res:
                         logger.info(f"✅ [Instagram] Фото/карусель получена через {strategy_name} (фоллбэк)")

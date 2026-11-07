@@ -39,6 +39,7 @@ from aiogram.types import (
 )
 from downloader import (
     detect_platform,
+    detect_content_info,
     extract_url,
     extract_all_media_urls,
     download_video,
@@ -867,70 +868,114 @@ async def safe_edit_status(msg: types.Message, text: str):
         logging.debug(f"Status edit ignored: {e}")
 
 
-def create_progress_reporter(status_msg: types.Message, platform_name: str, throttle_seconds: float = 1.3):
+def create_progress_reporter(status_msg: types.Message, content_info_or_name, throttle_seconds: float = 1.0):
     """
-    Создает троттлинговый прогресс-репортер для редактирования статусного сообщения Telegram.
-    Троттлинг 1.3-1.5 сек предотвращает ошибки Telegram 429 Flood Control.
+    Создает интерактивный живой прогресс-репортер с прогресс-баром для статусного сообщения Telegram.
+    Поддерживает:
+    - Индикацию байтов для видео (МБ, скорость, ETA);
+    - Индикацию слайдов для фото-каруселей (например, 2 из 7);
+    - Понятные названия и значки (фото, видео, Reels, Shorts);
+    - Троттлинг 1.0 сек для защиты от Telegram 429 Flood Control.
     """
     last_update = 0.0
     last_rendered_pct = -1.0
 
-    async def update_progress(downloaded: int, total: int, speed: float = 0.0, eta: float = 0.0):
+    if isinstance(content_info_or_name, dict):
+        label = content_info_or_name.get("label") or "медиа"
+        icon = content_info_or_name.get("icon") or "⚡"
+    else:
+        label = str(content_info_or_name or "медиа")
+        icon = "⚡"
+
+    async def update_progress(downloaded: int, total: int, speed: float = 0.0, eta: float = 0.0, is_slide: bool = False, phase: str = ""):
         nonlocal last_update, last_rendered_pct
         if not status_msg:
             return
 
         now = time.time()
 
-        # Финализация / склейка потоков
+        # Финализация / отправка
         if downloaded == -1:
-            if now - last_update >= 1.0:
+            if now - last_update >= 0.8:
                 last_update = now
                 await safe_edit_status(
                     status_msg,
-                    f"⚙️ <b>Обрабатываю {platform_name}...</b>\n"
-                    f"<code>[████████████] 100%</code>\n"
-                    f"Финализирую файл и готовлю к отправке..."
+                    f"📤 <b>Отправляю в Telegram...</b>\n"
+                    f"<code>[████████████] 100%</code>"
                 )
             return
 
-        if total <= 0:
+        # Пользовательская фаза (например, подключение или парсинг)
+        if phase and total <= 0:
+            if now - last_update >= throttle_seconds:
+                last_update = now
+                await safe_edit_status(
+                    status_msg,
+                    f"{icon} <b>Загружаю {label}...</b>\n"
+                    f"<code>[███░░░░░░░░░] 25%</code>\n"
+                    f"ℹ️ {phase}"
+                )
+            return
+
+        # Слайды фото-карусели (например, 2 из 5 слайдов)
+        if is_slide or (0 < total <= 50 and downloaded <= total):
+            pct = min(100.0, max(0.0, (downloaded / total) * 100.0))
+            if (now - last_update < throttle_seconds) and abs(pct - last_rendered_pct) < 15 and pct < 100:
+                return
+
+            last_update = now
+            last_rendered_pct = pct
+
+            bar_len = 12
+            filled = int(round(bar_len * pct / 100.0))
+            bar = "█" * filled + "░" * (bar_len - filled)
+
+            text = (
+                f"📸 <b>Скачиваю фото-слайды ({downloaded} из {total})...</b>\n"
+                f"<code>[{bar}] {int(pct)}%</code>\n"
+                f"✨ Готовлю слайдшоу для просмотра..."
+            )
+            await safe_edit_status(status_msg, text)
+            return
+
+        # Потоковое скачивание видео по байтам
+        if total > 0:
+            pct = min(100.0, max(0.0, (downloaded / total) * 100.0))
+            if (now - last_update < throttle_seconds) and abs(pct - last_rendered_pct) < 10 and pct < 100:
+                return
+
+            last_update = now
+            last_rendered_pct = pct
+
+            bar_len = 12
+            filled = int(round(bar_len * pct / 100.0))
+            bar = "█" * filled + "░" * (bar_len - filled)
+
+            cur_mb = downloaded / (1024 * 1024)
+            tot_mb = total / (1024 * 1024)
+            spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
+            eta_str = f"\n⏱ Осталось: ~{max(1, int(round(eta)))} сек" if eta > 0 else ""
+
+            text = (
+                f"{icon} <b>Скачиваю {label}...</b>\n"
+                f"<code>[{bar}] {int(pct)}%</code>\n"
+                f"📊 {cur_mb:.1f} из {tot_mb:.1f} МБ{spd_str}{eta_str}"
+            )
+            await safe_edit_status(status_msg, text)
+            return
+
+        # Поток без известного размера
+        if total <= 0 and downloaded > 0:
             if now - last_update >= throttle_seconds:
                 last_update = now
                 cur_mb = downloaded / (1024 * 1024)
                 spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
                 await safe_edit_status(
                     status_msg,
-                    f"⚡ <b>Скачиваю {platform_name}...</b>\n"
+                    f"{icon} <b>Скачиваю {label}...</b>\n"
                     f"📊 Загружено: {cur_mb:.1f} МБ{spd_str}"
                 )
             return
-
-        pct = min(100.0, max(0.0, (downloaded / total) * 100.0))
-
-        # Не спамим правками, если прошло мало времени и процент почти не изменился
-        if (now - last_update < throttle_seconds) and abs(pct - last_rendered_pct) < 15:
-            return
-
-        last_update = now
-        last_rendered_pct = pct
-
-        bar_len = 12
-        filled = int(round(bar_len * pct / 100.0))
-        bar = "█" * filled + "░" * (bar_len - filled)
-
-        cur_mb = downloaded / (1024 * 1024)
-        tot_mb = total / (1024 * 1024)
-
-        spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
-        eta_str = f"\n⏱ Осталось: ~{max(1, int(round(eta)))} сек" if eta > 0 else ""
-
-        text = (
-            f"⚡ <b>Скачиваю {platform_name}...</b>\n"
-            f"<code>[{bar}] {int(pct)}%</code>\n"
-            f"📊 {cur_mb:.1f} из {tot_mb:.1f} МБ{spd_str}{eta_str}"
-        )
-        await safe_edit_status(status_msg, text)
 
     return update_progress
 
@@ -1216,19 +1261,20 @@ async def process_video_download(message: types.Message, url: str):
 
     is_vip = str(user_id) in ADMIN_IDS
 
-    target_platform = detect_platform(clean_url) or "youtube"
+    c_info = detect_content_info(clean_url)
+    target_platform = c_info.get("platform") or detect_platform(clean_url) or "youtube"
     if target_platform == "tiktok":
         sem = TIKTOK_SEMAPHORE
         lock = tiktok_lock
-        p_name = "TikTok"
     elif target_platform == "instagram":
         sem = INSTAGRAM_SEMAPHORE
         lock = instagram_lock
-        p_name = "Instagram Reels"
     else:
         sem = YOUTUBE_SEMAPHORE
         lock = youtube_lock
-        p_name = "YouTube Shorts"
+
+    p_label = c_info.get("label", "медиа")
+    p_icon = c_info.get("icon", "⚡")
 
     status_msg = None
     queue_acquired = False
@@ -1251,21 +1297,27 @@ async def process_video_download(message: types.Message, url: str):
                     youtube_waiting_count += 1
                     pos = youtube_waiting_count
             status_msg = await message.answer(
-                f"⏳ <b>В очереди на скачивание {p_name}...</b>\n"
+                f"⏳ <b>В очереди на загрузку ({p_label})...</b>\n"
                 f"Твоя позиция: {pos}. Ожидаем завершения предыдущих загрузок 🚀",
                 parse_mode="HTML"
             )
         else:
             status_msg = await message.answer(
-                f"⚡ <b>Обрабатываю {p_name}...</b>\n"
-                "Скачиваем в максимальном качестве без водяных знаков...",
+                f"{p_icon} <b>Загружаю {p_label}...</b>\n"
+                f"<code>[██░░░░░░░░░░] 15%</code>\n"
+                f"🔍 Получаю данные публикации...",
                 parse_mode="HTML"
             )
 
         # VIP пользователи имеют безусловный приоритет
         if is_vip:
             queue_acquired = True
-            await safe_edit_status(status_msg, f"👑 <b>VIP приоритет активен!</b>\nСкачиваю {p_name} вне очереди...")
+            await safe_edit_status(
+                status_msg,
+                f"👑 <b>VIP приоритет активен!</b>\n"
+                f"<code>[███░░░░░░░░░] 25%</code>\n"
+                f"Загружаю {p_label} вне очереди..."
+            )
         else:
             await sem.acquire()
             queue_acquired = True
@@ -1276,13 +1328,22 @@ async def process_video_download(message: types.Message, url: str):
                     instagram_waiting_count -= 1
                 elif target_platform == "youtube" and youtube_waiting_count > 0:
                     youtube_waiting_count -= 1
-            await safe_edit_status(status_msg, f"⚡ <b>Скачиваю {p_name}...</b>\nОчищаю от водяных знаков и готовлю к отправке...")
+            await safe_edit_status(
+                status_msg,
+                f"{p_icon} <b>Загружаю {p_label}...</b>\n"
+                f"<code>[███░░░░░░░░░] 25%</code>\n"
+                f"Подключаюсь и начинаю скачивание..."
+            )
 
         # Выполняем скачивание с живым прогресс-баром
-        progress_cb = create_progress_reporter(status_msg, p_name)
+        progress_cb = create_progress_reporter(status_msg, c_info)
         res = await download_video(clean_url, user_id, progress_callback=progress_cb)
         if not res or not isinstance(res, dict):
-            await safe_edit_status(status_msg, "❌ <b>Не удалось скачать видео.</b>\nВозможно, видео удалено или автор ограничил доступ.")
+            await safe_edit_status(
+                status_msg,
+                f"❌ <b>Не удалось загрузить {p_label}.</b>\n"
+                f"Возможно, публикация удалена или автор ограничил доступ."
+            )
             return
 
         # 🖼 СНАЧАЛА проверяем: если это фото-слайдшоу (альбом картинок)
@@ -1290,6 +1351,12 @@ async def process_video_download(message: types.Message, url: str):
             photos = res.get("photos") or []
             photo_urls = res.get("photo_urls") or []
             total_slides = max(len(photos), len(photo_urls))
+            await safe_edit_status(
+                status_msg,
+                f"📸 <b>Подготавливаю слайдшоу ({total_slides} слайдов)...</b>\n"
+                f"<code>[████████████] 100%</code>\n"
+                f"Отправляю в Telegram..."
+            )
             sid = uuid.uuid4().hex[:10]
             plat_name = res.get("platform", "tiktok")
             default_ttl = f"{plat_name.capitalize()} Слайдшоу"
@@ -1395,29 +1462,21 @@ async def process_video_download(message: types.Message, url: str):
                 pass
             return
 
-        # Проверка размера (Telegram Bot API лимит 50 МБ)
-        if file_size > 50 * 1024 * 1024:
-            await safe_edit_status(
-                status_msg,
-                f"⚠️ <b>Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)</b>\n\n"
-                f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
-                f"Попробуй более короткое видео или шортс."
-            )
-            return
-
-        file_size_mb = round(file_size / (1024 * 1024), 1)
-        await safe_edit_status(status_msg, f"📤 <b>Отправляю чистое видео в Telegram ({file_size_mb} МБ)...</b>")
-        try:
-            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
-        except Exception:
-            pass
-
         # 📸 Если в посте оказалась одиночная фотография
         if res.get("is_photo"):
+            await safe_edit_status(
+                status_msg,
+                "📸 <b>Отправляю фото в Telegram...</b>\n<code>[████████████] 100%</code>"
+            )
+            try:
+                await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
+            except Exception:
+                pass
+
+            plat_disp = "Instagram" if res.get("platform") == "instagram" else ("TikTok" if res.get("platform") == "tiktok" else "Медиа")
             photo_caption = (
                 f"📸 <b>{title_esc}</b>\n\n"
-                f"📱 <b>Источник:</b> {plat_str}\n"
-                f"ℹ️ <i>(В публикации было фото, а не видео — сохранено в исходном качестве)</i>\n"
+                f"📱 <b>Источник:</b> {plat_disp}\n"
                 f"✨ <i>Скачано через @duo_play_date_bot</i>"
             )
             photo_input = FSInputFile(file_path)
@@ -1450,6 +1509,26 @@ async def process_video_download(message: types.Message, url: str):
             except Exception:
                 pass
             return
+
+        # Проверка размера (Telegram Bot API лимит 50 МБ)
+        if file_size > 50 * 1024 * 1024:
+            await safe_edit_status(
+                status_msg,
+                f"⚠️ <b>Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)</b>\n\n"
+                f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
+                f"Попробуй более короткое видео или шортс."
+            )
+            return
+
+        file_size_mb = round(file_size / (1024 * 1024), 1)
+        await safe_edit_status(
+            status_msg,
+            f"🎬 <b>Отправляю чистое видео ({file_size_mb} МБ)...</b>\n<code>[████████████] 100%</code>"
+        )
+        try:
+            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
+        except Exception:
+            pass
 
         caption = f"🎬 <b>{title_esc}</b>\n\n📱 <b>Источник:</b> {plat_str}"
         if author_esc:
