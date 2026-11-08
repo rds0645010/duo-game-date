@@ -858,27 +858,48 @@ def get_app_url():
     return base
 
 
-async def safe_edit_status(msg: types.Message, text: str):
-    """Безопасное обновление статуса без вылета по ошибкам Telegram."""
-    if not msg:
+async def safe_edit_status(
+    msg: Optional[types.Message] = None,
+    text: str = "",
+    inline_message_id: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None
+):
+    """Безопасное обновление статуса без вылета по ошибкам Telegram (в ЛС или через inline_message_id)."""
+    if not msg and not inline_message_id:
         return
     try:
-        await msg.edit_text(text, parse_mode="HTML")
+        if inline_message_id:
+            await bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif msg:
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
         logging.debug(f"Status edit ignored: {e}")
 
 
-def create_progress_reporter(status_msg: types.Message, content_info_or_name, throttle_seconds: float = 1.0):
+def create_progress_reporter(
+    status_msg: Optional[types.Message] = None,
+    content_info_or_name=None,
+    inline_message_id: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    throttle_seconds: float = 1.0
+):
     """
     Создает интерактивный живой прогресс-репортер с прогресс-баром для статусного сообщения Telegram.
     Поддерживает:
     - Индикацию байтов для видео (МБ, скорость, ETA);
     - Индикацию слайдов для фото-каруселей (например, 2 из 7);
     - Понятные названия и значки (фото, видео, Reels, Shorts);
-    - Троттлинг 1.0 сек для защиты от Telegram 429 Flood Control.
+    - Троттлинг для защиты от Telegram 429 Flood Control;
+    - Работает как в личном чате (status_msg), так и в инлайн-чате с другом (inline_message_id).
     """
     last_update = 0.0
     last_rendered_pct = -1.0
+    last_rendered_text = ""
 
     if isinstance(content_info_or_name, dict):
         label = content_info_or_name.get("label") or "медиа"
@@ -888,8 +909,8 @@ def create_progress_reporter(status_msg: types.Message, content_info_or_name, th
         icon = "⚡"
 
     async def update_progress(downloaded: int, total: int, speed: float = 0.0, eta: float = 0.0, is_slide: bool = False, phase: str = ""):
-        nonlocal last_update, last_rendered_pct
-        if not status_msg:
+        nonlocal last_update, last_rendered_pct, last_rendered_text
+        if not status_msg and not inline_message_id:
             return
 
         now = time.time()
@@ -898,23 +919,37 @@ def create_progress_reporter(status_msg: types.Message, content_info_or_name, th
         if downloaded == -1:
             if now - last_update >= 0.8:
                 last_update = now
-                await safe_edit_status(
-                    status_msg,
+                text = (
                     f"📤 <b>Отправляю в Telegram...</b>\n"
                     f"<code>[████████████] 100%</code>"
                 )
+                if text != last_rendered_text:
+                    last_rendered_text = text
+                    await safe_edit_status(
+                        msg=status_msg,
+                        text=text,
+                        inline_message_id=inline_message_id,
+                        reply_markup=reply_markup
+                    )
             return
 
         # Пользовательская фаза (например, подключение или парсинг)
         if phase and total <= 0:
             if now - last_update >= throttle_seconds:
                 last_update = now
-                await safe_edit_status(
-                    status_msg,
+                text = (
                     f"{icon} <b>Загружаю {label}...</b>\n"
                     f"<code>[███░░░░░░░░░] 25%</code>\n"
                     f"ℹ️ {phase}"
                 )
+                if text != last_rendered_text:
+                    last_rendered_text = text
+                    await safe_edit_status(
+                        msg=status_msg,
+                        text=text,
+                        inline_message_id=inline_message_id,
+                        reply_markup=reply_markup
+                    )
             return
 
         # Слайды фото-карусели (например, 2 из 5 слайдов)
@@ -935,7 +970,14 @@ def create_progress_reporter(status_msg: types.Message, content_info_or_name, th
                 f"<code>[{bar}] {int(pct)}%</code>\n"
                 f"✨ Готовлю слайдшоу для просмотра..."
             )
-            await safe_edit_status(status_msg, text)
+            if text != last_rendered_text:
+                last_rendered_text = text
+                await safe_edit_status(
+                    msg=status_msg,
+                    text=text,
+                    inline_message_id=inline_message_id,
+                    reply_markup=reply_markup
+                )
             return
 
         # Потоковое скачивание видео по байтам
@@ -961,7 +1003,14 @@ def create_progress_reporter(status_msg: types.Message, content_info_or_name, th
                 f"<code>[{bar}] {int(pct)}%</code>\n"
                 f"📊 {cur_mb:.1f} из {tot_mb:.1f} МБ{spd_str}{eta_str}"
             )
-            await safe_edit_status(status_msg, text)
+            if text != last_rendered_text:
+                last_rendered_text = text
+                await safe_edit_status(
+                    msg=status_msg,
+                    text=text,
+                    inline_message_id=inline_message_id,
+                    reply_markup=reply_markup
+                )
             return
 
         # Поток без известного размера
@@ -970,12 +1019,21 @@ def create_progress_reporter(status_msg: types.Message, content_info_or_name, th
                 last_update = now
                 cur_mb = downloaded / (1024 * 1024)
                 spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
-                await safe_edit_status(
-                    status_msg,
+                text = (
                     f"{icon} <b>Скачиваю {label}...</b>\n"
                     f"📊 Загружено: {cur_mb:.1f} МБ{spd_str}"
                 )
+                if text != last_rendered_text:
+                    last_rendered_text = text
+                    await safe_edit_status(
+                        msg=status_msg,
+                        text=text,
+                        inline_message_id=inline_message_id,
+                        reply_markup=reply_markup
+                    )
             return
+
+    return update_progress
 
     return update_progress
 
@@ -2127,31 +2185,28 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=results, cache_time=10, is_personal=True)
         return
 
-    # Названия и официальные иконки платформ (стиль SavXBot)
+    # Названия и официальные иконки платформ (стиль SavXBot с определением типа медиа)
+    c_info = detect_content_info(clean_url)
+    p_noun = c_info.get("label", "медиа")
+    p_icon = c_info.get("icon", "🎬")
+    plat_source = c_info.get("platform", "").capitalize() or "Медиа"
+
     if platform == "instagram":
-        plat_noun = "Reel"
-        plat_source = "Instagram"
         plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/instagram.png"
     elif platform == "tiktok":
-        plat_noun = "видео"
-        plat_source = "TikTok"
         plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tiktok.png"
     elif platform == "youtube":
-        plat_noun = "Shorts"
-        plat_source = "YouTube"
         plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
     else:
-        plat_noun = "видео"
-        plat_source = "Видео"
         plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
 
-    inline_title = f"💌 Поделиться {plat_noun} из {plat_source}"
+    inline_title = f"💌 Поделиться {p_noun}"
 
     def _make_caption(title_text: str, is_photo: bool = False) -> str:
         if not caption_enabled:
             return None
-        t = html.escape((title_text or plat_noun)[:200])
-        icon = "📸" if is_photo else "🎬"
+        t = html.escape((title_text or p_noun)[:200])
+        icon = p_icon if not is_photo else "📸"
         return f"{icon} <b>{t}</b>\n\n📱 {plat_source} | ✨ <i>через @duo_play_date_bot</i>"
 
     # ─── 2. КЭШ: если видео уже есть — МГНОВЕННО ───
@@ -2223,24 +2278,25 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     loading_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data=f"get_vid:{token}")]
+            [InlineKeyboardButton(text=f"⏳ Загрузка {p_noun}...", callback_data=f"get_vid:{token}")]
         ]
     )
 
     article_result = InlineQueryResultArticle(
         id=fresh_id,
         title=inline_title,
-        description="Нажми, чтобы чистое видео улетело прямо в чат ✨",
+        description=f"Нажми, чтобы {p_noun} улетело прямо в чат ✨",
         thumbnail_url=plat_icon,
         input_message_content=InputTextMessageContent(
-            message_text=f"⏳ <b>Загружаю {plat_noun} из {plat_source}...</b>\n<i>Скоро появится в этом сообщении ✨</i>",
+            message_text=(
+                f"{p_icon} <b>Загружаю {p_noun}...</b>\n"
+                f"<code>[██░░░░░░░░░░] 15%</code>\n"
+                f"<i>Скоро появится в этом сообщении ✨</i>"
+            ),
             parse_mode="HTML"
         ),
         reply_markup=loading_kb
     )
-
-    # Запускаем фоновую докачку на сервере, чтобы к моменту клика файл уже скачивался
-    asyncio.create_task(pre_cache_video_to_disk(clean_url, token))
 
     try:
         await inline_query.answer(results=[article_result], cache_time=0, is_personal=True)
@@ -2254,7 +2310,7 @@ async def inline_query_handler(inline_query: InlineQuery):
 _active_inline_jobs = set()
 
 async def execute_inline_delivery(inline_message_id: str, token: str, user_id: int):
-    """Единая функция выполнения скачивания и подмены сообщения в инлайне."""
+    """Единая функция выполнения скачивания и подмены сообщения в инлайне с живым прогресс-баром."""
     job_key = f"{inline_message_id}_{token}"
     if job_key in _active_inline_jobs:
         return
@@ -2273,6 +2329,16 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                 pass
             return
 
+        c_info = detect_content_info(url)
+        p_noun = c_info.get("label", "медиа")
+        p_icon = c_info.get("icon", "⚡")
+
+        loading_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"⏳ Загрузка {p_noun}...", callback_data=f"get_vid:{token}")]
+            ]
+        )
+
         cached = get_cached_media(url)
         file_id = cached.get("file_id") if cached else None
         is_photo = (cached.get("media_type") == "photo") if cached else False
@@ -2284,22 +2350,43 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
 
         if not file_id:
             try:
-                # 1. Проверяем, успела ли фоновая предзагрузка скачать файл на диск
-                pre_path = _stream_files.get(token)
-                if pre_path and os.path.exists(pre_path) and is_valid_mp4_file(pre_path):
-                    res = {
-                        "file_path": pre_path,
-                        "title": "Видео",
-                        "platform": detect_platform(url) or ""
-                    }
-                else:
-                    res = await download_video(url, user_id)
+                # Первичный статус в чате друга
+                await safe_edit_status(
+                    inline_message_id=inline_message_id,
+                    text=(
+                        f"{p_icon} <b>Загружаю {p_noun}...</b>\n"
+                        f"<code>[███░░░░░░░░░] 25%</code>\n"
+                        f"🔍 Подключаюсь и начинаю скачивание..."
+                    ),
+                    reply_markup=loading_kb
+                )
+
+                # Прогресс-репортер с троттлингом для inline
+                progress_cb = create_progress_reporter(
+                    status_msg=None,
+                    content_info_or_name=c_info,
+                    inline_message_id=inline_message_id,
+                    reply_markup=loading_kb,
+                    throttle_seconds=1.2
+                )
+                res = await download_video(url, user_id, progress_callback=progress_cb)
 
                 # 🖼 Обработка каруселей/слайдшоу в инлайн-режиме
                 if res and isinstance(res, dict) and res.get("is_album") and (res.get("photos") or res.get("photo_urls")):
                     photos = res.get("photos") or []
                     photo_urls = res.get("photo_urls") or []
                     total_slides = max(len(photos), len(photo_urls))
+
+                    await safe_edit_status(
+                        inline_message_id=inline_message_id,
+                        text=(
+                            f"📸 <b>Подготавливаю слайдшоу ({total_slides} слайдов)...</b>\n"
+                            f"<code>[████████████] 100%</code>\n"
+                            f"✨ Отправляю в чат..."
+                        ),
+                        reply_markup=loading_kb
+                    )
+
                     sid = uuid.uuid4().hex[:10]
                     plat_name = res.get("platform", "tiktok")
                     default_ttl = f"{plat_name.capitalize()} Слайдшоу"
@@ -2334,15 +2421,35 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     is_vid = str(media_target).lower().endswith((".mp4", ".mov", ".m4v"))
                     media_cls = InputMediaVideo if is_vid else InputMediaPhoto
                     if media_target:
-                        await bot.edit_message_media(
-                            inline_message_id=inline_message_id,
-                            media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
-                            reply_markup=kb
-                        )
+                        try:
+                            await bot.edit_message_media(
+                                inline_message_id=inline_message_id,
+                                media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
+                                reply_markup=kb
+                            )
+                        except Exception as emm_err:
+                            if hasattr(emm_err, "retry_after"):
+                                await asyncio.sleep(getattr(emm_err, "retry_after") + 0.2)
+                                await bot.edit_message_media(
+                                    inline_message_id=inline_message_id,
+                                    media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
+                                    reply_markup=kb
+                                )
+                            else:
+                                raise emm_err
                     _stream_files.pop(token, None)
                     return
 
                 if res and isinstance(res, dict) and res.get("file_path"):
+                    await safe_edit_status(
+                        inline_message_id=inline_message_id,
+                        text=(
+                            f"📤 <b>Отправляю {p_noun} в чат...</b>\n"
+                            f"<code>[████████████] 100%</code>"
+                        ),
+                        reply_markup=loading_kb
+                    )
+
                     is_photo = bool(res.get("is_photo"))
                     file_id = await upload_media_to_telegram(
                         res["file_path"],
@@ -2397,11 +2504,22 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     if is_photo
                     else InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
                 )
-                await bot.edit_message_media(
-                    inline_message_id=inline_message_id,
-                    media=media_obj,
-                    reply_markup=None
-                )
+                try:
+                    await bot.edit_message_media(
+                        inline_message_id=inline_message_id,
+                        media=media_obj,
+                        reply_markup=None
+                    )
+                except Exception as emm_err:
+                    if hasattr(emm_err, "retry_after"):
+                        await asyncio.sleep(getattr(emm_err, "retry_after") + 0.2)
+                        await bot.edit_message_media(
+                            inline_message_id=inline_message_id,
+                            media=media_obj,
+                            reply_markup=None
+                        )
+                    else:
+                        raise emm_err
                 logging.info(f"Successfully replaced inline message {inline_message_id} with media!")
             except Exception as edit_err:
                 logging.error(f"Failed to edit_message_media: {edit_err}")
@@ -2434,13 +2552,13 @@ async def handle_get_vid_callback(callback: CallbackQuery):
         await callback.answer()
         return
     token = callback.data.split(":", 1)[1]
-    await callback.answer("⏳ Скачиваю видео в чат...", show_alert=False)
+    await callback.answer("⏳ Скачиваю в чат...", show_alert=False)
     await execute_inline_delivery(callback.inline_message_id, token, callback.from_user.id)
 
 
 @dp.callback_query(F.data == "noop")
 async def handle_noop_callback(callback: CallbackQuery):
-    await callback.answer("⏳ Видео обрабатывается и появится в этом сообщении через пару секунд!", show_alert=False)
+    await callback.answer("⏳ Медиа обрабатывается и появится в этом сообщении через пару секунд!", show_alert=False)
 
 
 @dp.callback_query(F.data.startswith("retry_dl:"))
@@ -2451,12 +2569,20 @@ async def handle_retry_callback(callback: CallbackQuery):
     token = callback.data.split(":", 1)[1]
     await callback.answer("🔄 Перезапускаю загрузку...")
     try:
+        url = get_dl_token_url(token)
+        c_info = detect_content_info(url) if url else {}
+        p_noun = c_info.get("label", "медиа")
+        p_icon = c_info.get("icon", "⚡")
         await bot.edit_message_text(
             inline_message_id=callback.inline_message_id,
-            text="⏳ <b>Повторная загрузка видео...</b>\n<i>Пожалуйста, подождите ✨</i>",
+            text=(
+                f"{p_icon} <b>Повторная загрузка {p_noun}...</b>\n"
+                f"<code>[██░░░░░░░░░░] 15%</code>\n"
+                f"<i>Пожалуйста, подождите ✨</i>"
+            ),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⏳ Скачиваем видео...", callback_data=f"get_vid:{token}")]]
+                inline_keyboard=[[InlineKeyboardButton(text=f"⏳ Загрузка {p_noun}...", callback_data=f"get_vid:{token}")]]
             )
         )
     except Exception:
