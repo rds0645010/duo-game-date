@@ -120,47 +120,59 @@ async def fetch_spotify_oembed(url: str) -> Optional[Dict[str, Any]]:
 def _search_youtube_tracks_sync(query: str, limit: int = 5, proxy_url: str = None) -> List[Dict[str, Any]]:
     """
     Синхронный поиск треков через ytsearch с extract_flat.
+    Автоматически пробует с прокси и напрямую, чтобы гарантировать результат.
     """
     search_spec = f"ytsearch{limit}:{query}"
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': True,
-        'skip_download': True,
-    }
-    if proxy_url:
-        ydl_opts['proxy'] = proxy_url
+    proxies_to_try = [proxy_url] if proxy_url else ['']
+    if proxy_url and '' not in proxies_to_try:
+        proxies_to_try.append('')
 
     results = []
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_spec, download=False)
-            entries = info.get('entries') or []
-            for e in entries:
-                if not e or not e.get('id'):
-                    continue
-                vid = e.get('id')
-                raw_ttl = e.get('title') or "Без названия"
-                uploader = e.get('uploader') or ""
-                dur_sec = int(e.get('duration') or 0)
-                # Отсекаем стримы и длинные подкасты (> 20 минут)
-                if dur_sec > 1200:
-                    continue
-                dur_str = f"{dur_sec // 60}:{dur_sec % 60:02d}" if dur_sec > 0 else "?:??"
-                artist, title = parse_artist_and_title(raw_ttl, uploader)
-                thumb = e.get('thumbnail') or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-                results.append({
-                    "id": vid,
-                    "title": title,
-                    "artist": artist,
-                    "raw_title": raw_ttl,
-                    "duration_sec": dur_sec,
-                    "duration_str": dur_str,
-                    "url": f"https://www.youtube.com/watch?v={vid}",
-                    "thumbnail_url": thumb,
-                })
-    except Exception as e:
-        logger.error(f"Track search error for '{query}': {e}")
+    last_err = None
+
+    for p in proxies_to_try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'skip_download': True,
+            'proxy': p,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(search_spec, download=False)
+                entries = info.get('entries') or []
+                for e in entries:
+                    if not e or not e.get('id'):
+                        continue
+                    vid = e.get('id')
+                    raw_ttl = e.get('title') or "Без названия"
+                    uploader = e.get('uploader') or ""
+                    dur_sec = int(e.get('duration') or 0)
+                    # Отсекаем стримы и длинные подкасты (> 20 минут)
+                    if dur_sec > 1200:
+                        continue
+                    dur_str = f"{dur_sec // 60}:{dur_sec % 60:02d}" if dur_sec > 0 else "?:??"
+                    artist, title = parse_artist_and_title(raw_ttl, uploader)
+                    thumb = e.get('thumbnail') or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                    results.append({
+                        "id": vid,
+                        "title": title,
+                        "artist": artist,
+                        "raw_title": raw_ttl,
+                        "duration_sec": dur_sec,
+                        "duration_str": dur_str,
+                        "url": f"https://www.youtube.com/watch?v={vid}",
+                        "thumbnail_url": thumb,
+                    })
+                if results:
+                    return results
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Track search warning for proxy '{p}': {e}")
+
+    if not results and last_err:
+        logger.error(f"Track search error for '{query}': {last_err}")
     return results
 
 
@@ -220,61 +232,77 @@ def _download_audio_ytdlp_sync(
 ) -> Dict[str, Any]:
     """
     Синхронное скачивание чистого аудиопотока с извлечением в MP3.
+    Автоматически пробует через прокси и напрямую.
     """
     out_tmpl = f"{output_prefix}.%(ext)s"
-    ydl_opts = {
-        'outtmpl': out_tmpl,
-        'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'noprogress': True,
-        'max_filesize': 50 * 1024 * 1024,
-        'geo_bypass': True,
-        'nocheckcertificate': True,
-        'socket_timeout': 25,
-        'retries': 2,
-        'extractor_args': {'youtube': {'player_client': ['visionos']}},
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        },
-    }
+    proxies_to_try = [proxy_url] if proxy_url else ['']
+    if proxy_url and '' not in proxies_to_try:
+        proxies_to_try.append('')
 
-    if proxy_url:
-        ydl_opts['proxy'] = proxy_url
+    last_error = None
+    info = None
 
-    if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
-        ydl_opts['ffmpeg_location'] = FFMPEG_PATH
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
+    for p in proxies_to_try:
+        ydl_opts = {
+            'outtmpl': out_tmpl,
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'noprogress': True,
+            'max_filesize': 50 * 1024 * 1024,
+            'geo_bypass': True,
+            'nocheckcertificate': True,
+            'socket_timeout': 25,
+            'retries': 2,
+            'extractor_args': {'youtube': {'player_client': ['visionos']}},
+            'proxy': p,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            },
+        }
 
-    if progress_callback and event_loop:
-        def _ytdlp_progress_hook(d):
-            try:
-                st = d.get('status')
-                if st == 'downloading':
-                    dl = d.get('downloaded_bytes') or 0
-                    tot = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-                    spd = d.get('speed') or 0
-                    eta = d.get('eta') or 0
-                    if tot > 0:
+        if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+            ydl_opts['ffmpeg_location'] = FFMPEG_PATH
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+
+        if progress_callback and event_loop:
+            def _ytdlp_progress_hook(d):
+                try:
+                    st = d.get('status')
+                    if st == 'downloading':
+                        dl = d.get('downloaded_bytes') or 0
+                        tot = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                        spd = d.get('speed') or 0
+                        eta = d.get('eta') or 0
+                        if tot > 0:
+                            asyncio.run_coroutine_threadsafe(
+                                progress_callback(dl, tot, spd, eta),
+                                event_loop
+                            )
+                    elif st == 'finished':
                         asyncio.run_coroutine_threadsafe(
-                            progress_callback(dl, tot, spd, eta),
+                            progress_callback(-1, -1, 0, 0),
                             event_loop
                         )
-                elif st == 'finished':
-                    asyncio.run_coroutine_threadsafe(
-                        progress_callback(-1, -1, 0, 0),
-                        event_loop
-                    )
-            except Exception:
-                pass
-        ydl_opts['progress_hooks'] = [_ytdlp_progress_hook]
+                except Exception:
+                    pass
+            ydl_opts['progress_hooks'] = [_ytdlp_progress_hook]
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            if info:
+                break
+        except Exception as dl_err:
+            last_error = dl_err
+            logger.warning(f"Audio download attempt failed with proxy '{p}': {dl_err}")
+
+    if not info and last_error:
+        raise last_error
 
     candidates = [
         f"{output_prefix}.{ext}"

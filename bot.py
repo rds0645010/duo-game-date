@@ -2971,9 +2971,9 @@ async def cmd_music_search(message: types.Message, command: CommandObject = None
     )
 
     try:
-        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
         tracks = await music_service.search_tracks(query, limit=5, proxy_url=warp_proxy_url)
-        if not tracks:
+        if not tracks and warp_proxy_url:
             tracks = await music_service.search_tracks(query, limit=5, proxy_url=None)
 
         if not tracks:
@@ -3055,7 +3055,7 @@ async def handle_music_download_callback(callback: CallbackQuery):
     output_prefix = os.path.join(DOWNLOAD_DIR, f"music_{callback.from_user.id}_{uid}")
 
     try:
-        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
         res = await music_service.download_track(
             track,
             output_prefix,

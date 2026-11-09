@@ -308,6 +308,9 @@ class WarpProxy:
             return f"http://127.0.0.1:{self._port}"
         return None
 
+    def get_proxy_url(self) -> str | None:
+        return self.proxy_url
+
     def _is_running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 

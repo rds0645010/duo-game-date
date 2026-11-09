@@ -778,9 +778,9 @@ async def download_video(url: str, user_id: int, progress_callback=None):
         thumb_url = s_data.get("thumbnail_url") if s_data else None
 
         query = f"{track_title} audio" if track_title else clean_url
-        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
         tracks = await music_service.search_tracks(query, limit=1, proxy_url=warp_proxy_url)
-        if not tracks:
+        if not tracks and warp_proxy_url:
             tracks = await music_service.search_tracks(query, limit=1, proxy_url=None)
         if not tracks:
             raise Exception("spotify_track_not_found")
@@ -800,7 +800,7 @@ async def download_video(url: str, user_id: int, progress_callback=None):
     # 5. SOUNDCLOUD: скачивание аудио
     if platform == "soundcloud":
         import music_service
-        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
         res = await music_service.download_track(
             clean_url,
             output_prefix,
