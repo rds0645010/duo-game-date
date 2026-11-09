@@ -33,6 +33,7 @@ from aiogram.types import (
     InputTextMessageContent,
     InputMediaPhoto,
     InputMediaVideo,
+    InputMediaAudio,
     ChosenInlineResult,
     CallbackQuery,
     FSInputFile
@@ -51,6 +52,7 @@ from downloader import (
     is_valid_mp4_file
 )
 import warp_proxy
+import music_service
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -642,7 +644,16 @@ OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or "0")
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "").strip()
 
 
-async def upload_media_to_telegram(file_path: str, is_photo: bool = False, target_user_id: int = None, title: str = "", platform: str = ""):
+async def upload_media_to_telegram(
+    file_path: str,
+    is_photo: bool = False,
+    is_audio: bool = False,
+    target_user_id: int = None,
+    title: str = "",
+    platform: str = "",
+    performer: str = "",
+    duration: int = 0
+):
     """
     Загружает медиафайл в Telegram для генерации постоянного CDN file_id.
     1. Если указан target_user_id — пробует отправить в ЛС пользователя (сохраняя как личный архив).
@@ -654,7 +665,7 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
 
     caption_text = None
     if target_user_id:
-        t_clean = html.escape((title or "Видео")[:150])
+        t_clean = html.escape((title or "Медиа")[:150])
         p_clean = html.escape((platform or "Медиа").capitalize())
         caption_text = (
             f"🎬 <b>{t_clean}</b>\n\n"
@@ -667,7 +678,23 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
     # 1. Пробуем отправить в ЛС пользователя
     if target_user_id:
         try:
-            if is_photo:
+            if is_audio:
+                sent = await bot.send_audio(
+                    chat_id=target_user_id,
+                    audio=FSInputFile(file_path),
+                    performer=performer,
+                    title=title,
+                    duration=duration,
+                    caption=caption_text if should_save_in_pm else None,
+                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
+                    disable_notification=True
+                )
+                if sent and sent.audio:
+                    f_id = sent.audio.file_id
+                    if not should_save_in_pm:
+                        asyncio.create_task(_delayed_delete_message(target_user_id, sent.message_id, 2))
+                    return f_id
+            elif is_photo:
                 sent = await bot.send_photo(
                     chat_id=target_user_id,
                     photo=FSInputFile(file_path),
@@ -710,7 +737,21 @@ async def upload_media_to_telegram(file_path: str, is_photo: bool = False, targe
 
     for chat_id in fallbacks:
         try:
-            if is_photo:
+            if is_audio:
+                sent = await bot.send_audio(
+                    chat_id=chat_id,
+                    audio=FSInputFile(file_path),
+                    performer=performer,
+                    title=title,
+                    duration=duration,
+                    disable_notification=True
+                )
+                if sent and sent.audio:
+                    f_id = sent.audio.file_id
+                    if chat_id > 0:
+                        asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
+                    return f_id
+            elif is_photo:
                 sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
                 if sent and sent.photo:
                     f_id = sent.photo[-1].file_id
@@ -1478,16 +1519,18 @@ async def process_video_download(message: types.Message, url: str):
         platform_names = {
             "tiktok": "TikTok",
             "youtube": "YouTube Shorts",
-            "instagram": "Instagram Reels"
+            "instagram": "Instagram Reels",
+            "spotify": "Spotify",
+            "soundcloud": "SoundCloud",
         }
-        plat_str = platform_names.get(res.get("platform"), "Видео")
+        plat_str = platform_names.get(res.get("platform"), "Медиа")
 
-        title_raw = (res.get("title") or "Видео")[:200]
-        author_raw = (res.get("author") or "")[:50]
+        title_raw = (res.get("title") or "Аудиозапись")[:200]
+        author_raw = (res.get("performer") or res.get("author") or "")[:50]
         title_esc = html.escape(title_raw)
         author_esc = html.escape(author_raw)
 
-        # 🎧 Если это длинный ролик YouTube, сконвертированный в аудио-подкаст
+        # 🎧 Если это аудиозапись (Spotify, SoundCloud, музыка или подкаст)
         if res.get("is_audio"):
             try:
                 await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VOICE)
@@ -1496,24 +1539,51 @@ async def process_video_download(message: types.Message, url: str):
             file_size_mb = round(file_size / (1024 * 1024), 1)
             await safe_edit_status(
                 status_msg,
-                f"🎧 <b>Отправляю аудиодорожку в Telegram ({file_size_mb} МБ)...</b>"
+                f"🎵 <b>Отправляю трек в Telegram ({file_size_mb} МБ)...</b>\n<code>[████████████] 100%</code>"
             )
-            audio_caption = (
-                f"🎧 <b>{title_esc}</b>\n\n"
-                f"📱 <b>Источник:</b> {plat_str} (Аудио / Подкаст)\n"
-                f"ℹ️ <i>(Ролик больше 50 МБ — видео-лимит Telegram, поэтому отправлен как чистая аудиозапись для удобного прослушивания)</i>\n"
-                f"✨ <i>Скачано через @duo_play_date_bot</i>"
-            )
+
+            is_music_source = res.get("platform") in ("spotify", "soundcloud", "music")
+            performer = res.get("performer") or author_raw or "Исполнитель"
+            track_title = res.get("title") or title_raw or "Трек"
+
+            if is_music_source:
+                src_name = "Spotify" if res.get("platform") == "spotify" else ("SoundCloud" if res.get("platform") == "soundcloud" else "Музыка")
+                audio_caption = (
+                    f"🎧 <b>{html.escape(track_title)}</b> — {html.escape(performer)}\n\n"
+                    f"📱 <b>Источник:</b> {src_name}\n"
+                    f"✨ <i>Скачано через @duo_play_date_bot</i>"
+                )
+            else:
+                audio_caption = (
+                    f"🎧 <b>{title_esc}</b>\n\n"
+                    f"📱 <b>Источник:</b> {plat_str} (Аудио / Подкаст)\n"
+                    f"ℹ️ <i>(Ролик больше 50 МБ — видео-лимит Telegram, поэтому отправлен как чистая аудиозапись для удобного прослушивания)</i>\n"
+                    f"✨ <i>Скачано через @duo_play_date_bot</i>"
+                )
+
+            thumb_path = res.get("thumbnail_path")
+            thumb_input = FSInputFile(thumb_path) if (thumb_path and os.path.exists(thumb_path)) else None
+
             audio_input = FSInputFile(file_path)
             sent = await message.answer_audio(
                 audio=audio_input,
                 caption=audio_caption,
-                title=title_raw[:80],
-                performer=author_raw[:50],
+                title=track_title[:80],
+                performer=performer[:50],
                 duration=int(res.get("duration", 0)),
+                thumbnail=thumb_input,
                 reply_markup=share_kb,
                 parse_mode="HTML"
             )
+            if sent and sent.audio:
+                save_cached_media(
+                    clean_url,
+                    sent.audio.file_id,
+                    "audio",
+                    track_title,
+                    res.get("platform", "music"),
+                    performer
+                )
             try:
                 await status_msg.delete()
             except Exception:
@@ -1775,17 +1845,18 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
             logging.error(f"Error handling deep link invite: {e}")
 
     welcome_text = (
-        f"👾 **DUO — ИГРЫ И ЗАГРУЗЧИК ВИДЕО БЕЗ РЕКЛАМЫ** 🎮\n"
+        f"👾 **DUO — ИГРЫ И ЗАГРУЗЧИК МЕДИА БЕЗ РЕКЛАМЫ** 🎮\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"Привет, {user.first_name}! 👋\n\n"
         f"✨ **Совместные игры в DUO:**\n"
         f"• Зови тиммейтов в любимые игры за 2 клика\n"
         f"• Назначай тайминги и собирай дуэты\n\n"
-        f"📥 **Загрузка видео без рекламы и водяных знаков:**\n"
-        f"• Отправь сюда любую ссылку на **TikTok, YouTube Shorts или Reels**\n"
-        f"• В чатах с друзьями пиши: `@duo_play_date_bot <ссылка>`, чтобы сразу переслать видео напарнику!\n"
+        f"📥 **Загрузка видео и музыки:**\n"
+        f"• Отправь ссылку на **TikTok, Shorts, Reels, Spotify или SoundCloud**\n"
+        f"• Для поиска любого трека напиши: `/music <название>`\n"
+        f"• В чатах с друзьями пиши: `@duo_play_date_bot <ссылка>`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Открой лобби игр ниже или скинь ссылку на видео прямо в чат 👇"
+        f"Открой лобби игр ниже или скинь ссылку прямо в чат 👇"
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -1798,7 +1869,11 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
             ],
             [
                 InlineKeyboardButton(
-                    text="⚙️ Настройки подписи в чатах",
+                    text="🎵 Найти музыку (/music)",
+                    switch_inline_query_current_chat=""
+                ),
+                InlineKeyboardButton(
+                    text="⚙️ Настройки",
                     callback_data="open_settings"
                 )
             ]
@@ -2451,20 +2526,25 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     )
 
                     is_photo = bool(res.get("is_photo"))
+                    is_audio = bool(res.get("is_audio"))
                     file_id = await upload_media_to_telegram(
                         res["file_path"],
                         is_photo=is_photo,
+                        is_audio=is_audio,
                         target_user_id=user_id,
                         title=res.get("title", ""),
-                        platform=res.get("platform", "")
+                        platform=res.get("platform", ""),
+                        performer=res.get("performer", ""),
+                        duration=int(res.get("duration", 0))
                     )
                     if file_id:
+                        m_type = "audio" if is_audio else ("photo" if is_photo else "video")
                         save_cached_media(
                             url, file_id,
-                            "photo" if is_photo else "video",
+                            m_type,
                             res.get("title", ""),
                             res.get("platform", ""),
-                            res.get("author", "")
+                            res.get("author", "") or res.get("performer", "")
                         )
                     try:
                         if os.path.exists(res["file_path"]):
@@ -2499,11 +2579,19 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                 caption = "🎬 ✨ <i>Скачано через @duo_play_date_bot</i>"
 
             try:
-                media_obj = (
-                    InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
-                    if is_photo
-                    else InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
-                )
+                if is_audio:
+                    media_obj = InputMediaAudio(
+                        media=file_id,
+                        caption=caption,
+                        parse_mode="HTML" if caption else None,
+                        title=res.get("title") if res else "",
+                        performer=res.get("performer") if res else "",
+                        duration=int(res.get("duration", 0)) if res else 0
+                    )
+                elif is_photo:
+                    media_obj = InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
+                else:
+                    media_obj = InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
                 try:
                     await bot.edit_message_media(
                         inline_message_id=inline_message_id,
@@ -2856,6 +2944,184 @@ async def handle_slide_info_callback(callback: CallbackQuery):
 @dp.callback_query(F.data == "slide_noop")
 async def handle_slide_noop_callback(callback: CallbackQuery):
     await callback.answer()
+
+
+# ==========================================
+# 🎵 ПОИСК И СКАЧИВАНИЕ МУЗЫКИ (/music)
+# ==========================================
+
+@dp.message(Command("music", "song", "track", "audio", "музыка", "трек", "песня"))
+async def cmd_music_search(message: types.Message, command: CommandObject = None):
+    query = (command.args or "").strip() if command else ""
+    if not query:
+        await message.answer(
+            "🎵 <b>Поиск и скачивание музыки:</b>\n\n"
+            "Напиши название трека или имя исполнителя после команды, например:\n"
+            "<code>/music Linkin Park Numb</code>\n"
+            "<code>/music Queen Bohemian Rhapsody</code>\n"
+            "<code>/music Instasamka</code>\n\n"
+            "Или просто отправь ссылку на трек из <b>Spotify</b> или <b>SoundCloud</b> прямо в чат! ✨",
+            parse_mode="HTML"
+        )
+        return
+
+    status_msg = await message.answer(
+        f"🔍 <b>Ищу треки по запросу:</b> <i>«{html.escape(query)}»</i>...\n<code>[███░░░░░░░░░] 25%</code>",
+        parse_mode="HTML"
+    )
+
+    try:
+        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        tracks = await music_service.search_tracks(query, limit=5, proxy_url=warp_proxy_url)
+        if not tracks:
+            tracks = await music_service.search_tracks(query, limit=5, proxy_url=None)
+
+        if not tracks:
+            await safe_edit_status(
+                status_msg,
+                f"❌ <b>По запросу «{html.escape(query)}» ничего не найдено.</b>\n"
+                f"Попробуй изменить запрос или указать имя исполнителя."
+            )
+            return
+
+        sid = music_service.save_search_session(query, tracks)
+
+        lines = [f"🎵 <b>Результаты поиска:</b> <i>«{html.escape(query)}»</i>\n"]
+        num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        buttons_row = []
+
+        for idx, tr in enumerate(tracks):
+            icon = num_emojis[idx] if idx < len(num_emojis) else f"[{idx+1}]"
+            t_title = html.escape(tr.get("title", "Трек"))
+            t_artist = html.escape(tr.get("artist", "Исполнитель"))
+            t_dur = tr.get("duration_str", "")
+            lines.append(f"{icon} <b>{t_title}</b> — {t_artist} <code>({t_dur})</code>")
+            buttons_row.append(
+                InlineKeyboardButton(text=icon, callback_data=f"dl_m:{sid}:{idx}")
+            )
+
+        lines.append("\n<i>Нажми на номер трека ниже, чтобы скачать 👇</i>")
+        text = "\n".join(lines)
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                buttons_row,
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_m:{sid}")]
+            ]
+        )
+
+        await safe_edit_status(status_msg, text, reply_markup=keyboard)
+
+    except Exception as e:
+        logging.error(f"Music search handler error: {e}")
+        await safe_edit_status(status_msg, "❌ <b>Произошла ошибка при поиске музыки.</b> Попробуйте позже.")
+
+
+@dp.callback_query(F.data.startswith("dl_m:"))
+async def handle_music_download_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    sid = parts[1]
+    try:
+        idx = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+
+    track = music_service.get_search_track(sid, idx)
+    if not track:
+        await callback.answer("⚠️ Сессия поиска устарела. Пожалуйста, выполните поиск заново.", show_alert=True)
+        return
+
+    t_title = track.get("title", "Трек")
+    t_artist = track.get("artist", "Исполнитель")
+    await callback.answer(f"⏳ Скачиваю: {t_title[:30]}...")
+
+    status_msg = callback.message
+
+    await safe_edit_status(
+        status_msg,
+        f"🎵 <b>Скачиваю трек:</b> «{html.escape(t_title)} — {html.escape(t_artist)}»...\n"
+        f"<code>[██░░░░░░░░░░] 15%</code>\n"
+        f"🔍 Подключаюсь к аудиопотоку..."
+    )
+
+    c_info = {"label": f"трек «{t_title}»", "icon": "🎵"}
+    progress_cb = create_progress_reporter(status_msg, c_info, throttle_seconds=1.0)
+
+    uid = str(uuid.uuid4())[:8]
+    output_prefix = os.path.join(DOWNLOAD_DIR, f"music_{callback.from_user.id}_{uid}")
+
+    try:
+        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        res = await music_service.download_track(
+            track,
+            output_prefix,
+            progress_callback=progress_cb,
+            proxy_url=warp_proxy_url
+        )
+
+        if not res or not res.get("file_path") or not os.path.exists(res["file_path"]):
+            raise Exception("audio_file_missing")
+
+        await safe_edit_status(
+            status_msg,
+            f"🎵 <b>Отправляю в Telegram...</b>\n"
+            f"<code>[████████████] 100%</code>"
+        )
+
+        thumb_path = res.get("thumbnail_path")
+        thumb_file = FSInputFile(thumb_path) if (thumb_path and os.path.exists(thumb_path)) else None
+
+        caption = (
+            f"🎧 <b>{html.escape(res.get('title', 'Трек'))}</b> — {html.escape(res.get('performer', 'Исполнитель'))}\n"
+            f"✨ <i>Скачано через @duo_play_date_bot</i>"
+        )
+
+        target_chat = callback.message.chat.id if callback.message else callback.from_user.id
+        await bot.send_audio(
+            chat_id=target_chat,
+            audio=FSInputFile(res["file_path"]),
+            performer=res.get("performer"),
+            title=res.get("title"),
+            duration=res.get("duration", 0),
+            thumbnail=thumb_file,
+            caption=caption,
+            parse_mode="HTML"
+        )
+
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    except Exception as dl_err:
+        logging.error(f"Error downloading selected track: {dl_err}")
+        err_msg = format_friendly_error(dl_err)
+        await safe_edit_status(
+            status_msg,
+            f"❌ <b>Не удалось скачать аудиозапись:</b> {err_msg}"
+        )
+    finally:
+        try:
+            for f in os.listdir(DOWNLOAD_DIR):
+                if f.startswith(f"music_{callback.from_user.id}_{uid}"):
+                    p = os.path.join(DOWNLOAD_DIR, f)
+                    if os.path.exists(p):
+                        os.remove(p)
+        except Exception:
+            pass
+
+
+@dp.callback_query(F.data.startswith("cancel_m:"))
+async def handle_cancel_music_callback(callback: CallbackQuery):
+    await callback.answer("Поиск отменён")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
 
 # ==========================================
@@ -3267,6 +3533,15 @@ async def main():
     asyncio.create_task(warm_up_warp())
 
     if bot:
+        try:
+            await bot.set_my_commands([
+                types.BotCommand(command="start", description="Главное меню и игры в DUO"),
+                types.BotCommand(command="music", description="Поиск и скачивание треков (Spotify/MP3)"),
+                types.BotCommand(command="settings", description="Настройки подписи медиа"),
+            ])
+        except Exception as cmd_err:
+            logging.debug(f"set_my_commands notice: {cmd_err}")
+
         if USE_WEBHOOK:
             webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
             logging.info(f"🌐 Режим WEBHOOK активирован. Целевой URL: {webhook_url}")

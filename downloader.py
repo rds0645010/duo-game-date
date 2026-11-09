@@ -117,6 +117,14 @@ YOUTUBE_REGEX = re.compile(
     r'(?:youtube\.com/(?:watch\?[^\s#]*v=|shorts/|live/|embed/|v/)|youtu\.be/)[^\s]+'
 )
 INSTAGRAM_REGEX = re.compile(r'https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/(?:reel|reels|p|tv|share/(?:reel|p))/[^\s]+')
+SPOTIFY_REGEX = re.compile(
+    r'https?://(?:open\.)?spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/[a-zA-Z0-9]+',
+    re.IGNORECASE
+)
+SOUNDCLOUD_REGEX = re.compile(
+    r'https?://(?:www\.)?soundcloud\.com/[\w\-]+/[\w\-]+',
+    re.IGNORECASE
+)
 
 # Хвостовая пунктуация из сообщений: "вот ссылка: https://youtu.be/xxx."
 _URL_TRAILING = '.,;:!?)]}>"\''
@@ -130,6 +138,10 @@ def detect_platform(text: str):
         return "youtube"
     if INSTAGRAM_REGEX.search(text):
         return "instagram"
+    if SPOTIFY_REGEX.search(text):
+        return "spotify"
+    if SOUNDCLOUD_REGEX.search(text):
+        return "soundcloud"
     return None
 
 
@@ -181,6 +193,20 @@ def detect_content_info(url: str) -> Dict[str, str]:
             "label": "видео из YouTube",
             "icon": "🎬",
         }
+    if "spotify.com" in u_lower:
+        return {
+            "platform": "spotify",
+            "media_type": "audio",
+            "label": "трек из Spotify",
+            "icon": "🎵",
+        }
+    if "soundcloud.com" in u_lower:
+        return {
+            "platform": "soundcloud",
+            "media_type": "audio",
+            "label": "трек из SoundCloud",
+            "icon": "🎵",
+        }
     return {
         "platform": "unknown",
         "media_type": "media",
@@ -191,7 +217,7 @@ def detect_content_info(url: str) -> Dict[str, str]:
 def extract_url(text: str):
     if not text:
         return None
-    for pattern in [TIKTOK_REGEX, YOUTUBE_REGEX, INSTAGRAM_REGEX]:
+    for pattern in [TIKTOK_REGEX, YOUTUBE_REGEX, INSTAGRAM_REGEX, SPOTIFY_REGEX, SOUNDCLOUD_REGEX]:
         m = pattern.search(text)
         if m:
             return m.group(0).rstrip(_URL_TRAILING)
@@ -200,14 +226,14 @@ def extract_url(text: str):
 
 def extract_all_media_urls(text: str) -> List[str]:
     """
-    Извлекает все уникальные поддерживаемые ссылки (TikTok, Reels, Shorts) из текста.
+    Извлекает все уникальные поддерживаемые ссылки (TikTok, Reels, Shorts, Spotify, SoundCloud) из текста.
     Сохраняет порядок следования и отсекает дубликаты.
     """
     if not text:
         return []
     found = []
     # Находим все совпадения по тексту
-    for pattern in [TIKTOK_REGEX, YOUTUBE_REGEX, INSTAGRAM_REGEX]:
+    for pattern in [TIKTOK_REGEX, YOUTUBE_REGEX, INSTAGRAM_REGEX, SPOTIFY_REGEX, SOUNDCLOUD_REGEX]:
         for m in pattern.finditer(text):
             u = m.group(0).rstrip(_URL_TRAILING)
             if u and u not in found:
@@ -743,6 +769,46 @@ async def download_video(url: str, user_id: int, progress_callback=None):
             ffmpeg_path=FFMPEG_PATH,
             progress_callback=progress_callback
         )
+
+    # 4. SPOTIFY: извлечение метаданных и скачивание трека
+    if platform == "spotify":
+        import music_service
+        s_data = await music_service.fetch_spotify_oembed(clean_url)
+        track_title = s_data.get("title") if s_data else None
+        thumb_url = s_data.get("thumbnail_url") if s_data else None
+
+        query = f"{track_title} audio" if track_title else clean_url
+        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        tracks = await music_service.search_tracks(query, limit=1, proxy_url=warp_proxy_url)
+        if not tracks:
+            tracks = await music_service.search_tracks(query, limit=1, proxy_url=None)
+        if not tracks:
+            raise Exception("spotify_track_not_found")
+
+        chosen = tracks[0]
+        res = await music_service.download_track(
+            chosen,
+            output_prefix,
+            custom_title=track_title,
+            custom_thumb_url=thumb_url,
+            progress_callback=progress_callback,
+            proxy_url=warp_proxy_url
+        )
+        res["is_audio"] = True
+        return res
+
+    # 5. SOUNDCLOUD: скачивание аудио
+    if platform == "soundcloud":
+        import music_service
+        warp_proxy_url = warp_proxy.warp.get_proxy_url()
+        res = await music_service.download_track(
+            clean_url,
+            output_prefix,
+            progress_callback=progress_callback,
+            proxy_url=warp_proxy_url
+        )
+        res["is_audio"] = True
+        return res
 
     raise Exception("download_failed")
 
