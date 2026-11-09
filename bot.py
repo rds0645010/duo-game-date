@@ -106,6 +106,11 @@ YOUTUBE_SEMAPHORE = asyncio.Semaphore(MAX_YOUTUBE_DOWNLOADS)
 youtube_waiting_count = 0
 youtube_lock = asyncio.Lock()
 
+# 4. Музыка (Spotify, SoundCloud, /music): независимый аудиопоток (~20 МБ RAM), до 3 параллельных потоков
+MUSIC_SEMAPHORE = asyncio.Semaphore(3)
+music_waiting_count = 0
+music_lock = asyncio.Lock()
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -974,6 +979,25 @@ def create_progress_reporter(
                     )
             return
 
+        # Фаза обработки / конвертации аудио
+        if phase in ("converting", "processing"):
+            if now - last_update >= 0.5:
+                last_update = now
+                text = (
+                    f"🎵 <b>Конвертирую трек и упаковываю обложку...</b>\n"
+                    f"<code>[██████████░░] 85%</code>\n"
+                    f"✨ Почти готово к отправке..."
+                )
+                if text != last_rendered_text:
+                    last_rendered_text = text
+                    await safe_edit_status(
+                        msg=status_msg,
+                        text=text,
+                        inline_message_id=inline_message_id,
+                        reply_markup=reply_markup
+                    )
+            return
+
         # Пользовательская фаза (например, подключение или парсинг)
         if phase and total <= 0:
             if now - last_update >= throttle_seconds:
@@ -1076,12 +1100,29 @@ def create_progress_reporter(
 
     return update_progress
 
-    return update_progress
 
-
-def format_friendly_error(e: Exception) -> str:
+def format_friendly_error(e: Exception, platform: str = "") -> str:
     """Преобразует любые технические ошибки в понятные объяснения для пользователя."""
     err_text = str(e).lower()
+
+    # Специфичные понятные ошибки для музыки (Spotify, SoundCloud, /music)
+    if platform in ("spotify", "soundcloud", "music"):
+        if "not found" in err_text or "not_found" in err_text or "spotify_track_not_found" in err_text:
+            return (
+                "🎵 <b>Трек не найден или недоступен для скачивания.</b>\n\n"
+                "💡 <i>Попробуй найти этот трек по названию через команду:</i> <code>/music &lt;название&gt;</code>"
+            )
+        elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
+            return (
+                "🎵 <b>Облачный сервер временно ограничил прямое подключение к аудиопотоку.</b>\n\n"
+                "Попробуй отправить ссылку ещё раз через пару секунд или найти трек по названию через команду: <code>/music &lt;название&gt;</code>"
+            )
+        else:
+            return (
+                f"🎵 <b>Не удалось скачать аудиозапись.</b>\n\n"
+                f"⚠️ Ошибка: <code>{html.escape(str(e)[:150])}</code>\n\n"
+                f"💡 <i>Попробуй найти трек по названию через команду:</i> <code>/music &lt;название&gt;</code>"
+            )
     if "is_photo_post" in err_text:
         return (
             "📸 <b>Не удалось извлечь фото из этой публикации Instagram.</b>\n\n"
@@ -1368,6 +1409,9 @@ async def process_video_download(message: types.Message, url: str):
     elif target_platform == "instagram":
         sem = INSTAGRAM_SEMAPHORE
         lock = instagram_lock
+    elif target_platform in ("spotify", "soundcloud", "music"):
+        sem = MUSIC_SEMAPHORE
+        lock = music_lock
     else:
         sem = YOUTUBE_SEMAPHORE
         lock = youtube_lock
@@ -1391,6 +1435,10 @@ async def process_video_download(message: types.Message, url: str):
                     global instagram_waiting_count
                     instagram_waiting_count += 1
                     pos = instagram_waiting_count
+                elif target_platform in ("spotify", "soundcloud", "music"):
+                    global music_waiting_count
+                    music_waiting_count += 1
+                    pos = music_waiting_count
                 else:
                     global youtube_waiting_count
                     youtube_waiting_count += 1
@@ -1425,6 +1473,8 @@ async def process_video_download(message: types.Message, url: str):
                     tiktok_waiting_count -= 1
                 elif target_platform == "instagram" and instagram_waiting_count > 0:
                     instagram_waiting_count -= 1
+                elif target_platform in ("spotify", "soundcloud", "music") and music_waiting_count > 0:
+                    music_waiting_count -= 1
                 elif target_platform == "youtube" and youtube_waiting_count > 0:
                     youtube_waiting_count -= 1
             await safe_edit_status(
@@ -1726,7 +1776,7 @@ async def process_video_download(message: types.Message, url: str):
     except Exception as e:
         record_error("process_video_download", e, clean_url)
         logging.error(f"Download processing failed for {clean_url}: {e}", exc_info=True)
-        msg = format_friendly_error(e)
+        msg = format_friendly_error(e, platform=target_platform)
 
         if status_msg:
             try:
@@ -1870,7 +1920,7 @@ async def cmd_start(message: types.Message, command: CommandObject = None):
             [
                 InlineKeyboardButton(
                     text="🎵 Найти музыку (/music)",
-                    switch_inline_query_current_chat=""
+                    callback_data="btn_music_search"
                 ),
                 InlineKeyboardButton(
                     text="⚙️ Настройки",
@@ -1983,6 +2033,21 @@ async def handle_open_settings(callback: types.CallbackQuery):
             reply_markup=get_settings_keyboard(user_id),
             parse_mode="HTML"
         )
+
+
+@dp.callback_query(F.data == "btn_music_search")
+async def handle_btn_music_search(callback: types.CallbackQuery):
+    await callback.answer()
+    text = (
+        "🎵 <b>Поиск и скачивание музыки:</b>\n\n"
+        "Чтобы найти трек, напиши команду <code>/music</code> и название или автора:\n\n"
+        "• <code>/music VLDONE Не пробил</code>\n"
+        "• <code>/music Linkin Park Numb</code>\n"
+        "• <code>/music Instasamka</code>\n\n"
+        "Либо просто <b>отправь ссылку</b> на трек из <b>Spotify</b> или <b>SoundCloud</b> прямо в этот чат! ✨\n\n"
+        "<i>(Нажми на любой пример выше, чтобы быстро скопировать команду)</i>"
+    )
+    await callback.message.answer(text, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("toggle_caption_"))
@@ -2971,7 +3036,14 @@ async def cmd_music_search(message: types.Message, command: CommandObject = None
     )
 
     try:
-        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
+        warp_proxy_url = None
+        if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
+            try:
+                if await warp_proxy.warp.ensure_ready(timeout=20.0):
+                    warp_proxy_url = warp_proxy.warp.proxy_url
+            except Exception:
+                pass
+
         tracks = await music_service.search_tracks(query, limit=5, proxy_url=warp_proxy_url)
         if not tracks and warp_proxy_url:
             tracks = await music_service.search_tracks(query, limit=5, proxy_url=None)
@@ -3055,7 +3127,14 @@ async def handle_music_download_callback(callback: CallbackQuery):
     output_prefix = os.path.join(DOWNLOAD_DIR, f"music_{callback.from_user.id}_{uid}")
 
     try:
-        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
+        warp_proxy_url = None
+        if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
+            try:
+                if await warp_proxy.warp.ensure_ready(timeout=20.0):
+                    warp_proxy_url = warp_proxy.warp.proxy_url
+            except Exception:
+                pass
+
         res = await music_service.download_track(
             track,
             output_prefix,

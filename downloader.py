@@ -773,7 +773,14 @@ async def download_video(url: str, user_id: int, progress_callback=None):
     # 4. SPOTIFY: извлечение метаданных и скачивание трека
     if platform == "spotify":
         import music_service
-        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
+        warp_proxy_url = None
+        if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
+            try:
+                if await warp_proxy.warp.ensure_ready(timeout=20.0):
+                    warp_proxy_url = warp_proxy.warp.proxy_url
+            except Exception as w_err:
+                logger.warning(f"WARP ensure_ready notice for Spotify: {w_err}")
+
         s_data = await music_service.fetch_spotify_metadata(clean_url, proxy_url=warp_proxy_url)
         track_title = s_data.get("title") if s_data else None
         artist = s_data.get("artist") if s_data else None
@@ -820,7 +827,13 @@ async def download_video(url: str, user_id: int, progress_callback=None):
     # 5. SOUNDCLOUD: скачивание аудио
     if platform == "soundcloud":
         import music_service
-        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
+        warp_proxy_url = None
+        if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
+            try:
+                if await warp_proxy.warp.ensure_ready(timeout=20.0):
+                    warp_proxy_url = warp_proxy.warp.proxy_url
+            except Exception:
+                pass
         res = await music_service.download_track(
             clean_url,
             output_prefix,

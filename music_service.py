@@ -522,6 +522,9 @@ def _download_audio_ytdlp_sync(
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }]
+            ydl_opts['postprocessor_args'] = {
+                'FFmpegExtractAudio': ['-threads', '2']
+            }
 
         if progress_callback and event_loop:
             def _ytdlp_progress_hook(d):
@@ -539,12 +542,29 @@ def _download_audio_ytdlp_sync(
                             )
                     elif st == 'finished':
                         asyncio.run_coroutine_threadsafe(
-                            progress_callback(-1, -1, 0, 0),
+                            progress_callback(0, 0, 0, 0, phase="converting"),
                             event_loop
                         )
                 except Exception:
                     pass
             ydl_opts['progress_hooks'] = [_ytdlp_progress_hook]
+
+            def _ytdlp_pp_hook(d):
+                try:
+                    st = d.get('status')
+                    if st == 'started':
+                        asyncio.run_coroutine_threadsafe(
+                            progress_callback(0, 0, 0, 0, phase="converting"),
+                            event_loop
+                        )
+                    elif st == 'finished':
+                        asyncio.run_coroutine_threadsafe(
+                            progress_callback(-1, -1, 0, 0),
+                            event_loop
+                        )
+                except Exception:
+                    pass
+            ydl_opts['postprocessor_hooks'] = [_ytdlp_pp_hook]
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
