@@ -773,15 +773,34 @@ async def download_video(url: str, user_id: int, progress_callback=None):
     # 4. SPOTIFY: извлечение метаданных и скачивание трека
     if platform == "spotify":
         import music_service
-        s_data = await music_service.fetch_spotify_oembed(clean_url)
+        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
+        s_data = await music_service.fetch_spotify_metadata(clean_url, proxy_url=warp_proxy_url)
         track_title = s_data.get("title") if s_data else None
+        artist = s_data.get("artist") if s_data else None
         thumb_url = s_data.get("thumbnail_url") if s_data else None
 
-        query = f"{track_title} audio" if track_title else clean_url
-        warp_proxy_url = warp_proxy.warp.proxy_url if hasattr(warp_proxy, "warp") else None
-        tracks = await music_service.search_tracks(query, limit=1, proxy_url=warp_proxy_url)
+        if artist and track_title:
+            query = f"{artist} - {track_title}"
+        elif track_title:
+            query = f"{track_title} audio"
+        else:
+            query = clean_url
+
+        tracks = await music_service.search_tracks(
+            query,
+            limit=5,
+            target_artist=artist or "",
+            target_title=track_title or "",
+            proxy_url=warp_proxy_url
+        )
         if not tracks and warp_proxy_url:
-            tracks = await music_service.search_tracks(query, limit=1, proxy_url=None)
+            tracks = await music_service.search_tracks(
+                query,
+                limit=5,
+                target_artist=artist or "",
+                target_title=track_title or "",
+                proxy_url=None
+            )
         if not tracks:
             raise Exception("spotify_track_not_found")
 
@@ -789,6 +808,7 @@ async def download_video(url: str, user_id: int, progress_callback=None):
         res = await music_service.download_track(
             chosen,
             output_prefix,
+            custom_artist=artist,
             custom_title=track_title,
             custom_thumb_url=thumb_url,
             progress_callback=progress_callback,
