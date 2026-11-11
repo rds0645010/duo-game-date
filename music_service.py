@@ -163,21 +163,41 @@ def parse_spotify_html_meta(html_text: str) -> Dict[str, Any]:
 
     tw_artist = re.search(r'<meta (?:name|property)="(?:twitter:audio:artist_name|music:musician)" content="([^"]+)"', html_text)
     if tw_artist and tw_artist.group(1):
-        artist = artist or tw_artist.group(1)
+        cand_art = tw_artist.group(1).strip()
+        if not cand_art.startswith("http"):
+            artist = artist or cand_art
+
+    # 4. Spotify HTML <title> tag (например: "<title>Не пробил - song and lyrics by VLDONE | Spotify</title>")
+    m_sp_title = re.search(r'<title>(.*?)\s*\|\s*Spotify</title>', html_text, re.IGNORECASE)
+    if m_sp_title:
+        raw_sp = m_sp_title.group(1).strip()
+        m_by = re.search(r'^(.*?)\s+-\s+(?:song\s+and\s+lyrics|song|single|track)\s+by\s+(.*?)$', raw_sp, re.IGNORECASE)
+        if m_by:
+            t_cand = m_by.group(1).strip()
+            a_cand = m_by.group(2).strip()
+            if not title:
+                title = t_cand
+            if not artist or artist.startswith("http"):
+                artist = a_cand
 
     og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', html_text)
-    if og_desc and not artist:
+    if og_desc and (not artist or artist.startswith("http")):
         # Spotify OpenGraph description: "VLDONE · Не пробил · Song · 2025" или "VLDONE · Song · 2025"
         desc = og_desc.group(1)
         if "·" in desc or "•" in desc:
             sep = "·" if "·" in desc else "•"
             parts = [p.strip() for p in desc.split(sep)]
-            if parts and parts[0] not in ("Spotify", "Song", "Single", "Album"):
+            if parts and parts[0] not in ("Spotify", "Song", "Single", "Album", "Listen on Spotify"):
                 artist = parts[0]
+                if len(parts) >= 2 and not title and parts[1] not in ("Song", "Single", "Album"):
+                    title = parts[1]
 
     og_image = re.search(r'<meta property="og:image" content="([^"]+)"', html_text)
     if og_image:
         thumb = thumb or og_image.group(1)
+
+    if artist and artist.startswith("http"):
+        artist = None
 
     return {
         "title": title,
@@ -243,13 +263,17 @@ async def fetch_spotify_metadata(url: str, proxy_url: str = None) -> Dict[str, A
             except Exception as e:
                 logger.debug(f"Spotify embed fetch attempt failed (proxy={p}): {e}")
 
-    # 2. Если исполнитель еще не найден — пробуем основную страницу трека
+    # 2. Если исполнитель еще не найден — пробуем основную страницу трека с crawler User-Agent
     if track_id and not result_meta.get("artist"):
         direct_url = f"https://open.spotify.com/track/{track_id}"
+        crawler_headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*",
+        }
         for p in proxies_to_try:
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(direct_url, headers=headers, proxy=p, timeout=aiohttp.ClientTimeout(total=7)) as resp:
+                    async with session.get(direct_url, headers=crawler_headers, proxy=p, timeout=aiohttp.ClientTimeout(total=7)) as resp:
                         if resp.status == 200:
                             html_text = await resp.text()
                             parsed = parse_spotify_html_meta(html_text)
@@ -261,16 +285,34 @@ async def fetch_spotify_metadata(url: str, proxy_url: str = None) -> Dict[str, A
             except Exception as e:
                 logger.debug(f"Spotify direct page fetch failed (proxy={p}): {e}")
 
-    # 3. Fallback через публичный OEmbed (если нет названия или обложки)
-    if not result_meta.get("title") or not result_meta.get("thumbnail_url"):
+    # 3. Синхронный запрос в отдельном треде (гарантированно получает чистый OpenGraph HTML)
+    if not result_meta.get("artist") or not result_meta.get("title"):
+        def _fetch_sync(target_u):
+            import urllib.request
+            try:
+                req = urllib.request.Request(target_u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.read().decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        direct_url = f"https://open.spotify.com/track/{track_id}" if track_id else url
+        sync_html = await asyncio.to_thread(_fetch_sync, direct_url)
+        if sync_html:
+            parsed = parse_spotify_html_meta(sync_html)
+            for k, v in parsed.items():
+                if v and not result_meta.get(k):
+                    result_meta[k] = v
+
+    # 4. Fallback через публичный OEmbed (если нет названия или обложка дефолтная)
+    if not result_meta.get("title") or not result_meta.get("thumbnail_url") or "open-graph-default" in str(result_meta.get("thumbnail_url")):
         o_data = await fetch_spotify_oembed(url)
         if o_data:
             if not result_meta.get("title") and o_data.get("title"):
                 result_meta["title"] = o_data.get("title")
-            if not result_meta.get("thumbnail_url") and o_data.get("thumbnail_url"):
+            if o_data.get("thumbnail_url"):
                 result_meta["thumbnail_url"] = o_data.get("thumbnail_url")
 
-    # 4. Если название содержит разделитель "Исполнитель - Трек"
+    # 5. Если название содержит разделитель "Исполнитель - Трек"
     if result_meta.get("title") and not result_meta.get("artist"):
         t_raw = result_meta["title"]
         if " - " in t_raw:
@@ -301,6 +343,8 @@ def score_track_entry(entry: Dict[str, Any], target_artist: str = "", target_tit
         return -1000
 
     score = 0
+    if dur == 0:
+        score -= 50
 
     clean_tit = re.sub(r'[^\w\s]', '', title).strip()
     clean_uploader = re.sub(r'[^\w\s]', '', uploader).strip()
@@ -315,6 +359,8 @@ def score_track_entry(entry: Dict[str, Any], target_artist: str = "", target_tit
             score += 90
         elif clean_artist in clean_tit:
             score += 70
+        else:
+            score -= 60
 
     # 2. Совпадение названия
     if clean_target:

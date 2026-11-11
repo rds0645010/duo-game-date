@@ -743,7 +743,7 @@ async def download_video(url: str, user_id: int, progress_callback=None):
             output_prefix,
             download_locally=True,
             ffmpeg_path=FFMPEG_PATH,
-            warp_proxy_module=warp_proxy,
+            warp_proxy_module=None,
             progress_callback=progress_callback
         )
 
@@ -784,6 +784,8 @@ async def download_video(url: str, user_id: int, progress_callback=None):
         s_data = await music_service.fetch_spotify_metadata(clean_url, proxy_url=warp_proxy_url)
         track_title = s_data.get("title") if s_data else None
         artist = s_data.get("artist") if s_data else None
+        if artist and str(artist).startswith("http"):
+            artist = None
         thumb_url = s_data.get("thumbnail_url") if s_data else None
 
         if artist and track_title:

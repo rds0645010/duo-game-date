@@ -16,8 +16,8 @@ TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
 
 # Зеркала и эндпоинты API TikWM
 TIKWM_ENDPOINTS = [
-    "https://www.tikwm.com/api/",
     "https://tikwm.com/api/",
+    "https://www.tikwm.com/api/",
 ]
 
 DEFAULT_HEADERS = {
@@ -158,17 +158,19 @@ async def _parse_tikmate(url: str, proxy: Optional[str] = None) -> Optional[Dict
 
 async def _resolve_tiktok_shortlink(url: str, proxy: Optional[str] = None) -> str:
     """
-    Разворачивает короткие ссылки vm.tiktok.com / vt.tiktok.com в полный URL,
+    Разворачивает короткие ссылки vm.tiktok.com / vt.tiktok.com / /t/ в полный URL,
     чтобы сразу определить /photo/ или /video/ и передать в парсеры канонический адрес.
     """
-    if "vm.tiktok.com" not in url and "vt.tiktok.com" not in url:
+    if not any(d in url for d in ("vm.tiktok.com", "vt.tiktok.com", "/t/")):
         return url
     try:
         headers = {
             "User-Agent": DEFAULT_HEADERS["User-Agent"],
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        attempts = [proxy, None] if proxy else [None]
+        attempts = [None]
+        if proxy and proxy not in attempts:
+            attempts.append(proxy)
         for p in attempts:
             try:
                 async with aiohttp.ClientSession() as session:
@@ -193,42 +195,30 @@ async def _resolve_tiktok_shortlink(url: str, proxy: Optional[str] = None) -> st
 
 async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module = None) -> Optional[Dict[str, Any]]:
     """
-    Быстрый и надежный парсер TikTok через SSSTik, TikWM API и Tikmate.
-    Поддерживает Cloudflare WARP для обхода блокировок облачных дата-центров (Render).
+    Быстрый и надежный парсер TikTok через TikWM API, SSSTik и Tikmate.
+    Сначала всегда пробует прямое соединение (самое быстрое <0.5 сек), затем WARP-прокси.
     """
     # 0. Если это короткая ссылка — сначала быстро разворачиваем её в полный URL
-    w_proxy = warp_proxy_module.warp.proxy_url if (warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported) else proxy
-    resolved_url = await _resolve_tiktok_shortlink(url, proxy=w_proxy)
+    resolved_url = await _resolve_tiktok_shortlink(url, proxy=proxy)
 
     # Очищаем трекинговые параметры (_r, u_code, sharer_language), которые ломают парсинг в облаке
     target_url = resolved_url.split("?")[0] if ("/photo/" in resolved_url or "/video/" in resolved_url) else resolved_url
 
-    # Формируем цепочку стратегий: WARP (если доступен), затем прямой доступ
-    strategies = []
+    # Формируем цепочку стратегий: прямой доступ ПЕРВЫМ (мгновенно и без блокировок), затем WARP / proxy
+    strategies = [("direct", None)]
     if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
         try:
             if await warp_proxy_module.warp.ensure_ready() and warp_proxy_module.warp.proxy_url:
                 strategies.append(("warp", warp_proxy_module.warp.proxy_url))
         except Exception as we:
             logger.debug(f"TikTok WARP not ready: {we}")
-    if proxy and ("warp", proxy) not in strategies:
+    if proxy and ("proxy", proxy) not in strategies and ("warp", proxy) not in strategies:
         strategies.append(("proxy", proxy))
-    strategies.append(("direct", None))
 
     is_photo_post = "/photo/" in url or "/photo/" in target_url or "/photo/" in resolved_url
 
     for strat_name, strat_proxy in strategies:
-        # Для фотопостов (/photo/) SSSTik работает быстрее всего (< 1 сек) и надежно отдает все слайды
-        if is_photo_post:
-            try:
-                ss_fast = await _parse_ssstik(target_url, proxy=strat_proxy)
-                if ss_fast and ss_fast.get("photo_urls"):
-                    logger.info(f"✅ [TikTok] Фотопост успешно распарсен через SSSTik ({strat_name})")
-                    return ss_fast
-            except Exception as e:
-                logger.debug(f"SSSTik ({strat_name}) parse error: {e}")
-
-        # Пробуем TikWM
+        # 1. Пробуем TikWM (он идеально и мгновенно отдает и видео, и оригинальные фото-слайды с метаданными)
         urls_to_try = [target_url]
         if target_url != url:
             urls_to_try.append(url)
@@ -256,7 +246,7 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
 
                                     images = d.get("images") or []
                                     if images:
-                                        logger.info(f"✅ [TikTok] Карусель получена через TikWM ({strat_name})")
+                                        logger.info(f"✅ [TikTok] Карусель ({len(images)} фото) получена через TikWM ({strat_name})")
                                         return {
                                             "success": True,
                                             "platform": "tiktok",
@@ -298,7 +288,17 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
                     logger.debug(f"TikTok endpoint {endpoint} ({strat_name}) error: {e}")
                     continue
 
-        # Пробуем Tikmate
+        # 2. Резервный парсер SSSTik (для фотопостов, если TikWM не ответил)
+        if is_photo_post:
+            try:
+                ss_fast = await _parse_ssstik(target_url, proxy=strat_proxy)
+                if ss_fast and ss_fast.get("photo_urls"):
+                    logger.info(f"✅ [TikTok] Фотопост успешно распарсен через SSSTik ({strat_name})")
+                    return ss_fast
+            except Exception as e:
+                logger.debug(f"SSSTik ({strat_name}) parse error: {e}")
+
+        # 3. Резервный парсер Tikmate (для видео)
         try:
             tm_res = await _parse_tikmate(target_url, proxy=strat_proxy)
             if tm_res:
@@ -408,13 +408,10 @@ async def download_file_stream(
         "Referer": ref,
     }
 
-    # Пробуем скачать с прокси (если задан), при неудаче пробуем напрямую (или наоборот)
-    attempts = [proxy] if proxy else [None]
-    if proxy:
-        attempts.append(None)
-    elif not proxy and ("tikcdn.io" not in url):
-        # Если прокси не был задан, но прямой запрос упал, попытка завершится штатно
-        pass
+    # Пробуем скачать напрямую (мгновенно), при неудаче пробуем через прокси (если задан)
+    attempts = [None]
+    if proxy and proxy not in attempts:
+        attempts.append(proxy)
 
     last_err = None
     for cur_proxy in attempts:

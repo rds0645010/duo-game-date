@@ -1266,6 +1266,9 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
         meta += f" | {author_esc}"
     lines.append(meta)
 
+    if total > 1:
+        lines.append(f"🖼 <b>Слайд {current_idx + 1} из {total}</b> <i>(листай стрелками ниже 👇)</i>")
+
     lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
     # Используем \n вместо \n\n, чтобы не было гигантских пустых пробелов
     return "\n".join(lines)
@@ -2622,7 +2625,8 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     raise Exception("download_failed")
             except Exception as e:
                 logging.error(f"Inline download error for {url}: {e}")
-                err_text = format_friendly_error(e)
+                target_platform = detect_platform(url)
+                err_text = format_friendly_error(e, platform=target_platform)
                 retry_kb = InlineKeyboardMarkup(
                     inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")]]
                 )
@@ -3178,7 +3182,7 @@ async def handle_music_download_callback(callback: CallbackQuery):
 
     except Exception as dl_err:
         logging.error(f"Error downloading selected track: {dl_err}")
-        err_msg = format_friendly_error(dl_err)
+        err_msg = format_friendly_error(dl_err, platform="music")
         await safe_edit_status(
             status_msg,
             f"❌ <b>Не удалось скачать аудиозапись:</b> {err_msg}"

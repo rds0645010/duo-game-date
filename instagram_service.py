@@ -262,6 +262,8 @@ async def _download_from_instagram_meta(
                                 await cb
                         except Exception:
                             pass
+
+        await asyncio.gather(*[_dl_slide(i, item) for i, item in enumerate(targets)])
         valid_files = [f for f in album_files if f]
 
         if len(valid_files) > 1:
