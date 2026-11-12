@@ -36,7 +36,8 @@ from aiogram.types import (
     InputMediaAudio,
     ChosenInlineResult,
     CallbackQuery,
-    FSInputFile
+    FSInputFile,
+    SwitchInlineQueryChosenChat
 )
 from downloader import (
     detect_platform,
@@ -1240,15 +1241,15 @@ def format_count(n) -> str:
 def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     """
     Генерирует аккуратную, компактную подпись к слайду фото-карусели:
-    без кучи пустых строк и без дублирования номера слайда (номер уже показан на кнопке).
+    с поддержкой <blockquote expandable> для длинных описаний и отображением играющего трека.
     """
     plat_raw = (data.get("platform") or "TikTok").capitalize()
     title_raw = (data.get("title") or "").strip()
 
     # Схлопываем множественные переносы строк в один пробел
     title_clean = re.sub(r'[\r\n]+', ' ', title_raw).strip()
-    if len(title_clean) > 200:
-        title_clean = title_clean[:200].rstrip() + "..."
+    if len(title_clean) > 300:
+        title_clean = title_clean[:300].rstrip() + "..."
 
     title_esc = html.escape(title_clean)
     author_raw = (data.get("author") or "").strip()[:50]
@@ -1259,7 +1260,26 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
         "instagram альбом", "tiktok слайдшоу", "медиа", "tiktok фото",
         "instagram публикация", "публикация", "фото", "видео"
     ):
-        lines.append(f"📸 <b>{title_esc}</b>")
+        if len(title_esc) > 80:
+            lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+        else:
+            lines.append(f"📸 <b>{title_esc}</b>")
+
+    # Информация об играющей музыке
+    m_info = data.get("music_info") or {}
+    music_title = ""
+    music_author = ""
+    if isinstance(m_info, dict):
+        music_title = (m_info.get("title") or "").strip()
+        music_author = (m_info.get("author") or "").strip()
+    elif isinstance(data.get("music"), str) and not data.get("music", "").startswith("http"):
+        music_title = data.get("music", "").strip()
+
+    if music_title and music_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
+        m_line = f"🎵 <b>Трек:</b> {html.escape(music_title)}"
+        if music_author and music_author.lower() not in ("tiktok", "instagram", "artist", "author"):
+            m_line += f" — {html.escape(music_author)}"
+        lines.append(m_line)
 
     meta = f"📱 <b>Источник:</b> {plat_raw}"
     if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
@@ -1270,17 +1290,31 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
         lines.append(f"🖼 <b>Слайд {current_idx + 1} из {total}</b> <i>(листай стрелками ниже 👇)</i>")
 
     lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
-    # Используем \n вместо \n\n, чтобы не было гигантских пустых пробелов
     return "\n".join(lines)
 
 
-def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False) -> InlineKeyboardMarkup:
+def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False, is_collapsed: bool = False) -> InlineKeyboardMarkup:
     """
     Создает клавиатуру управления слайдшоу:
-    Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
-    Ряд 2 (в инлайн): [ 💌 Поделиться ] и [ 🎵 Звук ] (если есть аудио)
-    Ряд 2-3 (в ЛС): [ 📥 Скачать все слайды альбомом ] и [ 🎧 Скачать MP3 ]
+    - В свернутом виде (is_collapsed=True): [ 🔼 Листать слайды (1/X) ]
+    - В развернутом виде (is_collapsed=False):
+      Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
+      Ряд 2: [ 📥 Скачать все слайды альбомом ] и [ 🎧 Скачать MP3 ]
+      Ряд 3: [ 👥 Отправить другу ] и [ 🎮 В чат ] (целевой шеринг)
+      Ряд 4: [ 🔽 Скрыть кнопки ]
     """
+    if is_collapsed:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"🔼 Листать слайды ({current_idx + 1}/{total})",
+                        callback_data=f"slide_expand:{sid}:{current_idx}"
+                    )
+                ]
+            ]
+        )
+
     # Ряд 1: Интерактивная навигация (активные стрелки / неактивные кружочки)
     btn_prev = InlineKeyboardButton(
         text="⬅️" if current_idx > 0 else "🔘",
@@ -1303,10 +1337,29 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
     music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
 
     if is_inline:
-        # Для инлайн-режима: кнопка поделиться и звук (без лишних счетчиков лайков/комментов)
+        # Для инлайн-режима: кнопки целевого шеринга и звук
         row2 = []
         if orig_url:
-            row2.append(InlineKeyboardButton(text="💌 Поделиться", switch_inline_query=orig_url))
+            row2.append(InlineKeyboardButton(
+                text="👥 Другу в ЛС",
+                switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                    query=orig_url,
+                    allow_user_chats=True,
+                    allow_bot_chats=False,
+                    allow_group_chats=False,
+                    allow_channel_chats=False
+                )
+            ))
+            row2.append(InlineKeyboardButton(
+                text="🎮 В игровой чат",
+                switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                    query=orig_url,
+                    allow_user_chats=False,
+                    allow_bot_chats=False,
+                    allow_group_chats=True,
+                    allow_channel_chats=False
+                )
+            ))
         if m_id:
             row2.append(InlineKeyboardButton(text="🎵 Звук", url=f"https://www.tiktok.com/music/-{m_id}"))
         elif music_u and str(music_u).startswith("http"):
@@ -1330,8 +1383,40 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
             )
         rows.append(row_pm)
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        # Ряд целевого шеринга
+        if orig_url:
+            rows.append([
+                InlineKeyboardButton(
+                    text="👥 Отправить другу",
+                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                        query=orig_url,
+                        allow_user_chats=True,
+                        allow_bot_chats=False,
+                        allow_group_chats=False,
+                        allow_channel_chats=False
+                    )
+                ),
+                InlineKeyboardButton(
+                    text="🎮 В чат",
+                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                        query=orig_url,
+                        allow_user_chats=False,
+                        allow_bot_chats=False,
+                        allow_group_chats=True,
+                        allow_channel_chats=False
+                    )
+                )
+            ])
 
+        # Кнопка скрытия кнопок управления
+        rows.append([
+            InlineKeyboardButton(
+                text="🔽 Скрыть кнопки",
+                callback_data=f"slide_collapse:{sid}:{current_idx}"
+            )
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def process_video_download(message: types.Message, url: str):
@@ -1348,8 +1433,24 @@ async def process_video_download(message: types.Message, url: str):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="↗️ Отправить в чат через @",
-                    switch_inline_query=clean_url
+                    text="👥 Отправить другу",
+                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                        query=clean_url,
+                        allow_user_chats=True,
+                        allow_bot_chats=False,
+                        allow_group_chats=False,
+                        allow_channel_chats=False
+                    )
+                ),
+                InlineKeyboardButton(
+                    text="🎮 В игровой чат",
+                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                        query=clean_url,
+                        allow_user_chats=False,
+                        allow_bot_chats=False,
+                        allow_group_chats=True,
+                        allow_channel_chats=False
+                    )
                 )
             ]
         ]
@@ -1369,8 +1470,9 @@ async def process_video_download(message: types.Message, url: str):
         record_user_download(user_id, clean_url, f_id, m_type, cached.get("title", ""), cached.get("platform", ""))
 
         if m_type == "photo":
+            p_head = f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>" if len(title_esc) > 80 else f"📸 <b>{title_esc}</b>"
             caption = (
-                f"📸 <b>{title_esc}</b>\n\n"
+                f"{p_head}\n\n"
                 f"📱 Источник: {plat_esc}\n"
                 f"✨ <i>Скачано через @duo_play_date_bot (мгновенно из кэша ⚡)</i>"
             )
@@ -1385,8 +1487,9 @@ async def process_video_download(message: types.Message, url: str):
             except Exception as e:
                 logging.warning(f"Failed to send cached photo file_id {f_id}: {e}")
         else:
+            v_head = f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>" if len(title_esc) > 80 else f"🎬 <b>{title_esc}</b>"
             caption = (
-                f"🎬 <b>{title_esc}</b>\n\n"
+                f"{v_head}\n\n"
                 f"📱 Источник: {plat_esc}\n"
                 f"✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы (мгновенно из кэша ⚡)</i>"
             )
@@ -1655,11 +1758,32 @@ async def process_video_download(message: types.Message, url: str):
                 pass
 
             plat_disp = "Instagram" if res.get("platform") == "instagram" else ("TikTok" if res.get("platform") == "tiktok" else "Медиа")
-            photo_caption = (
-                f"📸 <b>{title_esc}</b>\n\n"
-                f"📱 <b>Источник:</b> {plat_disp}\n"
-                f"✨ <i>Скачано через @duo_play_date_bot</i>"
-            )
+            
+            p_lines = []
+            if title_esc and title_esc.lower() not in ("медиа", "фото", "tiktok фото", "instagram публикация", "публикация"):
+                if len(title_esc) > 80:
+                    p_lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+                else:
+                    p_lines.append(f"📸 <b>{title_esc}</b>")
+
+            # Проверяем наличие музыки в посте
+            m_info = res.get("music_info") or {}
+            m_title = ""
+            m_author = ""
+            if isinstance(m_info, dict):
+                m_title = (m_info.get("title") or "").strip()
+                m_author = (m_info.get("author") or "").strip()
+            elif isinstance(res.get("music"), str) and not res.get("music", "").startswith("http"):
+                m_title = res.get("music", "").strip()
+
+            if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
+                m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
+                if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
+                    m_str += f" — {html.escape(m_author)}"
+                p_lines.append(m_str)
+
+            p_lines.append(f"📱 <b>Источник:</b> {plat_disp}\n✨ <i>Скачано через @duo_play_date_bot</i>")
+            photo_caption = "\n\n".join(p_lines)
             photo_input = FSInputFile(file_path)
             sent = await message.answer_photo(
                 photo=photo_input,
@@ -1711,13 +1835,40 @@ async def process_video_download(message: types.Message, url: str):
         except Exception:
             pass
 
-        caption = f"🎬 <b>{title_esc}</b>\n\n📱 <b>Источник:</b> {plat_str}"
-        if author_esc:
-            caption += f" | {author_esc}"
-        caption += "\n✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы</i>"
+        v_lines = []
+        if title_esc and title_esc.lower() not in ("медиа", "видео", "tiktok video", "reels", "shorts"):
+            if len(title_esc) > 80:
+                v_lines.append(f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+            else:
+                v_lines.append(f"🎬 <b>{title_esc}</b>")
+
+        # Проверяем наличие музыки в ролике
+        m_info = res.get("music_info") or {}
+        m_title = ""
+        m_author = ""
+        if isinstance(m_info, dict):
+            m_title = (m_info.get("title") or "").strip()
+            m_author = (m_info.get("author") or "").strip()
+        elif isinstance(res.get("music"), str) and not res.get("music", "").startswith("http"):
+            m_title = res.get("music", "").strip()
+
+        if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
+            m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
+            if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
+                m_str += f" — {html.escape(m_author)}"
+            v_lines.append(m_str)
+
+        meta = f"📱 <b>Источник:</b> {plat_str}"
+        if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
+            meta += f" | {author_esc}"
+        v_lines.append(meta)
+
+        v_lines.append("✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы</i>")
 
         if res.get("low_quality_notice"):
-            caption += "\n\n<i>(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)</i>"
+            v_lines.append("<i>(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)</i>")
+
+        caption = "\n\n".join(v_lines)
 
         sent = None
         # Для TikTok: пробуем мгновенную отправку напрямую по CDN URL (1-2 сек вместо 20 сек)
@@ -2888,6 +3039,62 @@ async def handle_refresh_slide_callback(callback: CallbackQuery):
             pass
     else:
         await callback.answer("ℹ️ Отправьте ссылку заново в чат, чтобы создать новую активную сессию.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("slide_collapse:"))
+async def handle_slide_collapse_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+    sid = parts[1]
+    try:
+        idx = int(parts[2])
+    except ValueError:
+        idx = 0
+    data = get_slideshow_session_db(sid)
+    if not data:
+        await callback.answer("Сессия слайдшоу устарела.", show_alert=False)
+        return
+    total = data.get("total", 1)
+    is_in = bool(callback.inline_message_id)
+    kb = build_slideshow_keyboard(sid, idx, total, data, is_inline=is_in, is_collapsed=True)
+    try:
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=kb)
+        elif callback.inline_message_id:
+            await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer("Кнопки скрыты. Нажми «🔼 Листать слайды», чтобы вернуть.")
+
+
+@dp.callback_query(F.data.startswith("slide_expand:"))
+async def handle_slide_expand_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+    sid = parts[1]
+    try:
+        idx = int(parts[2])
+    except ValueError:
+        idx = 0
+    data = get_slideshow_session_db(sid)
+    if not data:
+        await callback.answer("Сессия слайдшоу устарела.", show_alert=False)
+        return
+    total = data.get("total", 1)
+    is_in = bool(callback.inline_message_id)
+    kb = build_slideshow_keyboard(sid, idx, total, data, is_inline=is_in, is_collapsed=False)
+    try:
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=kb)
+        elif callback.inline_message_id:
+            await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("stat:"))

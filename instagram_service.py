@@ -201,6 +201,9 @@ async def _download_from_instagram_meta(
     author = info.get("uploader") or info.get("channel") or "Instagram"
     likes = info.get("like_count") or 0
     comments = info.get("comment_count") or 0
+    track_name = info.get("track") or info.get("song")
+    artist_name = info.get("artist")
+    music_info = {"title": track_name, "author": artist_name or ""} if track_name else None
 
     # 1. Сценарий: Карусель (альбом из нескольких слайдов)
     raw_entries = info.get("entries")
@@ -286,6 +289,7 @@ async def _download_from_instagram_meta(
                 "digg_count": likes,
                 "comment_count": comments,
                 "share_count": 0,
+                "music_info": music_info,
                 "original_url": clean_url
             }
         elif len(valid_files) == 1:
@@ -301,6 +305,7 @@ async def _download_from_instagram_meta(
                 "digg_count": likes,
                 "comment_count": comments,
                 "share_count": 0,
+                "music_info": music_info,
                 "original_url": clean_url
             }
 
@@ -344,6 +349,7 @@ async def _download_from_instagram_meta(
                     "digg_count": likes,
                     "comment_count": comments,
                     "share_count": 0,
+                    "music_info": music_info,
                     "original_url": clean_url
                 }
         except Exception as dl_err:
