@@ -224,8 +224,44 @@ def init_db():
         cursor.execute("ALTER TABLE slideshow_sessions ADD COLUMN comment_count INTEGER DEFAULT 0")
     except Exception:
         pass
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
+
+
+def get_bot_setting(key: str, default: str = "") -> str:
+    """Возвращает настройку бота из SQLite."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        return str(row[0]) if row and row[0] is not None else default
+    except Exception:
+        return default
+
+
+def set_bot_setting(key: str, value: str):
+    """Сохраняет настройку бота в SQLite."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO bot_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """, (key, value))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Failed to set bot setting {key}: {e}")
 
 
 def save_slideshow_session_db(sid: str, data: dict):
@@ -1151,7 +1187,7 @@ def format_friendly_error(e: Exception, platform: str = "") -> str:
         return (
             "🔞 <b>Это видео имеет возрастное ограничение (18+) в Instagram.</b>\n\n"
             "Instagram закрыл доступ к этому ролику для гостей и требует подтверждения возраста.\n\n"
-            "💡 <i>Администратор может указать cookies аккаунта (INSTAGRAM_COOKIES) в настройках хостинга, чтобы бот мог загружать контент 18+.</i>"
+            "💡 <i>Ты можешь отправить мне куки от любого пустого аккаунта командой <code>/cookies sessionid=...; ds_user_id=...</code> прямо сюда в чат, и бот сразу сможет скачивать такие ролики!</i>"
         )
     elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
         return (
@@ -1236,6 +1272,74 @@ def format_count(n) -> str:
         return f"{int(m_val)}M"
     s = f"{m_val:.1f}M"
     return s.replace(".0M", "M")
+
+
+def make_inline_caption(
+    title: str = "",
+    platform: str = "",
+    author: str = "",
+    music_info: dict = None,
+    music: str = None,
+    is_photo: bool = False,
+    is_audio: bool = False,
+    caption_enabled: bool = True
+) -> Optional[str]:
+    """
+    Генерирует аккуратную подпись для отправки медиа в инлайн-режиме:
+    - Сворачиваемое описание <blockquote expandable> для текстов длиннее 80 символов (кнопка 'Развернуть'/'Свернуть')
+    - Играющий музыкальный трек (если есть)
+    - Источник и автор
+    - Отметка 'Скачано через @duo_play_date_bot'
+    """
+    if not caption_enabled:
+        return None
+
+    plat_name = (platform or "медиа").capitalize()
+    title_raw = (title or "").strip()
+    title_clean = re.sub(r'[\r\n]+', ' ', title_raw).strip()
+    if len(title_clean) > 350:
+        title_clean = title_clean[:350].rstrip() + "..."
+    title_esc = html.escape(title_clean)
+
+    author_raw = (author or "").strip()[:50]
+    author_esc = html.escape(author_raw)
+
+    lines = []
+    icon = "🎵" if is_audio else ("📸" if is_photo else "🎬")
+    label = "Трек" if is_audio else "Описание"
+
+    if title_esc and title_esc.lower() not in (
+        "медиа", "видео", "фото", "tiktok video", "reels", "shorts",
+        "instagram публикация", "публикация", "tiktok фото", "instagram reel",
+        "instagram", "tiktok", "youtube"
+    ):
+        if len(title_esc) > 80:
+            lines.append(f"{icon} <b>{label}:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+        else:
+            lines.append(f"{icon} <b>{title_esc}</b>")
+
+    # Музыкальный трек
+    m_title = ""
+    m_author = ""
+    if isinstance(music_info, dict):
+        m_title = (music_info.get("title") or "").strip()
+        m_author = (music_info.get("author") or "").strip()
+    elif isinstance(music, str) and not music.startswith("http"):
+        m_title = music.strip()
+
+    if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
+        m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
+        if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
+            m_str += f" — {html.escape(m_author)}"
+        lines.append(m_str)
+
+    meta = f"📱 <b>Источник:</b> {plat_name}"
+    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
+        meta += f" | {author_esc}"
+    lines.append(meta)
+
+    lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
+    return "\n\n".join(lines)
 
 
 def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
@@ -1408,13 +1512,13 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
                 )
             ])
 
-        # Кнопка скрытия кнопок управления
-        rows.append([
-            InlineKeyboardButton(
-                text="🔽 Скрыть кнопки",
-                callback_data=f"slide_collapse:{sid}:{current_idx}"
-            )
-        ])
+    # Кнопка скрытия кнопок управления (доступна и в ЛС, и в инлайн-режиме)
+    rows.append([
+        InlineKeyboardButton(
+            text="🔽 Скрыть кнопки",
+            callback_data=f"slide_collapse:{sid}:{current_idx}"
+        )
+    ])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2496,13 +2600,6 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     inline_title = f"💌 Поделиться {p_noun}"
 
-    def _make_caption(title_text: str, is_photo: bool = False) -> str:
-        if not caption_enabled:
-            return None
-        t = html.escape((title_text or p_noun)[:200])
-        icon = p_icon if not is_photo else "📸"
-        return f"{icon} <b>{t}</b>\n\n📱 {plat_source} | ✨ <i>через @duo_play_date_bot</i>"
-
     # ─── 2. КЭШ: если видео уже есть — МГНОВЕННО ───
     cached = get_cached_media(clean_url)
     if drop_poisoned_instagram_photo_cache(clean_url, cached):
@@ -2512,7 +2609,14 @@ async def inline_query_handler(inline_query: InlineQuery):
         cached = None
     if cached and cached.get("file_id"):
         m_type = cached.get("media_type", "video")
-        cap = _make_caption(cached.get("title"), is_photo=(m_type == "photo"))
+        cap = make_inline_caption(
+            title=cached.get("title") or "",
+            platform=cached.get("platform") or plat_source,
+            author=cached.get("author") or "",
+            is_photo=(m_type == "photo"),
+            is_audio=(m_type == "audio"),
+            caption_enabled=caption_enabled
+        )
         if m_type == "photo":
             single_result = InlineQueryResultCachedPhoto(
                 id=f"c_p_{abs(hash(cached['file_id']))}",
@@ -2549,7 +2653,12 @@ async def inline_query_handler(inline_query: InlineQuery):
             logging.debug(f"TikTok direct parse failed: {e}")
 
     if direct_video_url:
-        cap = _make_caption(direct_title)
+        cap = make_inline_caption(
+            title=direct_title or "",
+            platform="TikTok",
+            is_photo=False,
+            caption_enabled=caption_enabled
+        )
         single_result = InlineQueryResultVideo(
             id=f"dir_tt_{abs(hash(clean_url))}",
             video_url=direct_video_url,
@@ -2794,9 +2903,60 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
 
         if file_id:
             caption_enabled = get_user_inline_caption(user_id)
-            caption = None
-            if caption_enabled:
-                caption = "🎬 ✨ <i>Скачано через @duo_play_date_bot</i>"
+            title = ""
+            author = ""
+            plat = ""
+            m_info = None
+            music_val = None
+            if res and isinstance(res, dict):
+                title = res.get("title") or ""
+                author = res.get("author") or res.get("performer") or ""
+                plat = res.get("platform") or ""
+                m_info = res.get("music_info")
+                music_val = res.get("music")
+            elif cached and isinstance(cached, dict):
+                title = cached.get("title") or ""
+                author = cached.get("author") or ""
+                plat = cached.get("platform") or ""
+
+            caption = make_inline_caption(
+                title=title,
+                platform=plat or plat_source,
+                author=author,
+                music_info=m_info,
+                music=music_val,
+                is_photo=is_photo,
+                is_audio=is_audio,
+                caption_enabled=caption_enabled
+            )
+
+            # Кнопки целевого шеринга в инлайне
+            share_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="👥 Другу в ЛС",
+                            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                                query=url,
+                                allow_user_chats=True,
+                                allow_bot_chats=False,
+                                allow_group_chats=False,
+                                allow_channel_chats=False
+                            )
+                        ),
+                        InlineKeyboardButton(
+                            text="🎮 В чат",
+                            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                                query=url,
+                                allow_user_chats=False,
+                                allow_bot_chats=False,
+                                allow_group_chats=True,
+                                allow_channel_chats=False
+                            )
+                        )
+                    ]
+                ]
+            )
 
             try:
                 if is_audio:
@@ -2804,8 +2964,8 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                         media=file_id,
                         caption=caption,
                         parse_mode="HTML" if caption else None,
-                        title=res.get("title") if res else "",
-                        performer=res.get("performer") if res else "",
+                        title=(res.get("title") if res else (cached.get("title") if cached else "")),
+                        performer=(res.get("performer") if res else (cached.get("author") if cached else "")),
                         duration=int(res.get("duration", 0)) if res else 0
                     )
                 elif is_photo:
@@ -2816,7 +2976,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     await bot.edit_message_media(
                         inline_message_id=inline_message_id,
                         media=media_obj,
-                        reply_markup=None
+                        reply_markup=share_kb
                     )
                 except Exception as emm_err:
                     if hasattr(emm_err, "retry_after"):
@@ -2824,7 +2984,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                         await bot.edit_message_media(
                             inline_message_id=inline_message_id,
                             media=media_obj,
-                            reply_markup=None
+                            reply_markup=share_kb
                         )
                     else:
                         raise emm_err
@@ -3428,6 +3588,129 @@ CHATTER_WORDS = {
     "топ", "хаха", "ахах", "лол", "вай", "кайф", "норм", "класс", "ого", "ппц", 
     "жесть", "👍", "🔥", "❤️", "😂", "ясно", "понял", "понятно", "супер", "от души"
 }
+
+def is_bot_admin(user_id: int) -> bool:
+    uid_str = str(user_id)
+    if ADMIN_IDS and uid_str in ADMIN_IDS:
+        return True
+    if ORGANIZER_CHAT_ID and uid_str == str(ORGANIZER_CHAT_ID):
+        return True
+    if not ADMIN_IDS and not ORGANIZER_CHAT_ID:
+        return True
+    return False
+
+
+@dp.message(Command("cookies"))
+async def handle_cookies_command(message: types.Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if not is_bot_admin(user_id):
+        await message.answer("🔒 Эта команда доступна только администратору бота.")
+        return
+
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) > 1:
+        cookie_val = parts[1].strip()
+        set_bot_setting("instagram_cookies", cookie_val)
+        os.environ["INSTAGRAM_COOKIES"] = cookie_val
+        try:
+            from downloader import setup_cookies_file
+            cf = setup_cookies_file("instagram")
+        except Exception:
+            cf = None
+
+        await message.answer(
+            "🍪 <b>Cookies Instagram успешно сохранены и активированы!</b>\n\n"
+            f"✅ Файл сессии: <code>{html.escape(str(cf or 'instagram_cookies.txt'))}</code>\n"
+            "✨ Теперь бот может скачивать ролики 18+ и закрытые посты без ограничений.\n\n"
+            "<i>Чтобы удалить куки:</i> <code>/del_cookies</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    from downloader import setup_cookies_file
+    active_file = setup_cookies_file("instagram")
+    db_val = get_bot_setting("instagram_cookies", "")
+
+    if active_file or db_val or os.environ.get("INSTAGRAM_COOKIES"):
+        src = "База данных бота" if db_val else ("Переменные окружения" if os.environ.get("INSTAGRAM_COOKIES") else "Файл на диске")
+        await message.answer(
+            f"🍪 <b>Статус Cookies Instagram:</b>\n"
+            f"✅ <b>Активны</b> (Источник: {src})\n"
+            f"📁 Файл: <code>{html.escape(str(active_file or 'instagram_cookies.txt'))}</code>\n\n"
+            f"💡 <b>Как обновить:</b>\n"
+            f"1. Отправь: <code>/cookies sessionid=...; ds_user_id=...</code>\n"
+            f"2. Или просто скинь текстовый файл <code>cookies.txt</code> сюда в чат с подписью <code>/cookies</code>\n\n"
+            f"❌ <i>Удалить:</i> <code>/del_cookies</code>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "🍪 <b>Статус Cookies Instagram:</b>\n"
+            "⚠️ <b>Не установлены</b> (ролики 18+ могут блокироваться Instagram)\n\n"
+            "💡 <b>Как легко добавить куки без личного аккаунта:</b>\n"
+            "1. Зарегистрируй любой пустой аккаунт в браузере (в режиме Инкогнито на временную почту, возраст 18+).\n"
+            "2. Скопируй строку куки (<code>sessionid=...; ds_user_id=...</code>) или экспортируй файл <code>cookies.txt</code>.\n"
+            "3. Отправь мне команду:\n"
+            "<code>/cookies sessionid=ВАШ_SESSION_ID; ds_user_id=ВАШ_ID</code>\n"
+            "или просто скинь файл <code>cookies.txt</code> сюда в чат!",
+            parse_mode="HTML"
+        )
+
+
+@dp.message(Command("del_cookies"))
+async def handle_del_cookies_command(message: types.Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if not is_bot_admin(user_id):
+        await message.answer("🔒 Эта команда доступна только администратору бота.")
+        return
+
+    set_bot_setting("instagram_cookies", "")
+    os.environ.pop("INSTAGRAM_COOKIES", None)
+    base_dir = os.path.dirname(__file__)
+    for fn in ("instagram_cookies.txt", "cookies.txt"):
+        p = os.path.join(base_dir, fn)
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+    await message.answer("🗑 <b>Cookies Instagram удалены.</b> Бот снова работает в чистом гостевом режиме.", parse_mode="HTML")
+
+
+@dp.message(F.document)
+async def handle_cookies_document(message: types.Message):
+    doc = message.document
+    if not doc:
+        return
+    caption = (message.caption or "").strip()
+    fn = (doc.file_name or "").lower()
+    user_id = message.from_user.id if message.from_user else 0
+
+    if not is_bot_admin(user_id):
+        return
+
+    if caption.startswith("/cookies") or "cookie" in fn:
+        if doc.file_size and doc.file_size > 512 * 1024:
+            await message.answer("⚠️ Файл слишком большой для файла cookies (лимит 512 КБ).")
+            return
+        try:
+            file_info = await bot.get_file(doc.file_id)
+            dest = os.path.join(os.path.dirname(__file__), "instagram_cookies.txt")
+            await bot.download_file(file_info.file_path, dest)
+            with open(dest, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            set_bot_setting("instagram_cookies", content)
+            os.environ["INSTAGRAM_COOKIES"] = content
+            await message.answer(
+                "🍪 <b>Файл cookies успешно загружен и сохранен!</b>\n\n"
+                f"✅ Сохранено в <code>instagram_cookies.txt</code> ({round(len(content)/1024, 1)} КБ).\n"
+                "✨ Теперь ролики 18+ и закрытые посты будут скачиваться с этой сессией.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Ошибка сохранения cookies: {e}")
+
 
 @dp.message(F.text | F.caption)
 async def handle_text_messages(message: types.Message):

@@ -450,23 +450,55 @@ def _cleanup_stale_downloads(max_age_seconds: int = 2 * 60 * 60):
 def setup_cookies_file(platform: str = None) -> Optional[str]:
     """
     Создает или находит cookies.txt для yt-dlp.
-    Поддерживает как Netscape-формат, так и строку cookies из браузера (sessionid=...; ds_user_id=...).
+    Поддерживает:
+    - Переменные окружения (INSTAGRAM_COOKIES, YOUTUBE_COOKIES, YTDLP_COOKIES)
+    - Базу данных bot_settings (если установлены через команду бота /cookies)
+    - Файлы на диске: instagram_cookies.txt, youtube_cookies.txt или общий cookies.txt
+    - Строки cookies браузера (sessionid=...; ds_user_id=...) и Netscape-формат
     """
-    raw_ig = os.environ.get("INSTAGRAM_COOKIES", "").strip()
+    base_dir = os.path.dirname(__file__)
+
+    # 1. Проверяем сохраненные настройки в БД (если были отправлены в чат)
+    db_cookie = ""
+    try:
+        import sqlite3
+        db_path = os.path.join(base_dir, "users.db")
+        if os.path.exists(db_path):
+            with sqlite3.connect(db_path) as conn:
+                c = conn.cursor()
+                key = f"{platform}_cookies" if platform else "instagram_cookies"
+                c.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
+                row = c.fetchone()
+                if row and row[0]:
+                    db_cookie = str(row[0]).strip()
+    except Exception:
+        pass
+
+    raw_ig = db_cookie if (platform == "instagram" and db_cookie) else os.environ.get("INSTAGRAM_COOKIES", "").strip()
     raw_yt = (
-        os.environ.get("YOUTUBE_COOKIES", "").strip()
+        (db_cookie if platform == "youtube" and db_cookie else "")
+        or os.environ.get("YOUTUBE_COOKIES", "").strip()
         or os.environ.get("YTDLP_COOKIES", "").strip()
     )
 
-    cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-
-    if platform == "youtube" and not raw_yt:
-        return None
-    if platform == "instagram" and not raw_ig:
-        return None
+    # 2. Проверяем специфичные файлы на диске
+    if platform == "instagram":
+        ig_file = os.path.join(base_dir, "instagram_cookies.txt")
+        if os.path.exists(ig_file) and os.path.getsize(ig_file) > 10:
+            return ig_file
+    elif platform == "youtube":
+        yt_file = os.path.join(base_dir, "youtube_cookies.txt")
+        if os.path.exists(yt_file) and os.path.getsize(yt_file) > 10:
+            return yt_file
 
     raw = raw_yt if platform == "youtube" else raw_ig
+    cookies_path = os.path.join(base_dir, f"{platform or 'cookies'}_cookies.txt")
+
     if not raw:
+        # Проверяем общий cookies.txt на диске
+        common_path = os.path.join(base_dir, "cookies.txt")
+        if os.path.exists(common_path) and os.path.getsize(common_path) > 10:
+            return common_path
         return None
 
     try:
