@@ -711,6 +711,11 @@ def _download_ytdlp_sync(
 
         track_name = (info.get("track") or info.get("song") or "").strip() if info else ""
         artist_name = (info.get("artist") or info.get("creator") or "").strip() if info else ""
+        if info and not track_name and info.get("music_tracks"):
+            mtracks = info.get("music_tracks")
+            if isinstance(mtracks, list) and len(mtracks) > 0 and isinstance(mtracks[0], dict):
+                track_name = (mtracks[0].get("title") or "").strip()
+                artist_name = (mtracks[0].get("artist") or "").strip()
         music_inf = {"title": track_name, "author": artist_name} if track_name else None
 
         for cand in candidates:
@@ -907,7 +912,9 @@ async def extract_direct_video_info(url: str):
                     "video_url": tikwm_data["video_url"],
                     "title": tikwm_data.get("title") or "TikTok",
                     "author": tikwm_data.get("author") or "TikTok",
-                    "thumbnail": tikwm_data.get("cover") or ""
+                    "thumbnail": tikwm_data.get("cover") or "",
+                    "music": tikwm_data.get("music"),
+                    "music_info": tikwm_data.get("music_info")
                 }
             elif tikwm_data.get("is_photo") and tikwm_data.get("photo_urls"):
                 return {
@@ -917,7 +924,9 @@ async def extract_direct_video_info(url: str):
                     "photo_url": tikwm_data["photo_urls"][0],
                     "title": tikwm_data.get("title") or "TikTok Фото",
                     "author": tikwm_data.get("author") or "TikTok",
-                    "thumbnail": tikwm_data.get("cover") or tikwm_data["photo_urls"][0]
+                    "thumbnail": tikwm_data.get("cover") or tikwm_data["photo_urls"][0],
+                    "music": tikwm_data.get("music"),
+                    "music_info": tikwm_data.get("music_info")
                 }
 
     # 2. Instagram: instant via public embed (< 1.2s)

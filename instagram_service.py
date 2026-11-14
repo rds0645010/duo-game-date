@@ -22,6 +22,70 @@ EMBED_HEADERS = {
 }
 
 
+def patch_instagram_music_extraction():
+    """
+    Патчит yt-dlp InstagramIE, чтобы извлекать информацию о музыкальном треке и авторе (clips_metadata, music_metadata),
+    которую yt-dlp по умолчанию не извлекает для Reels.
+    """
+    try:
+        from yt_dlp.extractor.instagram import InstagramIE
+        if getattr(InstagramIE, "_music_patched", False):
+            return
+        orig_extract_product = InstagramIE._extract_product
+
+        def _custom_extract_product(self, product_info, *args, **kwargs):
+            res = orig_extract_product(self, product_info, *args, **kwargs)
+            try:
+                target_dict = res if isinstance(res, dict) else {}
+                p_info = product_info
+                if isinstance(p_info, list) and p_info:
+                    p_info = p_info[0]
+                if isinstance(p_info, dict) and not target_dict.get("track"):
+                    t = None
+                    a = None
+                    clips = p_info.get("clips_metadata") or {}
+                    audio_model = clips.get("audio_type_model") or clips.get("music_info") or {}
+                    m_info = audio_model.get("music_info") or audio_model.get("music_asset_info") or clips.get("music_info") or {}
+                    asset = m_info.get("music_asset_info") or m_info
+                    t = asset.get("title") or asset.get("song_name")
+                    a = asset.get("display_artist") or asset.get("artist_name")
+                    if not t:
+                        orig = audio_model.get("original_sound_info") or clips.get("original_sound_info") or {}
+                        t = orig.get("original_audio_title")
+                        a = orig.get("ig_artist", {}).get("username") or orig.get("ig_artist", {}).get("full_name")
+                    if not t:
+                        music_meta = p_info.get("music_metadata") or {}
+                        m_meta_info = music_meta.get("music_info") or {}
+                        asset2 = m_meta_info.get("music_asset_info") or m_meta_info
+                        t = asset2.get("title") or asset2.get("song_name")
+                        a = asset2.get("display_artist") or asset2.get("artist_name")
+                    if not t:
+                        c_attr = p_info.get("clips_music_attribution_info") or {}
+                        t = c_attr.get("song_name")
+                        a = c_attr.get("artist_name")
+                    if not t:
+                        edges = (p_info.get("edge_media_to_music_attribution") or {}).get("edges") or []
+                        if edges and isinstance(edges, list) and isinstance(edges[0], dict):
+                            node = edges[0].get("node") or {}
+                            t = node.get("song_name")
+                            a = node.get("artist_name")
+                    if t:
+                        target_dict["track"] = str(t).strip()
+                        if a:
+                            target_dict["artist"] = str(a).strip()
+            except Exception:
+                pass
+            return res
+
+        InstagramIE._extract_product = _custom_extract_product
+        InstagramIE._music_patched = True
+    except Exception as e:
+        logger.debug(f"Failed to patch InstagramIE music extraction: {e}")
+
+
+patch_instagram_music_extraction()
+
+
 def is_reel_url(url: str) -> bool:
     return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
 
@@ -64,6 +128,20 @@ async def parse_instagram_embed(url: str) -> Optional[Dict[str, Any]]:
                     if cap_match:
                         title = py_html.unescape(cap_match.group(1)).strip()
 
+                    # Музыка
+                    m_track = None
+                    m_artist = None
+                    music_match = re.search(r'"music_asset_info":\s*\{[^}]*"title":\s*"([^"]+)"[^}]*"display_artist":\s*"([^"]+)"', text)
+                    if music_match:
+                        m_track = py_html.unescape(music_match.group(1)).strip()
+                        m_artist = py_html.unescape(music_match.group(2)).strip()
+                    else:
+                        orig_sound_match = re.search(r'"original_sound_info":\s*\{[^}]*"original_audio_title":\s*"([^"]+)"', text)
+                        if orig_sound_match:
+                            m_track = py_html.unescape(orig_sound_match.group(1)).strip()
+
+                    m_inf = {"title": m_track, "author": m_artist or ""} if m_track else None
+
                     # Прямое видео
                     video_matches = re.findall(r'"video_url":\s*"([^"]+)"', text)
                     if video_matches:
@@ -79,7 +157,9 @@ async def parse_instagram_embed(url: str) -> Optional[Dict[str, Any]]:
                             "video_url": v_url,
                             "title": title or "Instagram Reels",
                             "author": author or "Instagram",
-                            "thumbnail": thumb or f"https://www.instagram.com/p/{shortcode}/media/?size=l"
+                            "thumbnail": thumb or f"https://www.instagram.com/p/{shortcode}/media/?size=l",
+                            "music": m_track,
+                            "music_info": m_inf
                         }
 
                     # Прямое фото (только для обычных фотопостов, не для Reels)
@@ -289,6 +369,7 @@ async def _download_from_instagram_meta(
                 "digg_count": likes,
                 "comment_count": comments,
                 "share_count": 0,
+                "music": track_name,
                 "music_info": music_info,
                 "original_url": clean_url
             }
@@ -305,6 +386,7 @@ async def _download_from_instagram_meta(
                 "digg_count": likes,
                 "comment_count": comments,
                 "share_count": 0,
+                "music": track_name,
                 "music_info": music_info,
                 "original_url": clean_url
             }
@@ -327,6 +409,8 @@ async def _download_from_instagram_meta(
                     "digg_count": likes,
                     "comment_count": comments,
                     "share_count": 0,
+                    "music": track_name,
+                    "music_info": music_info,
                     "original_url": clean_url
                 }
         except Exception as dl_err:
@@ -349,6 +433,7 @@ async def _download_from_instagram_meta(
                     "digg_count": likes,
                     "comment_count": comments,
                     "share_count": 0,
+                    "music": track_name,
                     "music_info": music_info,
                     "original_url": clean_url
                 }

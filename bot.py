@@ -1314,6 +1314,75 @@ def format_count(n) -> str:
     return s.replace(".0M", "M")
 
 
+def format_description_line(title: str, is_photo: bool = False, is_audio: bool = False) -> Optional[str]:
+    """
+    Форматирует строку с описанием публикации:
+    - Скрыто под <tg-spoiler>, чтобы описание не раскрывалось само при прокрутке чата
+      и оставалось аккуратно свёрнутым.
+    - Открывается по нажатию пользователем.
+    """
+    title_raw = (title or "").strip()
+    title_clean = re.sub(r'\s+', ' ', title_raw).strip()
+    if not title_clean:
+        return None
+    if title_clean.lower() in (
+        "медиа", "видео", "фото", "tiktok video", "reels", "shorts",
+        "instagram публикация", "публикация", "tiktok фото", "instagram reel",
+        "instagram", "tiktok", "youtube", "media", "audio", "sound"
+    ):
+        return None
+    if len(title_clean) > 280:
+        title_clean = title_clean[:280].rstrip() + "..."
+    title_esc = html.escape(title_clean)
+    icon = "🎵" if is_audio else ("📸" if is_photo else "🎬")
+    label = "Трек" if is_audio else "Описание"
+    return f"{icon} <b>{label}:</b> <tg-spoiler>{title_esc}</tg-spoiler>"
+
+
+def format_music_line(music_info: dict = None, music: str = None) -> Optional[str]:
+    """
+    Форматирует строку с информацией о музыке/треке:
+    - 🎵 Музыка: Название — Исполнитель (для распознанных песен и треков)
+    - 🎵 Звук: Автор (для оригинальных звуков)
+    - None (если трек отсутствует или является пустым шаблоном)
+    """
+    m_title = ""
+    m_author = ""
+
+    if isinstance(music_info, dict):
+        m_title = (music_info.get("title") or music_info.get("song") or "").strip()
+        m_author = (music_info.get("author") or music_info.get("artist") or "").strip()
+    elif isinstance(music, str) and not music.startswith("http"):
+        m_title = music.strip()
+
+    if not m_title:
+        return None
+
+    m_lower = m_title.lower()
+    if m_lower in (
+        "original sound", "оригинальный звук", "original audio", "оригинальное аудио",
+        "tiktok", "instagram", "video", "shorts", "audio", "sound"
+    ):
+        return None
+
+    # Если это оригинальный звук автора (e.g. "original sound - nickname" или "оригинальный звук - nickname")
+    for orig_prefix in ("original sound -", "оригинальный звук -", "original audio -", "оригинальное аудио -"):
+        if m_lower.startswith(orig_prefix):
+            clean_orig = m_title[len(orig_prefix):].strip()
+            if clean_orig:
+                return f"🎵 <b>Звук:</b> {html.escape(clean_orig)}"
+            return None
+
+    m_title_esc = html.escape(m_title)
+    if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author", "creator", "unknown"):
+        m_author_esc = html.escape(m_author)
+        # Избегаем дублирования если исполнитель уже содержится в названии трека
+        if m_author.lower() in m_lower:
+            return f"🎵 <b>Музыка:</b> {m_title_esc}"
+        return f"🎵 <b>Музыка:</b> {m_title_esc} — {m_author_esc}"
+    return f"🎵 <b>Музыка:</b> {m_title_esc}"
+
+
 def make_inline_caption(
     title: str = "",
     platform: str = "",
@@ -1326,7 +1395,7 @@ def make_inline_caption(
 ) -> Optional[str]:
     """
     Генерирует аккуратную подпись для отправки медиа в инлайн-режиме:
-    - Сворачиваемое описание <blockquote expandable> для текстов длиннее 80 символов (кнопка 'Развернуть'/'Свернуть')
+    - Скрытое описание <tg-spoiler> (всегда свёрнуто, не раскрывается при прокрутке)
     - Играющий музыкальный трек (если есть)
     - Источник и автор
     - Отметка 'Скачано через @duo_play_date_bot'
@@ -1335,43 +1404,20 @@ def make_inline_caption(
         return None
 
     plat_name = (platform or "медиа").capitalize()
-    title_raw = (title or "").strip()
-    title_clean = re.sub(r'[\r\n]+', ' ', title_raw).strip()
-    if len(title_clean) > 350:
-        title_clean = title_clean[:350].rstrip() + "..."
-    title_esc = html.escape(title_clean)
-
     author_raw = (author or "").strip()[:50]
     author_esc = html.escape(author_raw)
 
     lines = []
-    icon = "🎵" if is_audio else ("📸" if is_photo else "🎬")
-    label = "Трек" if is_audio else "Описание"
+    desc_line = format_description_line(title, is_photo=is_photo, is_audio=is_audio)
+    if desc_line:
+        lines.append(desc_line)
 
-    if title_esc and title_esc.lower() not in (
-        "медиа", "видео", "фото", "tiktok video", "reels", "shorts",
-        "instagram публикация", "публикация", "tiktok фото", "instagram reel",
-        "instagram", "tiktok", "youtube"
-    ):
-        lines.append(f"{icon} <b>{label}:</b>\n<blockquote expandable>{title_esc}</blockquote>")
-
-    # Музыкальный трек
-    m_title = ""
-    m_author = ""
-    if isinstance(music_info, dict):
-        m_title = (music_info.get("title") or "").strip()
-        m_author = (music_info.get("author") or "").strip()
-    elif isinstance(music, str) and not music.startswith("http"):
-        m_title = music.strip()
-
-    if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
-        m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
-        if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
-            m_str += f" — {html.escape(m_author)}"
-        lines.append(m_str)
+    music_line = format_music_line(music_info=music_info, music=music)
+    if music_line:
+        lines.append(music_line)
 
     meta = f"📱 <b>Источник:</b> {plat_name}"
-    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
+    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео", "creator", "unknown"):
         meta += f" | {author_esc}"
     lines.append(meta)
 
@@ -1382,45 +1428,23 @@ def make_inline_caption(
 def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     """
     Генерирует аккуратную, компактную подпись к слайду фото-карусели:
-    с поддержкой <blockquote expandable> для длинных описаний и отображением играющего трека.
+    с поддержкой скрытого описания <tg-spoiler> и отображением играющего трека.
     """
     plat_raw = (data.get("platform") or "TikTok").capitalize()
-    title_raw = (data.get("title") or "").strip()
-
-    # Схлопываем множественные переносы строк в один пробел
-    title_clean = re.sub(r'[\r\n]+', ' ', title_raw).strip()
-    if len(title_clean) > 300:
-        title_clean = title_clean[:300].rstrip() + "..."
-
-    title_esc = html.escape(title_clean)
     author_raw = (data.get("author") or "").strip()[:50]
     author_esc = html.escape(author_raw)
 
     lines = []
-    if title_esc and title_esc.lower() not in (
-        "instagram альбом", "tiktok слайдшоу", "медиа", "tiktok фото",
-        "instagram публикация", "публикация", "фото", "видео"
-    ):
-        lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+    desc_line = format_description_line(data.get("title") or "", is_photo=True)
+    if desc_line:
+        lines.append(desc_line)
 
-    # Информация об играющей музыке
-    m_info = data.get("music_info") or {}
-    music_title = ""
-    music_author = ""
-    if isinstance(m_info, dict):
-        music_title = (m_info.get("title") or "").strip()
-        music_author = (m_info.get("author") or "").strip()
-    elif isinstance(data.get("music"), str) and not data.get("music", "").startswith("http"):
-        music_title = data.get("music", "").strip()
-
-    if music_title and music_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
-        m_line = f"🎵 <b>Трек:</b> {html.escape(music_title)}"
-        if music_author and music_author.lower() not in ("tiktok", "instagram", "artist", "author"):
-            m_line += f" — {html.escape(music_author)}"
-        lines.append(m_line)
+    music_line = format_music_line(music_info=data.get("music_info"), music=data.get("music"))
+    if music_line:
+        lines.append(music_line)
 
     meta = f"📱 <b>Источник:</b> {plat_raw}"
-    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
+    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео", "creator", "unknown"):
         meta += f" | {author_esc}"
     lines.append(meta)
 
@@ -1428,6 +1452,7 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
         lines.append(f"🖼 <b>Слайд {current_idx + 1} из {total}</b> <i>(листай стрелками ниже 👇)</i>")
 
     lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
+    return "\n".join(lines)
     return "\n".join(lines)
 
 
@@ -1540,14 +1565,13 @@ async def process_video_download(message: types.Message, url: str):
 
         if m_type == "photo":
             p_lines = []
-            if title_esc and title_esc.lower() not in ("медиа", "фото", "tiktok фото", "instagram публикация", "публикация"):
-                p_lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+            desc_line = format_description_line(cached.get("title") or "", is_photo=True)
+            if desc_line:
+                p_lines.append(desc_line)
 
-            if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
-                m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
-                if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
-                    m_str += f" — {html.escape(m_author)}"
-                p_lines.append(m_str)
+            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"))
+            if m_line:
+                p_lines.append(m_line)
 
             p_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot (мгновенно из кэша ⚡)</i>")
             caption = "\n\n".join(p_lines)
@@ -1563,14 +1587,13 @@ async def process_video_download(message: types.Message, url: str):
                 logging.warning(f"Failed to send cached photo file_id {f_id}: {e}")
         else:
             v_lines = []
-            if title_esc and title_esc.lower() not in ("медиа", "видео", "tiktok video", "reels", "shorts"):
-                v_lines.append(f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+            desc_line = format_description_line(cached.get("title") or "", is_photo=False)
+            if desc_line:
+                v_lines.append(desc_line)
 
-            if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
-                m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
-                if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
-                    m_str += f" — {html.escape(m_author)}"
-                v_lines.append(m_str)
+            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"))
+            if m_line:
+                v_lines.append(m_line)
 
             v_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы (мгновенно из кэша ⚡)</i>")
             caption = "\n\n".join(v_lines)
@@ -1843,24 +1866,13 @@ async def process_video_download(message: types.Message, url: str):
             plat_disp = "Instagram" if res.get("platform") == "instagram" else ("TikTok" if res.get("platform") == "tiktok" else "Медиа")
             
             p_lines = []
-            if title_esc and title_esc.lower() not in ("медиа", "фото", "tiktok фото", "instagram публикация", "публикация"):
-                p_lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+            desc_line = format_description_line(res.get("title") or "", is_photo=True)
+            if desc_line:
+                p_lines.append(desc_line)
 
-            # Проверяем наличие музыки в посте
-            m_info = res.get("music_info") or {}
-            m_title = ""
-            m_author = ""
-            if isinstance(m_info, dict):
-                m_title = (m_info.get("title") or "").strip()
-                m_author = (m_info.get("author") or "").strip()
-            elif isinstance(res.get("music"), str) and not res.get("music", "").startswith("http"):
-                m_title = res.get("music", "").strip()
-
-            if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
-                m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
-                if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
-                    m_str += f" — {html.escape(m_author)}"
-                p_lines.append(m_str)
+            m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"))
+            if m_line:
+                p_lines.append(m_line)
 
             p_lines.append(f"📱 <b>Источник:</b> {plat_disp}\n✨ <i>Скачано через @duo_play_date_bot</i>")
             photo_caption = "\n\n".join(p_lines)
@@ -1918,27 +1930,16 @@ async def process_video_download(message: types.Message, url: str):
             pass
 
         v_lines = []
-        if title_esc and title_esc.lower() not in ("медиа", "видео", "tiktok video", "reels", "shorts"):
-            v_lines.append(f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+        desc_line = format_description_line(res.get("title") or "", is_photo=False)
+        if desc_line:
+            v_lines.append(desc_line)
 
-        # Проверяем наличие музыки в ролике
-        m_info = res.get("music_info") or {}
-        m_title = ""
-        m_author = ""
-        if isinstance(m_info, dict):
-            m_title = (m_info.get("title") or "").strip()
-            m_author = (m_info.get("author") or "").strip()
-        elif isinstance(res.get("music"), str) and not res.get("music", "").startswith("http"):
-            m_title = res.get("music", "").strip()
-
-        if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
-            m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
-            if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
-                m_str += f" — {html.escape(m_author)}"
-            v_lines.append(m_str)
+        m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"))
+        if m_line:
+            v_lines.append(m_line)
 
         meta = f"📱 <b>Источник:</b> {plat_str}"
-        if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
+        if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео", "creator", "unknown"):
             meta += f" | {author_esc}"
         v_lines.append(meta)
 
@@ -2218,7 +2219,7 @@ def get_settings_text(user_id: int) -> str:
     is_pm_save = get_user_save_to_pm(user_id)
 
     mode_descr = (
-        "🟢 <b>Включена (по умолчанию)</b> — под видео добавляется сворачиваемое описание и трек"
+        "🟢 <b>Включена (по умолчанию)</b> — под видео добавляется скрытое описание и музыкальный трек"
         if is_caption else
         "⚪ <b>Выключена</b> — видео отправляется абсолютно чистым, без текста"
     )
@@ -2590,6 +2591,8 @@ async def inline_query_handler(inline_query: InlineQuery):
             title=cached.get("title") or "",
             platform=cached.get("platform") or plat_source,
             author=cached.get("author") or "",
+            music_info=cached.get("music_info"),
+            music=cached.get("music"),
             is_photo=(m_type == "photo"),
             is_audio=(m_type == "audio"),
             caption_enabled=caption_enabled
@@ -2633,6 +2636,9 @@ async def inline_query_handler(inline_query: InlineQuery):
         cap = make_inline_caption(
             title=direct_title or "",
             platform="TikTok",
+            author=direct_info.get("author") or "",
+            music_info=direct_info.get("music_info"),
+            music=direct_info.get("music"),
             is_photo=False,
             caption_enabled=caption_enabled
         )
@@ -2897,6 +2903,8 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                 title = cached.get("title") or ""
                 author = cached.get("author") or ""
                 plat = cached.get("platform") or ""
+                m_info = cached.get("music_info")
+                music_val = cached.get("music")
 
             caption = make_inline_caption(
                 title=title,
