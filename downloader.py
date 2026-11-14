@@ -709,6 +709,10 @@ def _download_ytdlp_sync(
             prefix_files = []
         candidates.extend(prefix_files)
 
+        track_name = (info.get("track") or info.get("song") or "").strip() if info else ""
+        artist_name = (info.get("artist") or info.get("creator") or "").strip() if info else ""
+        music_inf = {"title": track_name, "author": artist_name} if track_name else None
+
         for cand in candidates:
             if is_valid_mp4_file(cand, allow_audio=audio_only):
                 return {
@@ -721,6 +725,8 @@ def _download_ytdlp_sync(
                     ),
                     "filesize": os.path.getsize(cand),
                     "is_audio": audio_only,
+                    "music_info": music_inf,
+                    "music": track_name,
                 }
         raise Exception("Downloaded file not valid or not found on disk")
     except Exception:

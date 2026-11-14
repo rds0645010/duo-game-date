@@ -157,6 +157,14 @@ def init_db():
         cursor.execute("ALTER TABLE video_cache ADD COLUMN media_type TEXT DEFAULT 'video'")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE video_cache ADD COLUMN music TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE video_cache ADD COLUMN music_info_json TEXT")
+    except Exception:
+        pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dl_tokens (
             token TEXT PRIMARY KEY,
@@ -474,15 +482,15 @@ def get_dl_token_info(token: str):
 
 def get_user_inline_caption(user_id: int) -> bool:
     if not user_id:
-        return False
+        return True
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT inline_caption FROM user_settings WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    if row is not None:
+    if row is not None and row[0] is not None:
         return bool(row[0])
-    return False  # По умолчанию выключена: чистое видео без текста!
+    return True  # По умолчанию включена: описание и трек всегда добавляются!
 
 
 def set_user_inline_caption(user_id: int, enabled: bool):
@@ -564,28 +572,44 @@ def get_cached_media(url: str):
     canon_k = get_canonical_media_key(url)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    row = None
     try:
         cursor.execute(
-            "SELECT file_id, title, platform, author, media_type FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
+            "SELECT file_id, title, platform, author, media_type, music, music_info_json FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
             (canon_k, clean_u)
         )
         row = cursor.fetchone()
     except Exception:
-        cursor.execute(
-            "SELECT file_id, title, platform, author FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
-            (canon_k, clean_u)
-        )
-        row = cursor.fetchone()
-        if row:
-            row = (row[0], row[1], row[2], row[3], "video")
+        try:
+            cursor.execute(
+                "SELECT file_id, title, platform, author, media_type FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
+                (canon_k, clean_u)
+            )
+            row = cursor.fetchone()
+        except Exception:
+            cursor.execute(
+                "SELECT file_id, title, platform, author FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
+                (canon_k, clean_u)
+            )
+            row = cursor.fetchone()
+            if row:
+                row = (row[0], row[1], row[2], row[3], "video")
     conn.close()
     if row:
+        m_inf = None
+        if len(row) > 6 and row[6]:
+            try:
+                m_inf = json.loads(row[6])
+            except Exception:
+                m_inf = None
         return {
             "file_id": row[0],
             "title": row[1],
             "platform": row[2],
             "author": row[3],
-            "media_type": row[4] if len(row) > 4 and row[4] else "video"
+            "media_type": row[4] if len(row) > 4 and row[4] else "video",
+            "music": row[5] if len(row) > 5 else None,
+            "music_info": m_inf
         }
     return None
 
@@ -594,27 +618,43 @@ def get_cached_video(url: str):
     return get_cached_media(url)
 
 
-def save_cached_media(url: str, file_id: str, media_type: str, title: str, platform: str, author: str = ""):
+def save_cached_media(url: str, file_id: str, media_type: str, title: str, platform: str, author: str = "", music: str = None, music_info: dict = None):
     if not url or not file_id:
         return
     clean_u = url.split("?")[0].strip().rstrip("/")
     canon_k = get_canonical_media_key(url)
+    m_json = json.dumps(music_info) if isinstance(music_info, dict) else None
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     for u_key in set([clean_u, canon_k]):
         if not u_key:
             continue
-        cursor.execute("""
-            INSERT INTO video_cache (url, file_id, media_type, title, platform, author)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(url) DO UPDATE SET
-                file_id = excluded.file_id,
-                media_type = excluded.media_type,
-                title = excluded.title,
-                platform = excluded.platform,
-                author = excluded.author,
-                created_at = CURRENT_TIMESTAMP
-        """, (u_key, file_id, media_type, title, platform, author))
+        try:
+            cursor.execute("""
+                INSERT INTO video_cache (url, file_id, media_type, title, platform, author, music, music_info_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    file_id = excluded.file_id,
+                    media_type = excluded.media_type,
+                    title = excluded.title,
+                    platform = excluded.platform,
+                    author = excluded.author,
+                    music = excluded.music,
+                    music_info_json = excluded.music_info_json,
+                    created_at = CURRENT_TIMESTAMP
+            """, (u_key, file_id, media_type, title, platform, author, music, m_json))
+        except Exception:
+            cursor.execute("""
+                INSERT INTO video_cache (url, file_id, media_type, title, platform, author)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    file_id = excluded.file_id,
+                    media_type = excluded.media_type,
+                    title = excluded.title,
+                    platform = excluded.platform,
+                    author = excluded.author,
+                    created_at = CURRENT_TIMESTAMP
+            """, (u_key, file_id, media_type, title, platform, author))
     conn.commit()
     conn.close()
 
@@ -1313,10 +1353,7 @@ def make_inline_caption(
         "instagram публикация", "публикация", "tiktok фото", "instagram reel",
         "instagram", "tiktok", "youtube"
     ):
-        if len(title_esc) > 80:
-            lines.append(f"{icon} <b>{label}:</b>\n<blockquote expandable>{title_esc}</blockquote>")
-        else:
-            lines.append(f"{icon} <b>{title_esc}</b>")
+        lines.append(f"{icon} <b>{label}:</b>\n<blockquote expandable>{title_esc}</blockquote>")
 
     # Музыкальный трек
     m_title = ""
@@ -1364,10 +1401,7 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
         "instagram альбом", "tiktok слайдшоу", "медиа", "tiktok фото",
         "instagram публикация", "публикация", "фото", "видео"
     ):
-        if len(title_esc) > 80:
-            lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
-        else:
-            lines.append(f"📸 <b>{title_esc}</b>")
+        lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
 
     # Информация об играющей музыке
     m_info = data.get("music_info") or {}
@@ -1441,29 +1475,7 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
     music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
 
     if is_inline:
-        # Для инлайн-режима: кнопки целевого шеринга и звук
         row2 = []
-        if orig_url:
-            row2.append(InlineKeyboardButton(
-                text="👥 Другу в ЛС",
-                switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                    query=orig_url,
-                    allow_user_chats=True,
-                    allow_bot_chats=False,
-                    allow_group_chats=False,
-                    allow_channel_chats=False
-                )
-            ))
-            row2.append(InlineKeyboardButton(
-                text="🎮 В игровой чат",
-                switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                    query=orig_url,
-                    allow_user_chats=False,
-                    allow_bot_chats=False,
-                    allow_group_chats=True,
-                    allow_channel_chats=False
-                )
-            ))
         if m_id:
             row2.append(InlineKeyboardButton(text="🎵 Звук", url=f"https://www.tiktok.com/music/-{m_id}"))
         elif music_u and str(music_u).startswith("http"):
@@ -1487,31 +1499,6 @@ def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict,
             )
         rows.append(row_pm)
 
-        # Ряд целевого шеринга
-        if orig_url:
-            rows.append([
-                InlineKeyboardButton(
-                    text="👥 Отправить другу",
-                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                        query=orig_url,
-                        allow_user_chats=True,
-                        allow_bot_chats=False,
-                        allow_group_chats=False,
-                        allow_channel_chats=False
-                    )
-                ),
-                InlineKeyboardButton(
-                    text="🎮 В чат",
-                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                        query=orig_url,
-                        allow_user_chats=False,
-                        allow_bot_chats=False,
-                        allow_group_chats=True,
-                        allow_channel_chats=False
-                    )
-                )
-            ])
-
     # Кнопка скрытия кнопок управления (доступна и в ЛС, и в инлайн-режиме)
     rows.append([
         InlineKeyboardButton(
@@ -1533,33 +1520,6 @@ async def process_video_download(message: types.Message, url: str):
 
     # 1. Проверяем кэш (если видео/фото уже скачивалось ранее — отдаём МГНОВЕННО)
     user_id = message.from_user.id
-    share_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 Отправить другу",
-                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                        query=clean_url,
-                        allow_user_chats=True,
-                        allow_bot_chats=False,
-                        allow_group_chats=False,
-                        allow_channel_chats=False
-                    )
-                ),
-                InlineKeyboardButton(
-                    text="🎮 В игровой чат",
-                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                        query=clean_url,
-                        allow_user_chats=False,
-                        allow_bot_chats=False,
-                        allow_group_chats=True,
-                        allow_channel_chats=False
-                    )
-                )
-            ]
-        ]
-    )
-
     cached = get_cached_media(clean_url)
     if drop_poisoned_instagram_photo_cache(clean_url, cached):
         cached = None
@@ -1573,35 +1533,52 @@ async def process_video_download(message: types.Message, url: str):
         m_type = cached.get("media_type", "video")
         record_user_download(user_id, clean_url, f_id, m_type, cached.get("title", ""), cached.get("platform", ""))
 
+        # Извлекаем играющий трек, если сохранен в кэше
+        m_info = cached.get("music_info") or {}
+        m_title = (m_info.get("title") if isinstance(m_info, dict) else None) or cached.get("music")
+        m_author = m_info.get("author") if isinstance(m_info, dict) else ""
+
         if m_type == "photo":
-            p_head = f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>" if len(title_esc) > 80 else f"📸 <b>{title_esc}</b>"
-            caption = (
-                f"{p_head}\n\n"
-                f"📱 Источник: {plat_esc}\n"
-                f"✨ <i>Скачано через @duo_play_date_bot (мгновенно из кэша ⚡)</i>"
-            )
+            p_lines = []
+            if title_esc and title_esc.lower() not in ("медиа", "фото", "tiktok фото", "instagram публикация", "публикация"):
+                p_lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+
+            if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
+                m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
+                if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
+                    m_str += f" — {html.escape(m_author)}"
+                p_lines.append(m_str)
+
+            p_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot (мгновенно из кэша ⚡)</i>")
+            caption = "\n\n".join(p_lines)
             try:
                 await message.answer_photo(
                     photo=f_id,
                     caption=caption,
-                    reply_markup=share_kb,
+                    reply_markup=None,
                     parse_mode="HTML"
                 )
                 return
             except Exception as e:
                 logging.warning(f"Failed to send cached photo file_id {f_id}: {e}")
         else:
-            v_head = f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>" if len(title_esc) > 80 else f"🎬 <b>{title_esc}</b>"
-            caption = (
-                f"{v_head}\n\n"
-                f"📱 Источник: {plat_esc}\n"
-                f"✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы (мгновенно из кэша ⚡)</i>"
-            )
+            v_lines = []
+            if title_esc and title_esc.lower() not in ("медиа", "видео", "tiktok video", "reels", "shorts"):
+                v_lines.append(f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
+
+            if m_title and m_title.lower() not in ("original sound", "оригинальный звук", "tiktok", "instagram"):
+                m_str = f"🎵 <b>Трек:</b> {html.escape(m_title)}"
+                if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author"):
+                    m_str += f" — {html.escape(m_author)}"
+                v_lines.append(m_str)
+
+            v_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы (мгновенно из кэша ⚡)</i>")
+            caption = "\n\n".join(v_lines)
             try:
                 await message.answer_video(
                     video=f_id,
                     caption=caption,
-                    reply_markup=share_kb,
+                    reply_markup=None,
                     parse_mode="HTML"
                 )
                 return
@@ -1832,7 +1809,7 @@ async def process_video_download(message: types.Message, url: str):
                 performer=performer[:50],
                 duration=int(res.get("duration", 0)),
                 thumbnail=thumb_input,
-                reply_markup=share_kb,
+                reply_markup=None,
                 parse_mode="HTML"
             )
             if sent and sent.audio:
@@ -1842,7 +1819,9 @@ async def process_video_download(message: types.Message, url: str):
                     "audio",
                     track_title,
                     res.get("platform", "music"),
-                    performer
+                    performer,
+                    music=res.get("music"),
+                    music_info=res.get("music_info")
                 )
             try:
                 await status_msg.delete()
@@ -1865,10 +1844,7 @@ async def process_video_download(message: types.Message, url: str):
             
             p_lines = []
             if title_esc and title_esc.lower() not in ("медиа", "фото", "tiktok фото", "instagram публикация", "публикация"):
-                if len(title_esc) > 80:
-                    p_lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
-                else:
-                    p_lines.append(f"📸 <b>{title_esc}</b>")
+                p_lines.append(f"📸 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
 
             # Проверяем наличие музыки в посте
             m_info = res.get("music_info") or {}
@@ -1892,7 +1868,7 @@ async def process_video_download(message: types.Message, url: str):
             sent = await message.answer_photo(
                 photo=photo_input,
                 caption=photo_caption,
-                reply_markup=share_kb,
+                reply_markup=None,
                 parse_mode="HTML"
             )
             if sent and sent.photo:
@@ -1903,7 +1879,9 @@ async def process_video_download(message: types.Message, url: str):
                     "photo",
                     res.get("title", ""),
                     res.get("platform", ""),
-                    res.get("author", "")
+                    res.get("author", ""),
+                    music=res.get("music"),
+                    music_info=res.get("music_info")
                 )
                 record_user_download(
                     user_id,
@@ -1941,10 +1919,7 @@ async def process_video_download(message: types.Message, url: str):
 
         v_lines = []
         if title_esc and title_esc.lower() not in ("медиа", "видео", "tiktok video", "reels", "shorts"):
-            if len(title_esc) > 80:
-                v_lines.append(f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
-            else:
-                v_lines.append(f"🎬 <b>{title_esc}</b>")
+            v_lines.append(f"🎬 <b>Описание:</b>\n<blockquote expandable>{title_esc}</blockquote>")
 
         # Проверяем наличие музыки в ролике
         m_info = res.get("music_info") or {}
@@ -1981,7 +1956,7 @@ async def process_video_download(message: types.Message, url: str):
                 sent = await message.answer_video(
                     video=res["direct_url"],
                     caption=caption,
-                    reply_markup=share_kb,
+                    reply_markup=None,
                     parse_mode="HTML"
                 )
             except Exception as direct_send_err:
@@ -1994,7 +1969,7 @@ async def process_video_download(message: types.Message, url: str):
                 sent = await message.answer_video(
                     video=video_input,
                     caption=caption,
-                    reply_markup=share_kb,
+                    reply_markup=None,
                     parse_mode="HTML"
                 )
             except Exception as html_send_err:
@@ -2002,7 +1977,7 @@ async def process_video_download(message: types.Message, url: str):
                 sent = await message.answer_video(
                     video=video_input,
                     caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
-                    reply_markup=share_kb
+                    reply_markup=None
                 )
 
         # Сохраняем file_id в кэш для мгновенных ответов в будущем
@@ -2014,7 +1989,9 @@ async def process_video_download(message: types.Message, url: str):
                 "video",
                 res.get("title", ""),
                 res.get("platform", ""),
-                res.get("author", "")
+                res.get("author", ""),
+                music=res.get("music"),
+                music_info=res.get("music_info")
             )
             record_user_download(
                 user_id,
@@ -2241,9 +2218,9 @@ def get_settings_text(user_id: int) -> str:
     is_pm_save = get_user_save_to_pm(user_id)
 
     mode_descr = (
-        "🟢 <b>Включена</b> — под видео будет автор, название и ссылка"
+        "🟢 <b>Включена (по умолчанию)</b> — под видео добавляется сворачиваемое описание и трек"
         if is_caption else
-        "⚪ <b>Выключена (по умолчанию)</b> — видео отправляется абсолютно чистым, без текста"
+        "⚪ <b>Выключена</b> — видео отправляется абсолютно чистым, без текста"
     )
 
     pm_descr = (
@@ -2872,7 +2849,9 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                             m_type,
                             res.get("title", ""),
                             res.get("platform", ""),
-                            res.get("author", "") or res.get("performer", "")
+                            res.get("author", "") or res.get("performer", ""),
+                            music=res.get("music"),
+                            music_info=res.get("music_info")
                         )
                     try:
                         if os.path.exists(res["file_path"]):
@@ -2930,34 +2909,6 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                 caption_enabled=caption_enabled
             )
 
-            # Кнопки целевого шеринга в инлайне
-            share_kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="👥 Другу в ЛС",
-                            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                                query=url,
-                                allow_user_chats=True,
-                                allow_bot_chats=False,
-                                allow_group_chats=False,
-                                allow_channel_chats=False
-                            )
-                        ),
-                        InlineKeyboardButton(
-                            text="🎮 В чат",
-                            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                                query=url,
-                                allow_user_chats=False,
-                                allow_bot_chats=False,
-                                allow_group_chats=True,
-                                allow_channel_chats=False
-                            )
-                        )
-                    ]
-                ]
-            )
-
             try:
                 if is_audio:
                     media_obj = InputMediaAudio(
@@ -2976,7 +2927,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     await bot.edit_message_media(
                         inline_message_id=inline_message_id,
                         media=media_obj,
-                        reply_markup=share_kb
+                        reply_markup=None
                     )
                 except Exception as emm_err:
                     if hasattr(emm_err, "retry_after"):
@@ -2984,7 +2935,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                         await bot.edit_message_media(
                             inline_message_id=inline_message_id,
                             media=media_obj,
-                            reply_markup=share_kb
+                            reply_markup=None
                         )
                     else:
                         raise emm_err
