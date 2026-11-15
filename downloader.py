@@ -786,7 +786,7 @@ async def download_video(url: str, user_id: int, progress_callback=None):
             output_prefix,
             download_locally=True,
             ffmpeg_path=FFMPEG_PATH,
-            warp_proxy_module=None,
+            warp_proxy_module=warp_proxy,
             progress_callback=progress_callback
         )
 

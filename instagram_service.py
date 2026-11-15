@@ -675,6 +675,18 @@ async def _try_download_instagram_embed_media(
                             if cap_match:
                                 title = py_html.unescape(cap_match.group(1)).strip()
 
+                            # Музыка
+                            m_track = None
+                            m_artist = None
+                            music_match = re.search(r'"music_asset_info":\s*\{[^}]*"title":\s*"([^"]+)"[^}]*"display_artist":\s*"([^"]+)"', html_text)
+                            if music_match:
+                                m_track = py_html.unescape(music_match.group(1)).strip()
+                                m_artist = py_html.unescape(music_match.group(2)).strip()
+                            else:
+                                orig_sound_match = re.search(r'"original_sound_info":\s*\{[^}]*"original_audio_title":\s*"([^"]+)"', html_text)
+                                if orig_sound_match:
+                                    m_track = py_html.unescape(orig_sound_match.group(1)).strip()
+
                             candidates = []
                             for pat in (
                                 r'"video_url"\s*:\s*"([^"]+)"',
@@ -722,7 +734,8 @@ async def _try_download_instagram_embed_media(
         dest_video = f"{output_prefix}.mp4"
         try:
             await download_file_func(video_url, dest_video, proxy=proxy_url)
-            if is_valid_mp4_func(dest_video):
+            if (not is_valid_mp4_func or is_valid_mp4_func(dest_video)):
+                m_inf = {"title": m_track, "author": m_artist or ""} if m_track else None
                 return {
                     "file_path": dest_video,
                     "platform": "instagram",
@@ -732,6 +745,8 @@ async def _try_download_instagram_embed_media(
                     "digg_count": 0,
                     "comment_count": 0,
                     "share_count": 0,
+                    "music": m_track,
+                    "music_info": m_inf,
                     "original_url": f"https://www.instagram.com/p/{shortcode}/"
                 }
         except Exception:

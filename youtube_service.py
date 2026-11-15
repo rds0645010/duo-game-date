@@ -42,7 +42,9 @@ async def download_youtube(
         import tempfile, uuid
         output_prefix = os.path.join(tempfile.gettempdir(), f"yt_{uuid.uuid4().hex[:8]}")
     is_short = "/shorts/" in clean_url
-    heights = [1280, 480, 360] if is_short else [720, 480, 360]
+    # Для вертикальных видео и Shorts 720p имеет высоту 1280 (720x1280),
+    # поэтому 1280 поддерживается для всех ссылок (в т.ч. watch?v= и youtu.be/).
+    heights = [1280, 720, 480, 360]
 
     manual_proxy = (
         os.getenv("YTDLP_PROXY")
@@ -140,10 +142,11 @@ async def download_youtube(
             )
             return res
 
-        # Если на этом качестве упало не из-за превышения размера файла (>50МБ),
-        # то переход на 480p/360p не поможет обойти сетевую ошибку.
-        if not size_error:
-            break
+        # Прерываем цикл только если видео гарантированно недоступно (удалено или приватное)
+        if last_error:
+            err_l = str(last_error).lower()
+            if any(k in err_l for k in ("private video", "this video has been removed", "video unavailable", "account has been terminated")):
+                break
 
     # Если видео даже в 360p превышает 50 МБ (длинный ролик на 1-2 часа) —
     # пробуем скачать чистую аудиодорожку (M4A/MP3), чтобы пользователь получил контент

@@ -122,7 +122,13 @@ async def _parse_ssstik(url: str, proxy: Optional[str] = None) -> Optional[Dict[
                 music_url = music_links[0] if music_links else None
 
                 title_match = re.search(r'<p[^>]*class=[\'"][^\'"]*maintext[^\'"]*[\'"][^>]*>(.*?)</p>', html_text, re.DOTALL)
-                post_title = py_html.unescape(title_match.group(1)).strip() if title_match else "TikTok"
+                post_title = ""
+                if title_match:
+                    raw_t = re.sub(r'<[^>]+>', ' ', title_match.group(1))
+                    post_title = py_html.unescape(raw_t).strip()
+                    post_title = re.sub(r'\s+', ' ', post_title)
+                if not post_title:
+                    post_title = "TikTok"
 
                 # 1. Сценарий: Фото-карусель
                 if is_carousel and raw_media_links:
@@ -334,15 +340,20 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
                     logger.debug(f"TikTok endpoint {endpoint} ({strat_name}) error: {e}")
                     continue
 
-        # 2. Резервный парсер SSSTik (для фотопостов, если TikWM не ответил)
-        if is_photo_post:
-            try:
-                ss_fast = await _parse_ssstik(target_url, proxy=strat_proxy)
-                if ss_fast and ss_fast.get("photo_urls"):
+        # 2. Резервный парсер SSSTik (работает и для фото-каруселей, и для видео)
+        try:
+            ss_fast = await _parse_ssstik(target_url, proxy=strat_proxy)
+            if ss_fast:
+                if is_photo_post and ss_fast.get("photo_urls"):
                     logger.info(f"✅ [TikTok] Фотопост успешно распарсен через SSSTik ({strat_name})")
                     return ss_fast
-            except Exception as e:
-                logger.debug(f"SSSTik ({strat_name}) parse error: {e}")
+                elif not is_photo_post and (ss_fast.get("video_url") or ss_fast.get("is_video")):
+                    logger.info(f"✅ [TikTok] Видео успешно получено через SSSTik ({strat_name})")
+                    return ss_fast
+                elif ss_fast.get("photo_urls") or ss_fast.get("video_url"):
+                    return ss_fast
+        except Exception as e:
+            logger.debug(f"SSSTik ({strat_name}) parse error: {e}")
 
         # 3. Резервный парсер Tikmate (для видео)
         try:
@@ -353,85 +364,20 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
         except Exception as e:
             logger.debug(f"Tikmate ({strat_name}) error: {e}")
 
-    # 2. Если прямой запрос не сработал и это короткая ссылка — пробуем развернуть редирект
-    if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
+    # 4. Финальный фоллбэк на SSSTik и Tikmate
+    for candidate_u in (target_url, url):
         try:
-            async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as s:
-                async with s.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=2.5)) as r:
-                    if r.url and ("video" in str(r.url) or "photo" in str(r.url)):
-                        target_url = str(r.url).split("?")[0]
-                        # Пробуем TikWM ещё раз с развернутым URL
-                        for endpoint in TIKWM_ENDPOINTS:
-                            try:
-                                async with aiohttp.ClientSession() as session:
-                                    async with session.post(
-                                        endpoint,
-                                        data={"url": target_url},
-                                        headers=DEFAULT_HEADERS,
-                                        timeout=aiohttp.ClientTimeout(total=3)
-                                    ) as resp:
-                                        if resp.status == 200:
-                                            data = await resp.json()
-                                            if data.get("code") == 0 and data.get("data"):
-                                                d = data["data"]
-                                                digg = d.get("digg_count", 0)
-                                                comm = d.get("comment_count", 0)
-                                                shares = d.get("share_count", 0)
-                                                music_u = d.get("music")
-                                                music_inf = d.get("music_info")
-
-                                                images = d.get("images") or []
-                                                if images:
-                                                    return {
-                                                        "success": True,
-                                                        "platform": "tiktok",
-                                                        "is_photo": True,
-                                                        "is_album": len(images) > 1,
-                                                        "photo_urls": images,
-                                                        "music": music_u,
-                                                        "music_info": music_inf,
-                                                        "title": d.get("title", "TikTok Фото") or "TikTok Фото",
-                                                        "author": d.get("author", {}).get("nickname", "TikTok"),
-                                                        "cover": d.get("cover", ""),
-                                                        "digg_count": digg,
-                                                        "comment_count": comm,
-                                                        "share_count": shares
-                                                    }
-
-                                                video_url = d.get("play") or d.get("wmplay")
-                                                if video_url:
-                                                    if video_url.startswith("/"):
-                                                        video_url = "https://www.tikwm.com" + video_url
-                                                    return {
-                                                        "success": True,
-                                                        "platform": "tiktok",
-                                                        "is_video": True,
-                                                        "video_url": video_url,
-                                                        "title": d.get("title", "TikTok Video") or "TikTok Video",
-                                                        "author": d.get("author", {}).get("nickname", "TikTok"),
-                                                        "cover": d.get("cover", ""),
-                                                        "duration": d.get("duration", 0),
-                                                        "size": d.get("size", 0),
-                                                        "digg_count": digg,
-                                                        "comment_count": comm,
-                                                        "share_count": shares,
-                                                        "music": music_u,
-                                                        "music_info": music_inf
-                                                    }
-                            except Exception:
-                                pass
+            ss_res = await _parse_ssstik(candidate_u)
+            if ss_res:
+                return ss_res
         except Exception:
             pass
-
-    # 3. Высоконадежный резервный парсер SSSTik (для фото-каруселей и слайдшоу)
-    ssstik_res = await _parse_ssstik(target_url)
-    if ssstik_res:
-        return ssstik_res
-
-    # 4. Резервный парсер Tikmate (если TikWM выдал rate limit или недоступен)
-    tikmate_res = await _parse_tikmate(target_url)
-    if tikmate_res:
-        return tikmate_res
+        try:
+            tm_res = await _parse_tikmate(candidate_u)
+            if tm_res:
+                return tm_res
+        except Exception:
+            pass
 
     return None
 
@@ -447,7 +393,9 @@ async def download_file_stream(
     Высокоскоростная потоковая загрузка файла с буфером 1 МБ, поддержкой прокси/WARP и прогресс-бара.
     """
     import time
-    ref = "https://ssstik.io/" if ("tikcdn.io" in url or "ssstik" in url) else "https://www.tiktok.com/"
+    ref = "https://ssstik.io/" if ("tikcdn.io" in url or "ssstik" in url) else (
+        "https://tikmate.app/" if "tikmate.app" in url else "https://www.tiktok.com/"
+    )
     headers = {
         "User-Agent": DEFAULT_HEADERS["User-Agent"],
         "Accept": "*/*",
@@ -606,7 +554,7 @@ async def download_tiktok(
                     if (not os.path.exists(dest) or os.path.getsize(dest) < 1000) and "tikcdn.io" in img_u:
                         m_b64 = re.search(r'tikcdn\.io/ssstik/(?:m/)?([A-Za-z0-9_-]+)', img_u)
                         if m_b64:
-                            b = m_b64.group(1)
+                            b = m_b64.group(1).replace('-', '+').replace('_', '/')
                             b += '=' * ((4 - len(b) % 4) % 4)
                             try:
                                 dec = base64.b64decode(b).decode('utf-8', errors='ignore')

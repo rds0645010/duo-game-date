@@ -478,7 +478,6 @@ async def search_tracks(
 ) -> List[Dict[str, Any]]:
     """Асинхронный поиск треков по названию с оценкой качества и фильтрацией мемов."""
     return await asyncio.to_thread(_search_youtube_tracks_sync, query, limit, target_artist, target_title, proxy_url)
-    return await asyncio.to_thread(_search_youtube_tracks_sync, query, limit, proxy_url)
 
 
 def save_search_session(query: str, tracks: List[Dict[str, Any]]) -> str:

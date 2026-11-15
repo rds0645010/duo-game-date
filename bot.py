@@ -2761,13 +2761,12 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
         )
 
         cached = get_cached_media(url)
+        if drop_poisoned_media_cache(url, cached):
+            cached = None
         file_id = cached.get("file_id") if cached else None
         is_photo = (cached.get("media_type") == "photo") if cached else False
-        if file_id and is_photo and is_instagram_reel_url(url):
-            logging.info(f"Dropping poisoned Instagram photo cache in inline: {url}")
-            delete_cached_media(url)
-            file_id = None
-            is_photo = False
+        is_audio = (cached.get("media_type") == "audio") if cached else False
+        res = None
 
         if not file_id:
             try:
@@ -3306,6 +3305,11 @@ async def handle_slide_music_callback(callback: CallbackQuery):
             caption=f"🎵 <b>{html.escape(m_title)}</b>\n👤 {html.escape(m_author)}\n✨ <i>@duo_play_date_bot</i>",
             parse_mode="HTML"
         )
+        try:
+            if os.path.exists(tmp_audio):
+                os.remove(tmp_audio)
+        except Exception:
+            pass
     except Exception as e:
         logging.warning(f"Failed to send tiktok audio: {e}")
         target_chat = callback.message.chat.id if callback.message else callback.from_user.id
