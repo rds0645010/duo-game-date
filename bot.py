@@ -1333,12 +1333,17 @@ def format_count(n) -> str:
 def format_description_line(title: str, is_photo: bool = False, is_audio: bool = False) -> Optional[str]:
     """
     Форматирует строку с описанием публикации:
+    - Очищает от мусорных хэштегов (#fyp, #рек, #trending и т.д.)
     - Скрыто под <tg-spoiler>, чтобы описание не раскрывалось само при прокрутке чата
       и оставалось аккуратно свёрнутым.
     - Открывается по нажатию пользователем.
     """
     title_raw = (title or "").strip()
-    title_clean = re.sub(r'\s+', ' ', title_raw).strip()
+    # 1. Удаляем хэштеги (#tag, #хэштег, #fyp123 и т.д.)
+    title_no_tags = re.sub(r'#[^\s#]+', '', title_raw)
+    title_no_tags = re.sub(r'\s+([,.:!?])', r'\1', title_no_tags)
+    title_clean = re.sub(r'\s+', ' ', title_no_tags).strip()
+
     if not title_clean:
         return None
     if title_clean.lower() in (
@@ -1355,12 +1360,12 @@ def format_description_line(title: str, is_photo: bool = False, is_audio: bool =
     return f"{icon} <b>{label}:</b> <tg-spoiler>{title_esc}</tg-spoiler>"
 
 
-def format_music_line(music_info: dict = None, music: str = None) -> Optional[str]:
+def format_music_line(music_info: dict = None, music: str = None, post_title: str = None) -> Optional[str]:
     """
     Форматирует строку с информацией о музыке/треке:
     - 🎵 Музыка: Название — Исполнитель (для распознанных песен и треков)
     - 🎵 Звук: Автор (для оригинальных звуков)
-    - None (если трек отсутствует или является пустым шаблоном)
+    - None (если трек отсутствует, пустой или дублирует описание ролика)
     """
     m_title = ""
     m_author = ""
@@ -1374,12 +1379,20 @@ def format_music_line(music_info: dict = None, music: str = None) -> Optional[st
     if not m_title:
         return None
 
+    # Очищаем от мусорных/заглушечных названий
     m_lower = m_title.lower()
     if m_lower in (
         "original sound", "оригинальный звук", "original audio", "оригинальное аудио",
         "tiktok", "instagram", "video", "shorts", "audio", "sound"
     ):
         return None
+
+    # Защита от дублирования описания ролика в поле музыки:
+    if post_title:
+        c_m = re.sub(r'#[^\s#]+', '', m_title).strip().lower()
+        c_p = re.sub(r'#[^\s#]+', '', post_title).strip().lower()
+        if c_m and (c_m == c_p or c_m in c_p or c_p in c_m):
+            return None
 
     # Если это оригинальный звук автора (e.g. "original sound - nickname" или "оригинальный звук - nickname")
     for orig_prefix in ("original sound -", "оригинальный звук -", "original audio -", "оригинальное аудио -"):
@@ -1411,8 +1424,8 @@ def make_inline_caption(
 ) -> Optional[str]:
     """
     Генерирует аккуратную подпись для отправки медиа в инлайн-режиме:
-    - Скрытое описание <tg-spoiler> (всегда свёрнуто, не раскрывается при прокрутке)
-    - Играющий музыкальный трек (если есть)
+    - Скрытое описание <tg-spoiler> (всегда свёрнуто, без лишних хэштегов)
+    - Играющий музыкальный трек (если есть и не дублирует описание)
     - Источник и автор
     - Отметка 'Скачано через @duo_play_date_bot'
     """
@@ -1428,7 +1441,7 @@ def make_inline_caption(
     if desc_line:
         lines.append(desc_line)
 
-    music_line = format_music_line(music_info=music_info, music=music)
+    music_line = format_music_line(music_info=music_info, music=music, post_title=title)
     if music_line:
         lines.append(music_line)
 
@@ -1444,7 +1457,7 @@ def make_inline_caption(
 def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     """
     Генерирует аккуратную, компактную подпись к слайду фото-карусели:
-    с поддержкой скрытого описания <tg-spoiler> и отображением играющего трека.
+    с поддержкой скрытого описания <tg-spoiler> (без хэштегов) и отображением играющего трека.
     """
     plat_raw = (data.get("platform") or "TikTok").capitalize()
     author_raw = (data.get("author") or "").strip()[:50]
@@ -1455,7 +1468,7 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
     if desc_line:
         lines.append(desc_line)
 
-    music_line = format_music_line(music_info=data.get("music_info"), music=data.get("music"))
+    music_line = format_music_line(music_info=data.get("music_info"), music=data.get("music"), post_title=data.get("title"))
     if music_line:
         lines.append(music_line)
 
@@ -1468,7 +1481,6 @@ def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
         lines.append(f"🖼 <b>Слайд {current_idx + 1} из {total}</b> <i>(листай стрелками ниже 👇)</i>")
 
     lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
-    return "\n".join(lines)
     return "\n".join(lines)
 
 
@@ -1585,7 +1597,7 @@ async def process_video_download(message: types.Message, url: str):
             if desc_line:
                 p_lines.append(desc_line)
 
-            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"))
+            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"), post_title=cached.get("title"))
             if m_line:
                 p_lines.append(m_line)
 
@@ -1607,7 +1619,7 @@ async def process_video_download(message: types.Message, url: str):
             if desc_line:
                 v_lines.append(desc_line)
 
-            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"))
+            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"), post_title=cached.get("title"))
             if m_line:
                 v_lines.append(m_line)
 
@@ -1893,7 +1905,7 @@ async def process_video_download(message: types.Message, url: str):
             if desc_line:
                 p_lines.append(desc_line)
 
-            m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"))
+            m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"), post_title=res.get("title"))
             if m_line:
                 p_lines.append(m_line)
 
@@ -1957,7 +1969,7 @@ async def process_video_download(message: types.Message, url: str):
         if desc_line:
             v_lines.append(desc_line)
 
-        m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"))
+        m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"), post_title=res.get("title"))
         if m_line:
             v_lines.append(m_line)
 
