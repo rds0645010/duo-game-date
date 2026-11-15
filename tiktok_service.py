@@ -27,9 +27,31 @@ DEFAULT_HEADERS = {
 }
 
 
+def is_valid_mp4_file(file_path: str, allow_audio: bool = False) -> bool:
+    """
+    Проверяет по бинарным сигнатурам (magic bytes), является ли файл видео MP4/WebM/MKV.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False
+    if os.path.getsize(file_path) < 16 * 1024:
+        return False
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(32)
+        if b"ftyp" in header[:16] or header.startswith(b"\x1a\x45\xdf\xa3"):
+            return True
+        if allow_audio and (
+            header.startswith(b"ID3") or header.startswith(b"\xff\xfb") or header.startswith(b"OggS")
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _parse_ssstik(url: str, proxy: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Высоконадежный парсер TikTok через SSSTik (для фото-слайдшоу, каруселей и музыки).
+    Высоконадежный парсер TikTok через SSSTik (для видео, фото-слайдшоу, каруселей и музыки).
     Работает мгновенно (< 1 сек), поддерживает WARP-прокси и динамический s_tt токен.
     """
     clean_target = url.split("?")[0] if ("/photo/" in url or "/video/" in url) else url
@@ -88,32 +110,54 @@ async def _parse_ssstik(url: str, proxy: Optional[str] = None) -> Optional[Dict[
 
             if resp_text:
                 html_text = resp_text
-                all_links = re.findall(r'href=[\"\'](https://tikcdn\.io/ssstik/[^\s\"\']+)[\"\']', html_text)
+                # Определяем: это фото-карусель или видео
+                is_carousel = ("splide" in html_text or "splide__slide" in html_text or "/photo/" in url)
+
+                all_links = re.findall(r'href=[\'"](https://tikcdn\.io/ssstik/[^\s\'"]+)[\'"]', html_text)
                 if not all_links:
-                    all_links = re.findall(r'href=[\"\'](https://[^\s\"\']+)[\"\'][^>]*class=[\"\'][^\"\']*download[^\"]*', html_text)
+                    all_links = re.findall(r'href=[\'"](https://[^\s\'"]+)[\'"][^>]*class=[\'"][^\'"]*download[^\'"]*', html_text)
                 
-                raw_photo_links = [l for l in all_links if "/m/" not in l]
+                raw_media_links = [l for l in all_links if "/m/" not in l]
                 music_links = [l for l in all_links if "/m/" in l]
                 music_url = music_links[0] if music_links else None
 
-                # Для скачивания и отправки используем надежные tikcdn.io ссылки с реферером ssstik.io
-                photo_links = raw_photo_links
+                title_match = re.search(r'<p[^>]*class=[\'"][^\'"]*maintext[^\'"]*[\'"][^>]*>(.*?)</p>', html_text, re.DOTALL)
+                post_title = py_html.unescape(title_match.group(1)).strip() if title_match else "TikTok"
 
-                title_match = re.search(r'<p[^>]*class=[\"\'][^\"\']*maintext[^\"\']*[\"\'][^>]*>(.*?)</p>', html_text, re.DOTALL)
-                post_title = py_html.unescape(title_match.group(1)).strip() if title_match else "TikTok Слайдшоу"
-
-                if photo_links:
+                # 1. Сценарий: Фото-карусель
+                if is_carousel and raw_media_links:
                     return {
                         "success": True,
                         "platform": "tiktok",
                         "is_photo": True,
-                        "is_album": len(photo_links) > 1,
-                        "photo_urls": photo_links,
+                        "is_video": False,
+                        "is_album": len(raw_media_links) > 1,
+                        "photo_urls": raw_media_links,
                         "music": music_url,
                         "music_info": {"title": post_title, "author": "TikTok"} if music_url else None,
-                        "title": post_title,
+                        "title": post_title or "TikTok Слайдшоу",
                         "author": "TikTok",
-                        "cover": photo_links[0],
+                        "cover": raw_media_links[0],
+                        "digg_count": 0,
+                        "comment_count": 0,
+                        "share_count": 0
+                    }
+
+                # 2. Сценарий: Обычное видео
+                if raw_media_links:
+                    return {
+                        "success": True,
+                        "platform": "tiktok",
+                        "is_video": True,
+                        "is_photo": False,
+                        "video_url": raw_media_links[0],
+                        "music": music_url,
+                        "music_info": {"title": post_title, "author": "TikTok"} if music_url else None,
+                        "title": post_title or "TikTok Video",
+                        "author": "TikTok",
+                        "cover": "",
+                        "duration": 0,
+                        "size": 0,
                         "digg_count": 0,
                         "comment_count": 0,
                         "share_count": 0
@@ -182,7 +226,9 @@ async def _resolve_tiktok_shortlink(url: str, proxy: Optional[str] = None) -> st
                         timeout=aiohttp.ClientTimeout(total=4.0)
                     ) as resp:
                         target = str(resp.url)
-                        if target and ("tiktok.com" in target) and (target != url):
+                        # ВАЖНО: Развернутый URL валиден только если он указывает на конкретный пост (@user/video/... или @user/photo/...)
+                        # Если TikTok перенаправил на главную страницу или логин (tiktok.com/ или tiktok.com/?_r=1) — НЕ используем его!
+                        if target and any(k in target for k in ("/video/", "/photo/", "/v/")):
                             clean = target.split("?")[0]
                             logger.info(f"🔗 Развернута короткая ссылка: {url} -> {clean}")
                             return clean
@@ -498,8 +544,8 @@ async def download_tiktok(
         raise Exception("tiktok_parse_failed: не удалось извлечь данные ролика")
 
     # Сценарий 1: Обычное видео MP4
-    if tikwm_data.get("video_url"):
-        video_url = tikwm_data["video_url"]
+    if tikwm_data.get("video_url") or tikwm_data.get("is_video"):
+        video_url = tikwm_data.get("video_url")
         dest_file = f"{output_prefix}.mp4"
         filesize = tikwm_data.get("size", 0)
 
@@ -519,6 +565,8 @@ async def download_tiktok(
         return {
             "file_path": dest_file if download_locally else None,
             "direct_url": video_url,
+            "is_video": True,
+            "is_photo": False,
             "title": tikwm_data.get("title", "TikTok"),
             "author": tikwm_data.get("author", "TikTok"),
             "duration": tikwm_data.get("duration", 0),
@@ -612,9 +660,36 @@ async def download_tiktok(
             except Exception:
                 pass
 
+        # Строгая валидация по сигнатурам (magic bytes):
+        if is_valid_mp4_file(dest_file, allow_audio=False):
+            mp4_file = f"{output_prefix}.mp4"
+            try:
+                if os.path.exists(mp4_file):
+                    os.remove(mp4_file)
+                os.rename(dest_file, mp4_file)
+                dest_file = mp4_file
+            except Exception:
+                pass
+            return {
+                "file_path": dest_file,
+                "is_video": True,
+                "is_photo": False,
+                "title": tikwm_data.get("title", "TikTok Video"),
+                "author": tikwm_data.get("author", "TikTok"),
+                "platform": "tiktok",
+                "filesize": os.path.getsize(dest_file) if os.path.exists(dest_file) else 0,
+                "digg_count": digg_cnt,
+                "comment_count": comm_cnt,
+                "share_count": share_cnt,
+                "music": music_url,
+                "music_info": music_inf,
+                "original_url": clean_url
+            }
+
         return {
             "file_path": dest_file,
             "is_photo": True,
+            "is_video": False,
             "title": tikwm_data.get("title", "TikTok Фото"),
             "author": tikwm_data.get("author", "TikTok"),
             "platform": "tiktok",

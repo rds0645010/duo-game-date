@@ -904,12 +904,12 @@ async def extract_direct_video_info(url: str):
     if platform == "tiktok":
         tikwm_data = await parse_tiktok_tikwm(clean_url)
         if tikwm_data:
-            if tikwm_data.get("video_url"):
+            if tikwm_data.get("video_url") or tikwm_data.get("is_video"):
                 return {
                     "success": True,
                     "platform": "tiktok",
                     "is_video": True,
-                    "video_url": tikwm_data["video_url"],
+                    "video_url": tikwm_data.get("video_url"),
                     "title": tikwm_data.get("title") or "TikTok",
                     "author": tikwm_data.get("author") or "TikTok",
                     "thumbnail": tikwm_data.get("cover") or "",

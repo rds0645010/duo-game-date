@@ -684,18 +684,34 @@ def delete_cached_media(url: str):
         logging.warning(f"Could not delete cached media for {url}: {e}")
 
 
-def drop_poisoned_instagram_photo_cache(url: str, cached: dict = None):
+def drop_poisoned_media_cache(url: str, cached: dict = None) -> bool:
     """
-    Если для reel в кэше лежит photo (обложка), выкидываем её и качаем заново.
-    Возвращает True, если кэш был сброшен.
+    Если для видео (TikTok ролик, Instagram Reel, YouTube Shorts) в кэше ошибочно лежит photo,
+    выкидываем эту запись и перекачиваем чистое видео заново.
     """
-    if not cached or not cached.get("file_id"):
+    if not cached or not cached.get("file_id") or not url:
         return False
-    if cached.get("media_type") == "photo" and is_instagram_reel_url(url):
-        logging.info(f"Dropping poisoned Instagram photo cache for reel: {url}")
-        delete_cached_media(url)
-        return True
+    if cached.get("media_type") == "photo":
+        u_lower = url.lower()
+        is_video_url = (
+            "/video/" in u_lower
+            or "/reel/" in u_lower
+            or "/reels/" in u_lower
+            or "/tv/" in u_lower
+            or "/shorts/" in u_lower
+            or "watch?v=" in u_lower
+            or "youtu.be/" in u_lower
+            or is_instagram_reel_url(url)
+        )
+        if is_video_url:
+            logging.info(f"🧹 Сброс отравленного фото-кэша для видео: {url}")
+            delete_cached_media(url)
+            return True
     return False
+
+
+# Алиас для обратной совместимости
+drop_poisoned_instagram_photo_cache = drop_poisoned_media_cache
 
 
 def save_cached_video(url: str, file_id: str, title: str, platform: str, author: str = ""):
@@ -1852,6 +1868,13 @@ async def process_video_download(message: types.Message, url: str):
                 pass
             return
 
+        # 🛡️ Строгая валидация медиа-типа по бинарным сигнатурам (magic bytes) скачанного файла:
+        # Исключает баг, когда внешний парсер ошибочно пометил ролик как 'is_photo'
+        if file_path and os.path.exists(file_path):
+            if is_valid_mp4_file(file_path, allow_audio=False):
+                res["is_photo"] = False
+                res["is_video"] = True
+
         # 📸 Если в посте оказалась одиночная фотография
         if res.get("is_photo"):
             await safe_edit_status(
@@ -2626,8 +2649,8 @@ async def inline_query_handler(inline_query: InlineQuery):
     if platform == "tiktok":
         try:
             direct_info = await asyncio.wait_for(parse_tiktok_tikwm(clean_url), timeout=4.0)
-            if direct_info and direct_info.get("video_url"):
-                direct_video_url = direct_info["video_url"]
+            if direct_info and (direct_info.get("video_url") or direct_info.get("is_video")):
+                direct_video_url = direct_info.get("video_url")
                 direct_title = direct_info.get("title")
         except Exception as e:
             logging.debug(f"TikTok direct parse failed: {e}")
