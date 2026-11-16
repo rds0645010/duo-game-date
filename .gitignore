@@ -29,6 +29,8 @@ wheels/
 users.db
 temp_downloads/
 cookies.txt
+instagram_cookies.txt
+*_cookies.txt
 
 # WARP / usque runtime (бинарник и приватный конфиг WARP)
 bin/
