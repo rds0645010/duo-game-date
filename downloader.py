@@ -474,7 +474,12 @@ def setup_cookies_file(platform: str = None) -> Optional[str]:
     except Exception:
         pass
 
-    raw_ig = db_cookie if (platform == "instagram" and db_cookie) else os.environ.get("INSTAGRAM_COOKIES", "").strip()
+    raw_ig = (
+        (db_cookie if platform == "instagram" and db_cookie else "")
+        or os.environ.get("INSTAGRAM_COOKIES", "").strip()
+        or os.environ.get("INSTAGRAM_SESSIONID", "").strip()
+        or "80925440881%3AzoJR3eDLGDC4qc%3A8%3AAYlep75WccdxbhrBgRAXUY4kZMUq_dg-mmr-PFKPlA"
+    )
     raw_yt = (
         (db_cookie if platform == "youtube" and db_cookie else "")
         or os.environ.get("YOUTUBE_COOKIES", "").strip()
@@ -510,15 +515,36 @@ def setup_cookies_file(platform: str = None) -> Optional[str]:
         if "# Netscape" in raw or "\t" in raw:
             content = raw
         else:
-            # Преобразуем строку вида "sessionid=xyz; ds_user_id=123" в Netscape cookies
+            # Преобразуем строку вида "sessionid=xyz; ds_user_id=123" или чистый sessionid в Netscape cookies
             domain = ".youtube.com" if platform == "youtube" else ".instagram.com"
             lines = ["# Netscape HTTP Cookie File", f"# Generated for {domain}"]
-            for part in raw.split(";"):
-                part = part.strip()
-                if not part or "=" not in part:
-                    continue
-                k, v = part.split("=", 1)
-                lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\t{k.strip()}\t{v.strip()}")
+            
+            # Если передан чистый sessionid (без '=') для Instagram
+            if platform == "instagram" and "=" not in raw and "%3A" in raw:
+                s_val = raw.strip()
+                lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\tsessionid\t{s_val}")
+                u_id = s_val.split("%3A")[0]
+                if u_id.isdigit():
+                    lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\tds_user_id\t{u_id}")
+            else:
+                for part in raw.split(";"):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}")
+                        if k == "sessionid" and "%3A" in v and "ds_user_id" not in raw:
+                            u_cand = v.split("%3A")[0]
+                            if u_cand.isdigit():
+                                lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\tds_user_id\t{u_cand}")
+                    elif platform == "instagram" and "%3A" in part:
+                        lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\tsessionid\t{part}")
+                        u_cand = part.split("%3A")[0]
+                        if u_cand.isdigit():
+                            lines.append(f"{domain}\tTRUE\t/\tTRUE\t2147483647\tds_user_id\t{u_cand}")
             content = "\n".join(lines) + "\n"
 
         with open(cookies_path, "w", encoding="utf-8") as cf:

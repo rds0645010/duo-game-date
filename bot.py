@@ -3609,6 +3609,9 @@ async def handle_cookies_command(message: types.Message):
     parts = text.split(maxsplit=1)
     if len(parts) > 1:
         cookie_val = parts[1].strip()
+        if "=" not in cookie_val and "%3A" in cookie_val:
+            u_id = cookie_val.split("%3A")[0]
+            cookie_val = f"sessionid={cookie_val}; ds_user_id={u_id}"
         set_bot_setting("instagram_cookies", cookie_val)
         os.environ["INSTAGRAM_COOKIES"] = cookie_val
         try:

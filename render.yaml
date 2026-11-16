@@ -23,3 +23,6 @@ services:
       # Необязательный ручной прокси для YouTube (запасной вариант после WARP).
       - key: YOUTUBE_PROXY
         sync: false
+      # Instagram 18+ сессия (sessionid):
+      - key: INSTAGRAM_SESSIONID
+        sync: false
