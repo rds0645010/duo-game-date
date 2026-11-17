@@ -207,20 +207,43 @@ flowchart TD
 
 ---
 
-## 8. Стратегические улучшения масштаба (Big Picture Roadmap)
+## 7.1. Аудит Фаза 2: Безопасность, cookies, диск, SQLite и карусели (17 ноября 2026)
 
-### Что добавить в бота для максимального удобства и надежности:
+| ID | Область | Описание проблемы | Файл и место | Статус и коммит |
+| :--- | :--- | :--- | :--- | :--- |
+| `SEC-1` | Security | Хардкод Instagram `sessionid` в открытом публичном GitHub-репозитории | [`downloader.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/downloader.py) | ✅ **ИСПРАВЛЕНО** (`9193f42`) |
+| `SEC-2` | Security | `is_bot_admin()` разрешала доступ всем при пустых `ADMIN_ID` / `ORGANIZER_CHAT_ID` | [`bot.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/bot.py#L3594-L3615) | ✅ **ИСПРАВЛЕНО** (`3dda2f1`) |
+| `SEC-3` | Security | Публичный доступ к `/api/logs` и `/api/test_dl` в обход семафоров | [`bot.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/bot.py#L3974-L4010) | ✅ **ИСПРАВЛЕНО** (`3dda2f1`) |
+| `COOK-1` | Instagram | Старый файл `instagram_cookies.txt` перебивал `/cookies` и `INSTAGRAM_SESSIONID` | [`downloader.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/downloader.py#L488-L505) | ✅ **ИСПРАВЛЕНО** (`3dda2f1`) |
+| `DISK-1` | Stability | Временные файлы после ЛС-отправки и слайдшоу не чистились при работе 24/7 | [`bot.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/bot.py#L4102-L4160) | ✅ **ИСПРАВЛЕНО** (`3dda2f1`) |
+| `DB-1` | Database / Cache | Отсутствовал `WAL`-режим SQLite; в `get_canonical_media_key` не нормализовались фото TikTok (`/photo/`) и треки Spotify | [`bot.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/bot.py#L116-L125), [`bot.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/bot.py#L550-L576) | ✅ **ИСПРАВЛЕНО** (`3ce5110`) |
+| `SLIDE-1` | Carousel | CDN URL брался приоритетнее локального файла (403 при листании и поломка инлайн-слайдов), не кэшировался `file_id` видео-слайдов | [`bot.py`](file:///C:/Users/tanki/.gemini/antigravity/scratch/telegram-game-date-bot/bot.py#L3110-L3215) | ✅ **ИСПРАВЛЕНО** (`3ce5110`) |
 
+> [!WARNING]
+> **Обязательное действие после `9193f42`:** старый `sessionid` побывал в публичной истории Git — смените пароль / выйдите из сессии в Instagram (или создайте свежий технический аккаунт 18+) и задайте новый `INSTAGRAM_SESSIONID` + ваш `ADMIN_ID` и `DEBUG_API_KEY` в **Render Dashboard → Environment**.
+
+---
+
+## 8. Стратегические улучшения масштаба и архитектуры (Big Picture Roadmap)
+
+### Архитектурная эволюция (для масштабирования и чистоты кода):
+1. **Модульная декомпозиция `bot.py` (~4270 строк) через `aiogram.Router`:**
+   - Вынести слой БД в `db.py` (асинхронный `aiosqlite` или пул + единый контекст-менеджер).
+   - Разделить обработчики по роутерам: `routers/downloads.py`, `routers/inline.py`, `routers/slideshow.py`, `routers/music.py`, `routers/admin.py`, `routers/webapp_api.py`.
+2. **Единый контракт загрузки и прогресса (`MediaResult` dataclass):**
+   - Унифицировать ответ всех сервисов (`tiktok_service`, `instagram_service`, `youtube_service`, `music_service`), убрать дублирование проверок (`is_valid_mp4_file`, отправка альбомов в ЛС и инлайне).
+3. **Защита HTTP-контракта и стабильность процесса:**
+   - Глобальный `startup`/`shutdown` через `dp.startup` / `web.AppRunner` с отменой фоновых задач (`keep_alive_ping`, `storage_janitor`).
+   - Проверка `initData` подписи Telegram WebApp (HMAC-SHA256 по `BOT_TOKEN`) на эндпоинтах `/api/check_user` и `/api/send_invite`.
+
+### Продуктовые фичи (что добавить дальше):
 1. **Интерактивный обратный эффект (Обратная связь от пользователей):**
-   - **Инлайн-кнопки оценки под роликом:** Добавить кнопки `👍` и `👎` (или реакцию `🔥`). При клике фиксировать положительный отклик в базе данных.
-   - **Кнопка "Сообщить об ошибке":** Если скачивание не удалось, в сообщении об ошибке показывать кнопку `🚨 Сообщить о битой ссылке`, которая отправляет ссылку и трассировку ошибки администраторам в один клик.
-
-2. **Smart Reverse Video Search / Поиск дубликатов:**
-   - Если ролик удален на одной платформе (например, автор скрыл Reel в Instagram), по названию и треку автоматически искать копию в TikTok или YouTube Shorts.
-
-3. **Мгновенный Fast-Track для каруселей:**
-   - Для альбомов TikTok и Instagram с 10+ фотографиями отправлять первый слайд сразу за 1-1.5 секунды, а остальные подгружать в фоновом режиме в кэш Telegram.
-
-4. **Автоматическая адаптация под лимиты памяти Render (512 МБ):**
-   - Добавить хук вызова `gc.collect()` после каждой тяжелой склейки FFmpeg.
-   - Настроить периодическую очистку директории `DOWNLOAD_DIR` по таймеру (раз в 15 минут), удаляя файлы старше 30 минут.
+   - Инлайн-кнопки оценки под роликом (`👍` / `👎`) или быстрый репорт битой ссылки (`🚨 Не скачалось`), отправляющий URL и последние ошибки админу.
+2. **Smart Reverse Search & Cross-Platform Fallback:**
+   - Если Reel/видео удалено или закрыто на одной платформе, кнопка «Найти зеркало в TikTok / Shorts» по заголовку или треку.
+3. **Fast-Track для фото-каруселей (10+ слайдов):**
+   - Отдавать первый слайд мгновенно, а остальные 9–29 догружать в Telegram `file_ids` асинхронно в фоне.
+4. **Пакетная загрузка и умный кэш:**
+   - Если в одном сообщении прислали 2–3 ссылки (или плейлист Spotify/альбом), запускать в очереди с общим статус-сообщением и кэшировать канонические ключи.
+5. **Оптимизация под лимит Render 512 МБ RAM:**
+   - Единый общий `aiohttp.ClientSession` вместо создания новой сессии на каждый запрос; `gc.collect()` после тяжелых операций FFmpeg и выделенный ограниченный воркер.
