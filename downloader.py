@@ -478,7 +478,6 @@ def setup_cookies_file(platform: str = None) -> Optional[str]:
         (db_cookie if platform == "instagram" and db_cookie else "")
         or os.environ.get("INSTAGRAM_COOKIES", "").strip()
         or os.environ.get("INSTAGRAM_SESSIONID", "").strip()
-        or "80925440881%3AzoJR3eDLGDC4qc%3A8%3AAYlep75WccdxbhrBgRAXUY4kZMUq_dg-mmr-PFKPlA"
     )
     raw_yt = (
         (db_cookie if platform == "youtube" and db_cookie else "")
