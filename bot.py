@@ -1874,6 +1874,8 @@ async def process_video_download(message: types.Message, url: str):
                     music=res.get("music"),
                     music_info=res.get("music_info")
                 )
+                _safe_remove(file_path)
+                _safe_remove(thumb_path)
             try:
                 await status_msg.delete()
             except Exception:
@@ -1938,6 +1940,7 @@ async def process_video_download(message: types.Message, url: str):
                     res.get("title", ""),
                     res.get("platform", "")
                 )
+                _safe_remove(file_path)
             try:
                 await status_msg.delete()
             except Exception:
@@ -2037,6 +2040,7 @@ async def process_video_download(message: types.Message, url: str):
                 res.get("title", ""),
                 res.get("platform", "")
             )
+            _safe_remove(file_path)
 
         # Удаляем сервисное сообщение со статусом
         try:
@@ -3588,21 +3592,31 @@ CHATTER_WORDS = {
 }
 
 def is_bot_admin(user_id: int) -> bool:
+    """
+    Fail-closed: если ADMIN_ID / ORGANIZER_CHAT_ID не заданы, админов нет вообще
+    (раньше в этом случае админом считался ЛЮБОЙ пользователь).
+    """
     uid_str = str(user_id)
     if ADMIN_IDS and uid_str in ADMIN_IDS:
         return True
     if ORGANIZER_CHAT_ID and uid_str == str(ORGANIZER_CHAT_ID):
         return True
-    if not ADMIN_IDS and not ORGANIZER_CHAT_ID:
-        return True
     return False
+
+
+def admin_denied_text(user_id: int) -> str:
+    return (
+        "🔒 Эта команда доступна только администратору бота.\n\n"
+        f"Твой Telegram ID: <code>{user_id}</code>\n"
+        "Если бот твой — добавь <code>ADMIN_ID</code> с этим числом в Environment на Render."
+    )
 
 
 @dp.message(Command("cookies"))
 async def handle_cookies_command(message: types.Message):
     user_id = message.from_user.id if message.from_user else 0
     if not is_bot_admin(user_id):
-        await message.answer("🔒 Эта команда доступна только администратору бота.")
+        await message.answer(admin_denied_text(user_id), parse_mode="HTML")
         return
 
     text = (message.text or "").strip()
@@ -3663,7 +3677,7 @@ async def handle_cookies_command(message: types.Message):
 async def handle_del_cookies_command(message: types.Message):
     user_id = message.from_user.id if message.from_user else 0
     if not is_bot_admin(user_id):
-        await message.answer("🔒 Эта команда доступна только администратору бота.")
+        await message.answer(admin_denied_text(user_id), parse_mode="HTML")
         return
 
     set_bot_setting("instagram_cookies", "")
@@ -3961,7 +3975,24 @@ async def handle_api_send_invite(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+DEBUG_API_KEY = os.getenv("DEBUG_API_KEY", "").strip()
+
+
+def _debug_api_allowed(request) -> bool:
+    """
+    /api/logs и /api/test_dl раньше были открыты всему интернету:
+    любой мог запустить тяжёлое скачивание (мимо семафоров) и уронить 512 МБ,
+    а также читать ссылки из логов ошибок. Теперь нужен ?key=DEBUG_API_KEY.
+    """
+    if not DEBUG_API_KEY:
+        return False
+    import hmac
+    return hmac.compare_digest(request.query.get("key", ""), DEBUG_API_KEY)
+
+
 async def handle_api_logs(request):
+    if not _debug_api_allowed(request):
+        return web.json_response({"error": "forbidden"}, status=403)
     return web.json_response({
         "status": "ok",
         "recent_errors": recent_errors,
@@ -3973,6 +4004,8 @@ async def handle_api_logs(request):
 
 
 async def handle_api_test_dl(request):
+    if not _debug_api_allowed(request):
+        return web.json_response({"error": "forbidden"}, status=403)
     url = request.query.get("url", "").strip()
     if not url:
         return web.json_response({"error": "missing url query parameter"})
@@ -4070,6 +4103,60 @@ async def warm_up_warp():
         logging.warning(f"WARP warm-up error: {e}")
 
 
+async def storage_janitor(interval_seconds: int = 900, max_age_seconds: int = 2 * 60 * 60):
+    """
+    Фоновая уборка (бот работает 24/7 благодаря keep_alive_ping, поэтому
+    «уборка раз за жизнь процесса» в downloader никогда не повторялась):
+    - выгружает из RAM старые сессии слайдшоу (они остаются в SQLite и
+      восстанавливаются по file_ids / photo_urls при перелистывании);
+    - удаляет файлы старше max_age_seconds из temp_downloads.
+    """
+    await asyncio.sleep(120)
+    while True:
+        try:
+            now = time.time()
+            stale_sids = [
+                sid for sid, d in list(_slideshow_cache.items())
+                if now - float((d or {}).get("created_at") or 0) > max_age_seconds
+            ]
+            for sid in stale_sids:
+                _slideshow_cache.pop(sid, None)
+
+            removed = 0
+            freed = 0
+            active_stream = set(_stream_files.values())
+            for name in os.listdir(DOWNLOAD_DIR):
+                path = os.path.join(DOWNLOAD_DIR, name)
+                try:
+                    if not os.path.isfile(path) or path in active_stream:
+                        continue
+                    if now - os.path.getmtime(path) > max_age_seconds:
+                        freed += os.path.getsize(path)
+                        os.remove(path)
+                        removed += 1
+                except OSError:
+                    pass
+            if removed or stale_sids:
+                logging.info(
+                    f"🧹 Janitor: удалено файлов {removed} ({freed / 1048576:.1f} МБ), "
+                    f"выгружено слайдшоу из RAM: {len(stale_sids)}"
+                )
+        except Exception as e:
+            logging.warning(f"storage_janitor error: {e}")
+        await asyncio.sleep(interval_seconds)
+
+
+def _safe_remove(path: Optional[str]):
+    """Удаляет временный файл после успешной отправки в Telegram (file_id уже в кэше)."""
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 async def keep_alive_ping():
     """
     Каждые 9 минут отправляет внешний HTTP GET запрос на свой собственный /health endpoint.
@@ -4102,6 +4189,9 @@ async def main():
 
     # Запускаем фоновый пингер анти-сна
     asyncio.create_task(keep_alive_ping())
+
+    # Фоновая уборка временных файлов и RAM-кэша слайдшоу
+    asyncio.create_task(storage_janitor())
 
     # Заранее поднимаем WARP для YouTube (не блокирует polling бота)
     asyncio.create_task(warm_up_warp())

@@ -485,21 +485,17 @@ def setup_cookies_file(platform: str = None) -> Optional[str]:
         or os.environ.get("YTDLP_COOKIES", "").strip()
     )
 
-    # 2. Проверяем специфичные файлы на диске
-    if platform == "instagram":
-        ig_file = os.path.join(base_dir, "instagram_cookies.txt")
-        if os.path.exists(ig_file) and os.path.getsize(ig_file) > 10:
-            return ig_file
-    elif platform == "youtube":
-        yt_file = os.path.join(base_dir, "youtube_cookies.txt")
-        if os.path.exists(yt_file) and os.path.getsize(yt_file) > 10:
-            return yt_file
-
     raw = raw_yt if platform == "youtube" else raw_ig
     cookies_path = os.path.join(base_dir, f"{platform or 'cookies'}_cookies.txt")
 
+    # 2. Если ключа из БД/окружения нет — используем готовые файлы на диске.
+    # ВАЖНО: раньше файл проверялся ДО ключа, поэтому новый /cookies или
+    # INSTAGRAM_SESSIONID игнорировались, пока лежал старый instagram_cookies.txt.
     if not raw:
-        # Проверяем общий cookies.txt на диске
+        if platform in ("instagram", "youtube"):
+            specific = os.path.join(base_dir, f"{platform}_cookies.txt")
+            if os.path.exists(specific) and os.path.getsize(specific) > 10:
+                return specific
         common_path = os.path.join(base_dir, "cookies.txt")
         if os.path.exists(common_path) and os.path.getsize(common_path) > 10:
             return common_path

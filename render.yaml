@@ -26,3 +26,9 @@ services:
       # Instagram 18+ сессия (sessionid):
       - key: INSTAGRAM_SESSIONID
         sync: false
+      # Твой Telegram ID — без него админ-команды (/cookies) отключены.
+      - key: ADMIN_ID
+        sync: false
+      # Ключ для /api/logs?key=... и /api/test_dl?key=... (без него они закрыты).
+      - key: DEBUG_API_KEY
+        sync: false
