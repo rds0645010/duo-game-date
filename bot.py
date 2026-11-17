@@ -116,6 +116,9 @@ music_lock = asyncio.Lock()
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -558,10 +561,14 @@ def get_canonical_media_key(url: str) -> str:
     m_yt = re.search(r'(?:v=|\/shorts\/|\/embed\/|youtu\.be\/|\/v\/)([A-Za-z0-9_-]{11})', u)
     if m_yt:
         return f"yt_{m_yt.group(1)}"
-    # 3. TikTok: числовой ID видео
-    m_tt = re.search(r'/video/(\d+)', u)
+    # 3. TikTok: числовой ID видео или фото-поста
+    m_tt = re.search(r'/(?:video|photo|v)/(\d+)', u)
     if m_tt:
         return f"tt_{m_tt.group(1)}"
+    # 4. Spotify: ID трека (игнорирует intl-ru и ?si=...)
+    m_sp = re.search(r'spotify\.com/(?:intl-[a-z]+/)?track/([A-Za-z0-9]+)', u, re.IGNORECASE)
+    if m_sp:
+        return f"sp_{m_sp.group(1)}"
     return u.split("?")[0].strip().rstrip("/")
 
 
@@ -3101,76 +3108,105 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
     kb = build_slideshow_keyboard(sid, new_idx, total, data, is_inline=is_in)
 
     file_ids = data.get("file_ids") or []
+    if len(file_ids) < total:
+        file_ids.extend([None] * (total - len(file_ids)))
+        data["file_ids"] = file_ids
     photo_urls = data.get("photo_urls") or []
     photos = data.get("photos") or []
 
     cached_fid = file_ids[new_idx] if new_idx < len(file_ids) else None
     photo_u = photo_urls[new_idx] if new_idx < len(photo_urls) else None
     file_path = photos[new_idx] if new_idx < len(photos) else None
+    local_exists = bool(file_path and os.path.exists(file_path))
 
-    # Приоритет источника:
+    # Приоритет источника (исправляет HTTP 403 при смене слайда в Instagram/TikTok):
     # 1. Telegram file_id (самый быстрый, проверенный CDN)
-    # 2. Прямой CDN URL фото (Telegram загружает сам напрямую)
-    # 3. Локальный файл на диске
-    media_target = cached_fid or photo_u
+    # 2. Локальный файл на диске (загружен при скачивании)
+    # 3. Прямой CDN URL фото (резерв после рестарта, если файлы уже удалены)
+    def _is_video_slide(target) -> bool:
+        return str(target or "").split("?")[0].lower().endswith((".mp4", ".mov", ".m4v"))
+
+    def _extract_msg_fid(msg) -> Optional[str]:
+        if not msg:
+            return None
+        if getattr(msg, "video", None):
+            return msg.video.file_id
+        if getattr(msg, "photo", None):
+            return msg.photo[-1].file_id
+        return None
 
     # Если переключение в инлайне
     if callback.inline_message_id:
-        if not media_target and file_path and os.path.exists(file_path):
-            cached_fid = await upload_media_to_telegram(file_path, is_photo=True)
+        if not cached_fid and local_exists:
+            is_vid_local = _is_video_slide(file_path)
+            uid = callback.from_user.id if callback.from_user else None
+            cached_fid = await upload_media_to_telegram(
+                file_path,
+                is_photo=not is_vid_local,
+                target_user_id=uid,
+                title=data.get("title", ""),
+                platform=data.get("platform", ""),
+            )
             if cached_fid:
-                if new_idx < len(file_ids):
-                    data["file_ids"][new_idx] = cached_fid
-                    save_slideshow_session_db(sid, data)
-                media_target = cached_fid
+                data["file_ids"][new_idx] = cached_fid
+                save_slideshow_session_db(sid, data)
 
-        if media_target:
-            is_vid = str(media_target).lower().endswith((".mp4", ".mov", ".m4v"))
-            media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-            try:
-                await bot.edit_message_media(
-                    inline_message_id=callback.inline_message_id,
-                    media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
-                    reply_markup=kb
-                )
-            except Exception as in_err:
-                logging.debug(f"Inline slide edit error: {in_err}")
+        media_target = cached_fid or photo_u
+        if not media_target:
+            await callback.answer("❌ Слайд временно недоступен.", show_alert=True)
+            return
+
+        is_vid = _is_video_slide(file_path) if local_exists else _is_video_slide(media_target)
+        media_cls = InputMediaVideo if is_vid else InputMediaPhoto
+        try:
+            await bot.edit_message_media(
+                inline_message_id=callback.inline_message_id,
+                media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
+                reply_markup=kb
+            )
+        except Exception as in_err:
+            logging.debug(f"Inline slide edit error: {in_err}")
         await callback.answer()
         return
 
     # Если переключение в личном чате или группе
-    if not media_target and file_path and os.path.exists(file_path):
-        media_target = FSInputFile(file_path)
-
+    media_target = cached_fid or (FSInputFile(file_path) if local_exists else photo_u)
     if not media_target:
         await callback.answer("❌ Слайд временно недоступен.", show_alert=True)
         return
 
-    is_vid = str(file_path or media_target).lower().endswith((".mp4", ".mov", ".m4v"))
+    is_vid = _is_video_slide(file_path) if local_exists else _is_video_slide(media_target)
     media_cls = InputMediaVideo if is_vid else InputMediaPhoto
     media_obj = media_cls(media=media_target, caption=caption, parse_mode="HTML")
 
     try:
         if callback.message:
             res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
-            if res_msg and res_msg.photo and new_idx < len(data["file_ids"]):
-                data["file_ids"][new_idx] = res_msg.photo[-1].file_id
+            new_fid = _extract_msg_fid(res_msg)
+            if new_fid:
+                data["file_ids"][new_idx] = new_fid
                 save_slideshow_session_db(sid, data)
         await callback.answer()
     except Exception as e:
         logging.warning(f"Slide edit media error: {e}")
-        # Если Telegram отклонил FSInputFile в edit_media — загружаем через send_photo и подменяем по file_id
-        if file_path and os.path.exists(file_path) and callback.message:
+        # Если Telegram отклонил FSInputFile/URL в edit_media — загружаем локальный файл и подменяем по file_id
+        if local_exists and callback.message:
             try:
-                tmp_sent = await bot.send_photo(chat_id=callback.message.chat.id, photo=FSInputFile(file_path), disable_notification=True)
-                if tmp_sent and tmp_sent.photo:
-                    new_fid = tmp_sent.photo[-1].file_id
-                    await tmp_sent.delete()
-                    if new_idx < len(data["file_ids"]):
-                        data["file_ids"][new_idx] = new_fid
-                        save_slideshow_session_db(sid, data)
+                if is_vid:
+                    tmp_sent = await bot.send_video(chat_id=callback.message.chat.id, video=FSInputFile(file_path), disable_notification=True)
+                else:
+                    tmp_sent = await bot.send_photo(chat_id=callback.message.chat.id, photo=FSInputFile(file_path), disable_notification=True)
+                new_fid = _extract_msg_fid(tmp_sent)
+                if tmp_sent:
+                    try:
+                        await tmp_sent.delete()
+                    except Exception:
+                        pass
+                if new_fid:
+                    data["file_ids"][new_idx] = new_fid
+                    save_slideshow_session_db(sid, data)
                     await callback.message.edit_media(
-                        media=InputMediaPhoto(media=new_fid, caption=caption, parse_mode="HTML"),
+                        media=media_cls(media=new_fid, caption=caption, parse_mode="HTML"),
                         reply_markup=kb
                     )
             except Exception as retry_err:
