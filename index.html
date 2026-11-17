@@ -3224,7 +3224,9 @@
 
       const srv = localStorage.getItem('duo_server_url') || DEFAULT_SERVER_URL;
       try {
-        const res = await fetch(`${srv}/api/check_user?username=${encodeURIComponent(clean)}`);
+        const res = await fetch(`${srv}/api/check_user?username=${encodeURIComponent(clean)}`, {
+          headers: tg?.initData ? { 'X-Telegram-Init-Data': tg.initData } : {}
+        });
         const data = await res.json();
         if (data.found) {
           targetStatusDesc.innerHTML = `<span style="color: #00ff88; font-weight: 800;">🟢 Найден в боте!</span> Инвайт прилетит прямо в ЛС`;
@@ -3317,8 +3319,12 @@
         try {
           const res = await fetch(`${srv}/api/send_invite`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(tg?.initData ? { 'X-Telegram-Init-Data': tg.initData } : {})
+            },
             body: JSON.stringify({
+              init_data: tg?.initData || '',
               sender_id: myId,
               sender_name: u?.first_name || 'Я',
               sender_username: u?.username || '',
@@ -3718,9 +3724,13 @@
           const timeoutId = setTimeout(() => controller.abort(), 7000);
           const res = await fetch(`${serverUrl}/api/send_invite`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(tg?.initData ? { 'X-Telegram-Init-Data': tg.initData } : {})
+            },
             signal: controller.signal,
             body: JSON.stringify({
+              init_data: tg?.initData || '',
               sender_id: tg?.initDataUnsafe?.user?.id || 0,
               sender_name: state.myName || tg?.initDataUnsafe?.user?.first_name || 'Твой тиммейт',
               sender_username: tg?.initDataUnsafe?.user?.username || '',

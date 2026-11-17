@@ -20,6 +20,8 @@ from typing import Dict, Any, List, Optional, Tuple
 import aiohttp
 import yt_dlp
 
+import http_pool
+
 logger = logging.getLogger("music_service")
 
 DOWNLOAD_DIR = "temp_downloads"
@@ -216,10 +218,10 @@ async def fetch_spotify_oembed(url: str) -> Optional[Dict[str, Any]]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(oembed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    return await resp.json()
+        session = await http_pool.get_http_session()
+        async with session.get(oembed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 200:
+                return await resp.json()
     except Exception as e:
         logger.warning(f"Spotify oEmbed fetch failed: {e}")
     return None
@@ -252,14 +254,14 @@ async def fetch_spotify_metadata(url: str, proxy_url: str = None) -> Dict[str, A
         embed_url = f"https://open.spotify.com/embed/track/{track_id}"
         for p in proxies_to_try:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(embed_url, headers=headers, proxy=p, timeout=aiohttp.ClientTimeout(total=7)) as resp:
-                        if resp.status == 200:
-                            html_text = await resp.text()
-                            parsed = parse_spotify_html_meta(html_text)
-                            if parsed.get("title") and parsed.get("artist"):
-                                result_meta.update(parsed)
-                                break
+                session = await http_pool.get_http_session()
+                async with session.get(embed_url, headers=headers, proxy=p, timeout=aiohttp.ClientTimeout(total=7)) as resp:
+                    if resp.status == 200:
+                        html_text = await resp.text()
+                        parsed = parse_spotify_html_meta(html_text)
+                        if parsed.get("title") and parsed.get("artist"):
+                            result_meta.update(parsed)
+                            break
             except Exception as e:
                 logger.debug(f"Spotify embed fetch attempt failed (proxy={p}): {e}")
 
@@ -272,16 +274,16 @@ async def fetch_spotify_metadata(url: str, proxy_url: str = None) -> Dict[str, A
         }
         for p in proxies_to_try:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(direct_url, headers=crawler_headers, proxy=p, timeout=aiohttp.ClientTimeout(total=7)) as resp:
-                        if resp.status == 200:
-                            html_text = await resp.text()
-                            parsed = parse_spotify_html_meta(html_text)
-                            for k, v in parsed.items():
-                                if v and not result_meta.get(k):
-                                    result_meta[k] = v
-                            if result_meta.get("artist") and result_meta.get("title"):
-                                break
+                session = await http_pool.get_http_session()
+                async with session.get(direct_url, headers=crawler_headers, proxy=p, timeout=aiohttp.ClientTimeout(total=7)) as resp:
+                    if resp.status == 200:
+                        html_text = await resp.text()
+                        parsed = parse_spotify_html_meta(html_text)
+                        for k, v in parsed.items():
+                            if v and not result_meta.get(k):
+                                result_meta[k] = v
+                        if result_meta.get("artist") and result_meta.get("title"):
+                            break
             except Exception as e:
                 logger.debug(f"Spotify direct page fetch failed (proxy={p}): {e}")
 
@@ -511,12 +513,12 @@ async def download_thumbnail_file(url: str, dest_path: str) -> Optional[str]:
     if not url:
         return None
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
-                if resp.status == 200:
-                    with open(dest_path, "wb") as f:
-                        f.write(await resp.read())
-                    return dest_path
+        session = await http_pool.get_http_session()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+            if resp.status == 200:
+                with open(dest_path, "wb") as f:
+                    f.write(await resp.read())
+                return dest_path
     except Exception as e:
         logger.debug(f"Failed to download audio thumbnail: {e}")
     return None

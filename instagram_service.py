@@ -5,6 +5,8 @@ import logging
 import aiohttp
 from typing import Optional, Dict, Any, List
 
+import http_pool
+
 logger = logging.getLogger("instagram_service")
 
 # Regex для Instagram (Reels, Posts, Stories/Share, TV)
@@ -106,7 +108,8 @@ async def parse_instagram_embed(url: str) -> Optional[Dict[str, Any]]:
     is_reel = is_reel_url(url)
     embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
     try:
-        async with aiohttp.ClientSession() as session:
+        session = await http_pool.get_http_session()
+        if True:
             async with session.get(embed_url, headers=EMBED_HEADERS, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                 if resp.status == 200:
                     text = await resp.text()
@@ -300,7 +303,22 @@ async def _download_from_instagram_meta(
         downloaded_slides = 0
         slide_lock = asyncio.Lock()
 
-        async def _dl_slide(idx: int, item: Dict[str, Any]):
+        def _expected_slide_path(idx: int, item: Dict[str, Any]) -> str:
+            v_formats = [f for f in (item or {}).get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
+            ext = "mp4" if v_formats else "jpg"
+            return f"{output_prefix}_{idx}.{ext}"
+
+        expected_paths = [_expected_slide_path(i, it) for i, it in enumerate(targets)]
+        p_urls = []
+        for t in targets:
+            u = None
+            if isinstance(t, dict):
+                u = t.get("url") or t.get("display_url")
+                if not u and t.get("thumbnails"):
+                    u = t["thumbnails"][-1].get("url")
+            p_urls.append(u or "")
+
+        async def _dl_slide(idx: int, item: Dict[str, Any], notify_progress: bool = False):
             nonlocal downloaded_slides
             if not item:
                 return
@@ -310,13 +328,21 @@ async def _download_from_instagram_meta(
                 if v_formats:
                     best_v = max(v_formats, key=lambda f: f.get("height") or 0)
                     dest = f"{output_prefix}_{idx}.mp4"
+                    tmp_dest = f"{dest}.part"
                     try:
-                        await download_file_func(best_v["url"], dest, proxy=proxy_url)
-                        if os.path.exists(dest) and (not is_valid_mp4_func or is_valid_mp4_func(dest)):
+                        await download_file_func(best_v["url"], tmp_dest, proxy=proxy_url)
+                        if os.path.exists(tmp_dest) and (not is_valid_mp4_func or is_valid_mp4_func(tmp_dest)):
+                            os.replace(tmp_dest, dest)
                             album_files[idx] = dest
                             return
                     except Exception as dl_err:
                         logger.debug(f"Instagram carousel slide {idx} video download failed: {dl_err}")
+                    finally:
+                        if os.path.exists(tmp_dest):
+                            try:
+                                os.remove(tmp_dest)
+                            except OSError:
+                                pass
 
                 # Иначе берем лучшее фото (из thumbnails, url или display_url)
                 thumbs = item.get("thumbnails", [])
@@ -328,17 +354,25 @@ async def _download_from_instagram_meta(
                     photo_url = item.get("url") or item.get("display_url")
                 if photo_url:
                     dest = f"{output_prefix}_{idx}.jpg"
+                    tmp_dest = f"{dest}.part"
                     try:
-                        await download_file_func(photo_url, dest, proxy=proxy_url)
-                        if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                        await download_file_func(photo_url, tmp_dest, proxy=proxy_url)
+                        if os.path.exists(tmp_dest) and os.path.getsize(tmp_dest) > 1000:
+                            os.replace(tmp_dest, dest)
                             album_files[idx] = dest
                             return
                     except Exception as dl_err:
                         logger.debug(f"Instagram carousel slide {idx} photo download failed: {dl_err}")
+                    finally:
+                        if os.path.exists(tmp_dest):
+                            try:
+                                os.remove(tmp_dest)
+                            except OSError:
+                                pass
             finally:
                 async with slide_lock:
                     downloaded_slides += 1
-                    if progress_callback:
+                    if notify_progress and progress_callback:
                         try:
                             cb = progress_callback(downloaded_slides, total_slides, is_slide=True)
                             if asyncio.iscoroutine(cb):
@@ -346,22 +380,45 @@ async def _download_from_instagram_meta(
                         except Exception:
                             pass
 
-        await asyncio.gather(*[_dl_slide(i, item) for i, item in enumerate(targets)])
+        # Fast-Track: качаем сначала 1-й слайд и отдаём пользователю, остальные — в фоне
+        await _dl_slide(0, targets[0], notify_progress=True)
+        if album_files[0]:
+            expected_paths[0] = album_files[0]
+            async def _bg_dl_remaining():
+                sem = asyncio.Semaphore(4)
+                async def _bounded(i: int, it: Dict[str, Any]):
+                    async with sem:
+                        await _dl_slide(i, it, notify_progress=False)
+                await asyncio.gather(*[_bounded(i, targets[i]) for i in range(1, len(targets))], return_exceptions=True)
+
+            bg_task = asyncio.create_task(_bg_dl_remaining())
+            return {
+                "is_album": True,
+                "photos": expected_paths,
+                "photo_urls": [u for u in p_urls if u],
+                "file_path": album_files[0],
+                "fast_track": True,
+                "_bg_task": bg_task,
+                "platform": "instagram",
+                "title": title,
+                "author": author,
+                "digg_count": likes,
+                "comment_count": comments,
+                "share_count": 0,
+                "music": track_name,
+                "music_info": music_info,
+                "original_url": clean_url
+            }
+
+        # Резерв, если 0-й слайд не скачался: догружаем остальные синхронно
+        await asyncio.gather(*[_dl_slide(i, targets[i]) for i in range(1, len(targets))])
         valid_files = [f for f in album_files if f]
 
         if len(valid_files) > 1:
-            p_urls = []
-            for t in targets:
-                if isinstance(t, dict):
-                    u = t.get("url") or t.get("display_url")
-                    if not u and t.get("thumbnails"):
-                        u = t["thumbnails"][-1].get("url")
-                    if u:
-                        p_urls.append(u)
             return {
                 "is_album": True,
                 "photos": valid_files,
-                "photo_urls": p_urls,
+                "photo_urls": [u for u in p_urls if u],
                 "file_path": valid_files[0],
                 "platform": "instagram",
                 "title": title,
@@ -648,7 +705,8 @@ async def _try_download_instagram_embed_media(
     title = ""
     author = ""
 
-    async with aiohttp.ClientSession() as session:
+    session = await http_pool.get_http_session()
+    if True:
         for embed_url in embed_urls:
             # Сначала с прокси (если есть), затем напрямую при неудаче
             proxies_to_try = [proxy_url] if proxy_url else [None]
@@ -763,18 +821,53 @@ async def _try_download_instagram_embed_media(
 
     if len(img_urls) > 1:
         targets = img_urls[:30]
+        expected_paths = [f"{output_prefix}_{idx}.jpg" for idx in range(len(targets))]
         album_photos = [None] * len(targets)
 
         async def _dl_embed_slide(idx: int, u: str):
-            dest = f"{output_prefix}_{idx}.jpg"
+            dest = expected_paths[idx]
+            tmp_dest = f"{dest}.part"
             try:
-                await download_file_func(u, dest, proxy=proxy_url)
-                if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                await download_file_func(u, tmp_dest, proxy=proxy_url)
+                if os.path.exists(tmp_dest) and os.path.getsize(tmp_dest) > 1000:
+                    os.replace(tmp_dest, dest)
                     album_photos[idx] = dest
             except Exception:
                 pass
+            finally:
+                if os.path.exists(tmp_dest):
+                    try:
+                        os.remove(tmp_dest)
+                    except OSError:
+                        pass
 
-        await asyncio.gather(*[_dl_embed_slide(i, u) for i, u in enumerate(targets)])
+        await _dl_embed_slide(0, targets[0])
+        if album_photos[0]:
+            async def _bg_dl_embed():
+                sem = asyncio.Semaphore(4)
+                async def _bounded(i: int, u: str):
+                    async with sem:
+                        await _dl_embed_slide(i, u)
+                await asyncio.gather(*[_bounded(i, targets[i]) for i in range(1, len(targets))], return_exceptions=True)
+
+            bg_task = asyncio.create_task(_bg_dl_embed())
+            return {
+                "is_album": True,
+                "photos": expected_paths,
+                "photo_urls": targets,
+                "file_path": album_photos[0],
+                "fast_track": True,
+                "_bg_task": bg_task,
+                "platform": "instagram",
+                "title": title or "Instagram Альбом",
+                "author": author or "Instagram",
+                "digg_count": 0,
+                "comment_count": 0,
+                "share_count": 0,
+                "original_url": f"https://www.instagram.com/p/{shortcode}/"
+            }
+
+        await asyncio.gather(*[_dl_embed_slide(i, targets[i]) for i in range(1, len(targets))])
         valid_photos = [p for p in album_photos if p]
 
         if len(valid_photos) > 1:

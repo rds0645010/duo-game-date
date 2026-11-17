@@ -9,6 +9,8 @@ import logging
 import aiohttp
 from typing import Optional, Dict, Any, List
 
+import http_pool
+
 logger = logging.getLogger("tiktok_service")
 
 # Regex для распознавания ссылок TikTok
@@ -66,7 +68,8 @@ async def _parse_ssstik(url: str, proxy: Optional[str] = None) -> Optional[Dict[
         "Referer": "https://ssstik.io/en"
     }
     try:
-        async with aiohttp.ClientSession() as session:
+        session = await http_pool.get_http_session()
+        if True:
             # Если прямой запрос не удался или нужен динамический токен s_tt
             resp_text = None
             try:
@@ -176,31 +179,31 @@ async def _parse_ssstik(url: str, proxy: Optional[str] = None) -> Optional[Dict[
 async def _parse_tikmate(url: str, proxy: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Резервный парсер через Tikmate API (без водяных знаков)"""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.tikmate.app/api/lookup",
-                data={"url": url},
-                headers={"User-Agent": DEFAULT_HEADERS["User-Agent"]},
-                proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=4)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    token = data.get("token")
-                    vid_id = data.get("id")
-                    if token and vid_id:
-                        dl_url = f"https://tikmate.app/download/{token}/{vid_id}.mp4"
-                        return {
-                            "success": True,
-                            "platform": "tiktok",
-                            "is_video": True,
-                            "video_url": dl_url,
-                            "title": data.get("author_name") or "TikTok Video",
-                            "author": data.get("author_id") or "TikTok",
-                            "cover": "",
-                            "duration": 0,
-                            "size": 0
-                        }
+        session = await http_pool.get_http_session()
+        async with session.post(
+            "https://api.tikmate.app/api/lookup",
+            data={"url": url},
+            headers={"User-Agent": DEFAULT_HEADERS["User-Agent"]},
+            proxy=proxy,
+            timeout=aiohttp.ClientTimeout(total=4)
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                token = data.get("token")
+                vid_id = data.get("id")
+                if token and vid_id:
+                    dl_url = f"https://tikmate.app/download/{token}/{vid_id}.mp4"
+                    return {
+                        "success": True,
+                        "platform": "tiktok",
+                        "is_video": True,
+                        "video_url": dl_url,
+                        "title": data.get("author_name") or "TikTok Video",
+                        "author": data.get("author_id") or "TikTok",
+                        "cover": "",
+                        "duration": 0,
+                        "size": 0
+                    }
     except Exception as e:
         logger.debug(f"Tikmate parser error: {e}")
     return None
@@ -223,21 +226,21 @@ async def _resolve_tiktok_shortlink(url: str, proxy: Optional[str] = None) -> st
             attempts.append(proxy)
         for p in attempts:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url,
-                        allow_redirects=True,
-                        headers=headers,
-                        proxy=p,
-                        timeout=aiohttp.ClientTimeout(total=4.0)
-                    ) as resp:
-                        target = str(resp.url)
-                        # ВАЖНО: Развернутый URL валиден только если он указывает на конкретный пост (@user/video/... или @user/photo/...)
-                        # Если TikTok перенаправил на главную страницу или логин (tiktok.com/ или tiktok.com/?_r=1) — НЕ используем его!
-                        if target and any(k in target for k in ("/video/", "/photo/", "/v/")):
-                            clean = target.split("?")[0]
-                            logger.info(f"🔗 Развернута короткая ссылка: {url} -> {clean}")
-                            return clean
+                session = await http_pool.get_http_session()
+                async with session.get(
+                    url,
+                    allow_redirects=True,
+                    headers=headers,
+                    proxy=p,
+                    timeout=aiohttp.ClientTimeout(total=4.0)
+                ) as resp:
+                    target = str(resp.url)
+                    # ВАЖНО: Развернутый URL валиден только если он указывает на конкретный пост (@user/video/... или @user/photo/...)
+                    # Если TikTok перенаправил на главную страницу или логин (tiktok.com/ или tiktok.com/?_r=1) — НЕ используем его!
+                    if target and any(k in target for k in ("/video/", "/photo/", "/v/")):
+                        clean = target.split("?")[0]
+                        logger.info(f"🔗 Развернута короткая ссылка: {url} -> {clean}")
+                        return clean
             except Exception:
                 continue
     except Exception as e:
@@ -278,64 +281,64 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
         for u_candidate in urls_to_try:
             for endpoint in TIKWM_ENDPOINTS:
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
-                            endpoint,
-                            data={"url": u_candidate, "hd": "1"},
-                            headers=DEFAULT_HEADERS,
-                            proxy=strat_proxy,
-                            timeout=aiohttp.ClientTimeout(total=4.5)
-                        ) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                if data.get("code") == 0 and data.get("data"):
-                                    d = data["data"]
-                                    digg = d.get("digg_count", 0)
-                                    comm = d.get("comment_count", 0)
-                                    shares = d.get("share_count", 0)
-                                    music_u = d.get("music")
-                                    music_inf = d.get("music_info")
+                    session = await http_pool.get_http_session()
+                    async with session.post(
+                        endpoint,
+                        data={"url": u_candidate, "hd": "1"},
+                        headers=DEFAULT_HEADERS,
+                        proxy=strat_proxy,
+                        timeout=aiohttp.ClientTimeout(total=4.5)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("code") == 0 and data.get("data"):
+                                d = data["data"]
+                                digg = d.get("digg_count", 0)
+                                comm = d.get("comment_count", 0)
+                                shares = d.get("share_count", 0)
+                                music_u = d.get("music")
+                                music_inf = d.get("music_info")
 
-                                    images = d.get("images") or []
-                                    if images:
-                                        logger.info(f"✅ [TikTok] Карусель ({len(images)} фото) получена через TikWM ({strat_name})")
-                                        return {
-                                            "success": True,
-                                            "platform": "tiktok",
-                                            "is_photo": True,
-                                            "is_album": len(images) > 1,
-                                            "photo_urls": images,
-                                            "music": music_u,
-                                            "music_info": music_inf,
-                                            "title": d.get("title", "TikTok Фото") or "TikTok Фото",
-                                            "author": d.get("author", {}).get("nickname", "TikTok"),
-                                            "cover": d.get("cover", ""),
-                                            "digg_count": digg,
-                                            "comment_count": comm,
-                                            "share_count": shares
-                                        }
+                                images = d.get("images") or []
+                                if images:
+                                    logger.info(f"✅ [TikTok] Карусель ({len(images)} фото) получена через TikWM ({strat_name})")
+                                    return {
+                                        "success": True,
+                                        "platform": "tiktok",
+                                        "is_photo": True,
+                                        "is_album": len(images) > 1,
+                                        "photo_urls": images,
+                                        "music": music_u,
+                                        "music_info": music_inf,
+                                        "title": d.get("title", "TikTok Фото") or "TikTok Фото",
+                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                        "cover": d.get("cover", ""),
+                                        "digg_count": digg,
+                                        "comment_count": comm,
+                                        "share_count": shares
+                                    }
 
-                                    video_url = d.get("play") or d.get("wmplay")
-                                    if video_url:
-                                        if video_url.startswith("/"):
-                                            video_url = "https://www.tikwm.com" + video_url
-                                        logger.info(f"✅ [TikTok] Видео получено через TikWM ({strat_name})")
-                                        return {
-                                            "success": True,
-                                            "platform": "tiktok",
-                                            "is_video": True,
-                                            "video_url": video_url,
-                                            "title": d.get("title", "TikTok Video") or "TikTok Video",
-                                            "author": d.get("author", {}).get("nickname", "TikTok"),
-                                            "cover": d.get("cover", ""),
-                                            "duration": d.get("duration", 0),
-                                            "size": d.get("size", 0),
-                                            "digg_count": digg,
-                                            "comment_count": comm,
-                                            "share_count": shares,
-                                            "music": music_u,
-                                            "music_info": music_inf
-                                        }
+                                video_url = d.get("play") or d.get("wmplay")
+                                if video_url:
+                                    if video_url.startswith("/"):
+                                        video_url = "https://www.tikwm.com" + video_url
+                                    logger.info(f"✅ [TikTok] Видео получено через TikWM ({strat_name})")
+                                    return {
+                                        "success": True,
+                                        "platform": "tiktok",
+                                        "is_video": True,
+                                        "video_url": video_url,
+                                        "title": d.get("title", "TikTok Video") or "TikTok Video",
+                                        "author": d.get("author", {}).get("nickname", "TikTok"),
+                                        "cover": d.get("cover", ""),
+                                        "duration": d.get("duration", 0),
+                                        "size": d.get("size", 0),
+                                        "digg_count": digg,
+                                        "comment_count": comm,
+                                        "share_count": shares,
+                                        "music": music_u,
+                                        "music_info": music_inf
+                                    }
                 except Exception as e:
                     logger.debug(f"TikTok endpoint {endpoint} ({strat_name}) error: {e}")
                     continue
@@ -410,34 +413,34 @@ async def download_file_stream(
     last_err = None
     for cur_proxy in attempts:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, proxy=cur_proxy, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"HTTP {resp.status} while downloading TikTok stream")
+            session = await http_pool.get_http_session()
+            async with session.get(url, headers=headers, proxy=cur_proxy, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status} while downloading TikTok stream")
 
-                    content_length = resp.headers.get("Content-Length")
-                    total = int(content_length) if content_length and content_length.isdigit() else 0
-                    if total > max_size_bytes:
-                        raise Exception("file_too_large")
+                content_length = resp.headers.get("Content-Length")
+                total = int(content_length) if content_length and content_length.isdigit() else 0
+                if total > max_size_bytes:
+                    raise Exception("file_too_large")
 
-                    downloaded = 0
-                    t0 = time.time()
-                    with open(output_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(1024 * 1024):
-                            downloaded += len(chunk)
-                            if downloaded > max_size_bytes:
-                                raise Exception("file_too_large")
-                            f.write(chunk)
-                            if progress_callback:
-                                elapsed = time.time() - t0
-                                speed = downloaded / elapsed if elapsed > 0.05 else 0
-                                eta = (total - downloaded) / speed if (speed > 0 and total > downloaded) else 0
-                                try:
-                                    cb_res = progress_callback(downloaded, total, speed, eta)
-                                    if asyncio.iscoroutine(cb_res):
-                                        await cb_res
-                                except Exception:
-                                    pass
+                downloaded = 0
+                t0 = time.time()
+                with open(output_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1024 * 1024):
+                        downloaded += len(chunk)
+                        if downloaded > max_size_bytes:
+                            raise Exception("file_too_large")
+                        f.write(chunk)
+                        if progress_callback:
+                            elapsed = time.time() - t0
+                            speed = downloaded / elapsed if elapsed > 0.05 else 0
+                            eta = (total - downloaded) / speed if (speed > 0 and total > downloaded) else 0
+                            try:
+                                cb_res = progress_callback(downloaded, total, speed, eta)
+                                if asyncio.iscoroutine(cb_res):
+                                    await cb_res
+                            except Exception:
+                                pass
             return output_path
         except Exception as e:
             last_err = e
@@ -540,18 +543,23 @@ async def download_tiktok(
 
         if len(photo_urls) > 1:
             targets = photo_urls[:30]
+            expected_paths = [f"{output_prefix}_{i}.jpg" for i in range(len(targets))]
             album_photos = [None] * len(targets)
             total_slides = len(targets)
             downloaded_count = 0
             slide_lock = asyncio.Lock()
 
-            async def _dl_slide(idx: int, img_u: str):
+            async def _dl_slide(idx: int, img_u: str, notify_progress: bool = False):
                 nonlocal downloaded_count
-                dest = f"{output_prefix}_{idx}.jpg"
+                dest = expected_paths[idx]
+                tmp_dest = f"{dest}.part"
                 try:
-                    await download_file_stream(img_u, dest, proxy=proxy_url)
+                    try:
+                        await download_file_stream(img_u, tmp_dest, proxy=proxy_url)
+                    except Exception:
+                        pass
                     # Если файл не скачался (например, 403 от cdn) и это ссылка tikcdn.io — пробуем оригинальный декодированный URL
-                    if (not os.path.exists(dest) or os.path.getsize(dest) < 1000) and "tikcdn.io" in img_u:
+                    if (not os.path.exists(tmp_dest) or os.path.getsize(tmp_dest) < 1000) and "tikcdn.io" in img_u:
                         m_b64 = re.search(r'tikcdn\.io/ssstik/(?:m/)?([A-Za-z0-9_-]+)', img_u)
                         if m_b64:
                             b = m_b64.group(1).replace('-', '+').replace('_', '/')
@@ -559,18 +567,24 @@ async def download_tiktok(
                             try:
                                 dec = base64.b64decode(b).decode('utf-8', errors='ignore')
                                 if dec.startswith("http"):
-                                    await download_file_stream(dec, dest, proxy=proxy_url)
+                                    await download_file_stream(dec, tmp_dest, proxy=proxy_url)
                             except Exception:
                                 pass
 
-                    if os.path.exists(dest) and os.path.getsize(dest) > 1000:
+                    if os.path.exists(tmp_dest) and os.path.getsize(tmp_dest) > 1000:
+                        os.replace(tmp_dest, dest)
                         album_photos[idx] = dest
+                    elif os.path.exists(tmp_dest):
+                        try:
+                            os.remove(tmp_dest)
+                        except OSError:
+                            pass
                 except Exception as dl_err:
                     logger.warning(f"TikTok album slide {idx} download error: {dl_err}")
                 finally:
                     async with slide_lock:
                         downloaded_count += 1
-                        if progress_callback:
+                        if notify_progress and progress_callback:
                             try:
                                 cb = progress_callback(downloaded_count, total_slides, is_slide=True)
                                 if asyncio.iscoroutine(cb):
@@ -578,14 +592,25 @@ async def download_tiktok(
                             except Exception:
                                 pass
 
-            await asyncio.gather(*[_dl_slide(i, u) for i, u in enumerate(targets)])
-            valid_photos = [p for p in album_photos if p]
+            # Fast-Track: качаем сначала только 1-й слайд (около 1 сек) и сразу отдаём пользователю
+            await _dl_slide(0, targets[0], notify_progress=True)
+
+            async def _bg_dl_remaining():
+                sem = asyncio.Semaphore(4)
+                async def _bounded(i: int, u: str):
+                    async with sem:
+                        await _dl_slide(i, u, notify_progress=False)
+                await asyncio.gather(*[_bounded(i, targets[i]) for i in range(1, len(targets))], return_exceptions=True)
+
+            bg_task = asyncio.create_task(_bg_dl_remaining())
 
             return {
                 "is_album": True,
-                "photos": valid_photos,
+                "photos": expected_paths,
                 "photo_urls": targets,
-                "file_path": valid_photos[0] if valid_photos else None,
+                "file_path": album_photos[0],
+                "fast_track": True,
+                "_bg_task": bg_task,
                 "platform": "tiktok",
                 "title": tikwm_data.get("title", "TikTok Слайдшоу"),
                 "author": tikwm_data.get("author", "TikTok"),

@@ -10,6 +10,7 @@ import imageio_ffmpeg
 from typing import Optional, Dict, Any, List
 
 import warp_proxy
+import http_pool
 import tiktok_service
 import youtube_service
 import instagram_service
@@ -319,39 +320,39 @@ async def download_file_from_url(
         headers["Referer"] = "https://www.instagram.com/"
         headers["Origin"] = "https://www.instagram.com"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=45)) as resp:
-            if resp.status != 200:
-                raise Exception(f"HTTP {resp.status} while downloading video")
+    session = await http_pool.get_http_session()
+    async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=45)) as resp:
+        if resp.status != 200:
+            raise Exception(f"HTTP {resp.status} while downloading video")
 
-            content_type = (resp.headers.get("Content-Type") or "").lower()
-            if "text/" in content_type or "json" in content_type or "xml" in content_type:
-                # Instagram часто отдаёт HTML-заглушку вместо видео при 403.
-                raise Exception(f"Expected media, got {content_type or 'unknown content type'}")
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "text/" in content_type or "json" in content_type or "xml" in content_type:
+            # Instagram часто отдаёт HTML-заглушку вместо видео при 403.
+            raise Exception(f"Expected media, got {content_type or 'unknown content type'}")
 
-            content_length = resp.headers.get("Content-Length")
-            total = int(content_length) if content_length and content_length.isdigit() else 0
-            if total > max_size_bytes:
-                raise Exception("file_too_large")
+        content_length = resp.headers.get("Content-Length")
+        total = int(content_length) if content_length and content_length.isdigit() else 0
+        if total > max_size_bytes:
+            raise Exception("file_too_large")
 
-            downloaded = 0
-            t0 = time.time()
-            with open(output_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(1024 * 1024):
-                    downloaded += len(chunk)
-                    if downloaded > max_size_bytes:
-                        raise Exception("file_too_large")
-                    f.write(chunk)
-                    if progress_callback:
-                        elapsed = time.time() - t0
-                        spd = downloaded / elapsed if elapsed > 0.05 else 0
-                        eta = (total - downloaded) / spd if (spd > 0 and total > downloaded) else 0
-                        try:
-                            cb_res = progress_callback(downloaded, total, spd, eta)
-                            if asyncio.iscoroutine(cb_res):
-                                await cb_res
-                        except Exception:
-                            pass
+        downloaded = 0
+        t0 = time.time()
+        with open(output_path, "wb") as f:
+            async for chunk in resp.content.iter_chunked(1024 * 1024):
+                downloaded += len(chunk)
+                if downloaded > max_size_bytes:
+                    raise Exception("file_too_large")
+                f.write(chunk)
+                if progress_callback:
+                    elapsed = time.time() - t0
+                    spd = downloaded / elapsed if elapsed > 0.05 else 0
+                    eta = (total - downloaded) / spd if (spd > 0 and total > downloaded) else 0
+                    try:
+                        cb_res = progress_callback(downloaded, total, spd, eta)
+                        if asyncio.iscoroutine(cb_res):
+                            await cb_res
+                    except Exception:
+                        pass
     return output_path
 
 
@@ -800,9 +801,11 @@ async def download_video(url: str, user_id: int, progress_callback=None):
     uid = str(uuid.uuid4())[:8]
     output_prefix = os.path.join(DOWNLOAD_DIR, f"vid_{user_id}_{uid}")
 
+    res = None
+
     # 1. TIKTOK: полностью независимая система
     if platform == "tiktok":
-        return await tiktok_service.download_tiktok(
+        res = await tiktok_service.download_tiktok(
             clean_url,
             output_prefix,
             download_locally=True,
@@ -812,8 +815,8 @@ async def download_video(url: str, user_id: int, progress_callback=None):
         )
 
     # 2. YOUTUBE SHORTS / Обычные видео / Подкасты: полностью независимая система
-    if platform == "youtube":
-        return await youtube_service.download_youtube(
+    elif platform == "youtube":
+        res = await youtube_service.download_youtube(
             clean_url,
             output_prefix,
             _download_ytdlp_sync,
@@ -822,8 +825,8 @@ async def download_video(url: str, user_id: int, progress_callback=None):
         )
 
     # 3. INSTAGRAM REELS: полностью независимая система
-    if platform == "instagram":
-        return await instagram_service.download_instagram(
+    elif platform == "instagram":
+        res = await instagram_service.download_instagram(
             clean_url,
             output_prefix,
             _download_ytdlp_sync,
@@ -835,7 +838,7 @@ async def download_video(url: str, user_id: int, progress_callback=None):
         )
 
     # 4. SPOTIFY: извлечение метаданных и скачивание трека
-    if platform == "spotify":
+    elif platform == "spotify":
         import music_service
         warp_proxy_url = None
         if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
@@ -888,10 +891,9 @@ async def download_video(url: str, user_id: int, progress_callback=None):
             proxy_url=warp_proxy_url
         )
         res["is_audio"] = True
-        return res
 
     # 5. SOUNDCLOUD: скачивание аудио
-    if platform == "soundcloud":
+    elif platform == "soundcloud":
         import music_service
         warp_proxy_url = None
         if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
@@ -907,7 +909,9 @@ async def download_video(url: str, user_id: int, progress_callback=None):
             proxy_url=warp_proxy_url
         )
         res["is_audio"] = True
-        return res
+
+    if res:
+        return http_pool.normalize_media_result(res, default_platform=platform)
 
     raise Exception("download_failed")
 

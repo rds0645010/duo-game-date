@@ -1,44 +1,23 @@
+"""
+Главная точка входа DUO Game & Media Bot:
+инициализирует конфигурацию, БД (db.py), пул HTTP-соединений (http_pool.py),
+подключает модульные роутеры (routers/) и запускает Polling/Webhook + WebApp API.
+"""
+
 import os
 import re
-import json
-import sqlite3
+import sys
 import logging
 import asyncio
-import base64
 import html
 import time
-import shutil
-import uuid
-import tempfile
-from typing import Optional, Dict, Any, List
+from typing import Optional
 import aiohttp
-from aiohttp import web
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.enums import ChatAction
-from aiogram.filters import CommandStart, CommandObject, Command
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    WebAppInfo,
-    MenuButtonWebApp,
-    InlineQuery,
-    InlineQueryResultVideo,
-    InlineQueryResultArticle,
-    InlineQueryResultCachedVideo,
-    InlineQueryResultPhoto,
-    InlineQueryResultCachedPhoto,
-    InputTextMessageContent,
-    InputMediaPhoto,
-    InputMediaVideo,
-    InputMediaAudio,
-    ChosenInlineResult,
-    CallbackQuery,
-    FSInputFile,
-    SwitchInlineQueryChosenChat
-)
+from aiogram.types import InlineKeyboardMarkup, FSInputFile
+
 from downloader import (
     detect_platform,
     detect_content_info,
@@ -50,16 +29,20 @@ from downloader import (
     DOWNLOAD_DIR,
     extract_direct_video_info,
     parse_instagram_embed,
-    is_valid_mp4_file
+    is_valid_mp4_file,
 )
 import warp_proxy
 import music_service
+import db
+import http_pool
+import routers
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # 📋 ДИАГНОСТИКА И ЛОГИРОВАНИЕ ОШИБОК
 recent_errors = []
+
 
 def record_error(source: str, error: Exception, details: str = ""):
     import traceback
@@ -69,14 +52,14 @@ def record_error(source: str, error: Exception, details: str = ""):
         "error": str(error),
         "type": type(error).__name__,
         "details": details,
-        "traceback": traceback.format_exc()
+        "traceback": traceback.format_exc(),
     })
     if len(recent_errors) > 20:
         recent_errors.pop(0)
 
 
 # ==========================================
-# ⚙️ НАСТРОЙКИ (0 БЮДЖЕТА)
+# ⚙️ КОНФИГУРАЦИЯ И НЕЗАВИСИМЫЕ СЕМАФОРЫ
 # ==========================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://rds0645010.github.io/duo-game-date/").strip()
@@ -84,21 +67,18 @@ ORGANIZER_CHAT_ID = os.getenv("ORGANIZER_CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", 8080))
 DB_PATH = "users.db"
 
-# 👑 ПРИОРИТЕТ И 3 НЕЗАВИСИМЫЕ СИСТЕМЫ СКАЧИВАНИЯ
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "").strip()
 ADMIN_IDS = set([x.strip() for x in ADMIN_ID_RAW.split(",") if x.strip()])
+DEBUG_API_KEY = os.getenv("DEBUG_API_KEY", "").strip()
 
-# 1. TikTok: лёгкий (не использует RAM/FFmpeg), до 5 параллельных потоков
 TIKTOK_SEMAPHORE = asyncio.Semaphore(5)
 tiktok_waiting_count = 0
 tiktok_lock = asyncio.Lock()
 
-# 2. Instagram: средний (~25-30 МБ RAM на процесс), до 2 параллельных потоков
 INSTAGRAM_SEMAPHORE = asyncio.Semaphore(2)
 instagram_waiting_count = 0
 instagram_lock = asyncio.Lock()
 
-# 3. YouTube: тяжёлый с FFmpeg-склейкой (~150 МБ), строго 1 для тарифа 512 МБ
 try:
     MAX_YOUTUBE_DOWNLOADS = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1") or "1"))
 except ValueError:
@@ -107,595 +87,112 @@ YOUTUBE_SEMAPHORE = asyncio.Semaphore(MAX_YOUTUBE_DOWNLOADS)
 youtube_waiting_count = 0
 youtube_lock = asyncio.Lock()
 
-# 4. Музыка (Spotify, SoundCloud, /music): независимый аудиопоток (~20 МБ RAM), до 3 параллельных потоков
 MUSIC_SEMAPHORE = asyncio.Semaphore(3)
 music_waiting_count = 0
 music_lock = asyncio.Lock()
 
+_slideshow_cache = {}
+_stream_files = {}   # token -> local_file_path
+_stream_locks = {}   # token -> asyncio.Lock
+_precache_semaphore = asyncio.Semaphore(1)
 
+
+# ==========================================
+# 🗄️ ПРОСЛОЙКА БАЗЫ ДАННЫХ (ДЕЛЕГИРОВАНИЕ В db.py)
+# ==========================================
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            photo_url TEXT,
-            gender TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS invites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER,
-            sender_name TEXT,
-            recipient_username TEXT,
-            place TEXT,
-            day TEXT,
-            time TEXT,
-            vibe TEXT,
-            duration TEXT,
-            note TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS video_cache (
-            url TEXT PRIMARY KEY,
-            file_id TEXT,
-            media_type TEXT DEFAULT 'video',
-            title TEXT,
-            platform TEXT,
-            author TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE video_cache ADD COLUMN media_type TEXT DEFAULT 'video'")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE video_cache ADD COLUMN music TEXT")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE video_cache ADD COLUMN music_info_json TEXT")
-    except Exception:
-        pass
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS dl_tokens (
-            token TEXT PRIMARY KEY,
-            url TEXT,
-            file_path TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE dl_tokens ADD COLUMN file_path TEXT")
-    except Exception:
-        pass
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_downloads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            url TEXT,
-            canonical_key TEXT,
-            file_id TEXT,
-            media_type TEXT DEFAULT 'video',
-            title TEXT,
-            platform TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    try:
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id, created_at DESC)")
-    except Exception:
-        pass
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_settings (
-            user_id INTEGER PRIMARY KEY,
-            inline_caption INTEGER DEFAULT 0,
-            save_inline_to_pm INTEGER DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE user_settings ADD COLUMN save_inline_to_pm INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS slideshow_sessions (
-            sid TEXT PRIMARY KEY,
-            url TEXT,
-            platform TEXT,
-            title TEXT,
-            author TEXT,
-            total INTEGER,
-            file_ids_json TEXT,
-            photo_urls_json TEXT,
-            music TEXT,
-            music_info_json TEXT,
-            chat_id INTEGER,
-            created_at REAL,
-            digg_count INTEGER DEFAULT 0,
-            comment_count INTEGER DEFAULT 0
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE slideshow_sessions ADD COLUMN digg_count INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE slideshow_sessions ADD COLUMN comment_count INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bot_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    db.init_db(DB_PATH)
 
 
 def get_bot_setting(key: str, default: str = "") -> str:
-    """Возвращает настройку бота из SQLite."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
-        row = c.fetchone()
-        conn.close()
-        return str(row[0]) if row and row[0] is not None else default
-    except Exception:
-        return default
+    return db.get_bot_setting(key, default=default, db_path=DB_PATH)
 
 
 def set_bot_setting(key: str, value: str):
-    """Сохраняет настройку бота в SQLite."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO bot_settings (key, value, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-        """, (key, value))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"Failed to set bot setting {key}: {e}")
+    db.set_bot_setting(key, value, db_path=DB_PATH)
 
 
 def save_slideshow_session_db(sid: str, data: dict):
-    """Персистентно сохраняет сессию слайдшоу в SQLite (переживает перезапуски Render)."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO slideshow_sessions 
-            (sid, url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at, digg_count, comment_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            sid,
-            data.get("original_url", ""),
-            data.get("platform", ""),
-            data.get("title", ""),
-            data.get("author", ""),
-            data.get("total", 0),
-            json.dumps(data.get("file_ids", [])),
-            json.dumps(data.get("photo_urls", [])),
-            data.get("music", ""),
-            json.dumps(data.get("music_info") or {}),
-            data.get("chat_id", 0),
-            data.get("created_at", time.time()),
-            data.get("digg_count", 0),
-            data.get("comment_count", 0)
-        ))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.warning(f"Failed to save slideshow session {sid}: {e}")
+    db.save_slideshow_session_db(sid, data, db_path=DB_PATH)
 
 
 def get_slideshow_session_db(sid: str) -> Optional[dict]:
-    """Загружает сессию слайдшоу: сначала из RAM, а при перезапуске — из SQLite."""
     data = _slideshow_cache.get(sid)
     if data:
         return data
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at, digg_count, comment_count
-            FROM slideshow_sessions WHERE sid = ?
-        """, (sid,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            u, plat, title, author, total, fids_j, urls_j, mus, mus_inf_j, chat_id, cr_at, digg, comm = row
-            fids = json.loads(fids_j) if fids_j else []
-            urls = json.loads(urls_j) if urls_j else []
-            mus_inf = json.loads(mus_inf_j) if mus_inf_j else {}
-            restored = {
-                "photos": [],
-                "file_ids": fids,
-                "photo_urls": urls,
-                "total": total,
-                "title": title,
-                "author": author,
-                "platform": plat,
-                "original_url": u,
-                "music": mus,
-                "music_info": mus_inf,
-                "digg_count": digg or 0,
-                "comment_count": comm or 0,
-                "chat_id": chat_id,
-                "created_at": cr_at
-            }
-            _slideshow_cache[sid] = restored
-            return restored
-    except Exception as e:
-        # Fallback на случай старой таблицы
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT url, platform, title, author, total, file_ids_json, photo_urls_json, music, music_info_json, chat_id, created_at FROM slideshow_sessions WHERE sid = ?", (sid,))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                u, plat, title, author, total, fids_j, urls_j, mus, mus_inf_j, chat_id, cr_at = row
-                restored = {
-                    "photos": [],
-                    "file_ids": json.loads(fids_j) if fids_j else [],
-                    "photo_urls": json.loads(urls_j) if urls_j else [],
-                    "total": total,
-                    "title": title,
-                    "author": author,
-                    "platform": plat,
-                    "original_url": u,
-                    "music": mus,
-                    "music_info": json.loads(mus_inf_j) if mus_inf_j else {},
-                    "digg_count": 0,
-                    "comment_count": 0,
-                    "chat_id": chat_id,
-                    "created_at": cr_at
-                }
-                _slideshow_cache[sid] = restored
-                return restored
-        except Exception:
-            pass
-        logging.warning(f"Failed to load slideshow session {sid}: {e}")
-    return None
+    restored = db.load_slideshow_session_db(sid, db_path=DB_PATH)
+    if restored:
+        _slideshow_cache[sid] = restored
+    return restored
+
+
+def get_canonical_media_key(url: str) -> str:
+    return db.get_canonical_media_key(url)
 
 
 def record_user_download(user_id: int, url: str, file_id: str, media_type: str, title: str, platform: str):
-    """Сохраняет загрузку в личную историю пользователя (для мгновенной отправки через @ как в SaveBox)"""
-    if not user_id or not file_id:
-        return
-    canon_k = get_canonical_media_key(url)
-    clean_u = url.split("?")[0].strip().rstrip("/")
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("DELETE FROM user_downloads WHERE user_id = ? AND (canonical_key = ? OR url = ?)", (user_id, canon_k, clean_u))
-        cursor.execute("""
-            INSERT INTO user_downloads (user_id, url, canonical_key, file_id, media_type, title, platform)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, clean_u, canon_k, file_id, media_type, title, platform))
-        conn.commit()
-    except Exception as e:
-        logging.warning(f"Could not record user download: {e}")
-    finally:
-        conn.close()
+    db.record_user_download(user_id, url, file_id, media_type, title, platform, db_path=DB_PATH)
 
 
 def get_user_recent_downloads(user_id: int, limit: int = 15):
-    """Возвращает недавние загрузки пользователя для инлайн-режима"""
-    if not user_id:
-        return []
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    items = []
-    try:
-        cursor.execute("""
-            SELECT file_id, media_type, title, platform, url 
-            FROM user_downloads 
-            WHERE user_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT ?
-        """, (user_id, limit))
-        rows = cursor.fetchall()
-        for r in rows:
-            items.append({
-                "file_id": r[0],
-                "media_type": r[1] or "video",
-                "title": r[2] or "Медиа",
-                "platform": r[3] or "video",
-                "url": r[4]
-            })
-    except Exception as e:
-        logging.warning(f"Could not get user recent downloads: {e}")
-    finally:
-        conn.close()
-    return items
+    return db.get_user_recent_downloads(user_id, limit=limit, db_path=DB_PATH)
 
 
 def save_dl_token(url: str, file_path: str = None) -> str:
-    """Сохраняет URL и путь к файлу для прямого стриминга /stream/{token}.mp4"""
-    if not url:
-        return ""
-    import uuid
-    token = str(uuid.uuid4()).replace("-", "")[:12]
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO dl_tokens (token, url, file_path) VALUES (?, ?, ?)", (token, url, file_path))
-    conn.commit()
-    conn.close()
-    return token
+    return db.save_dl_token(url, file_path=file_path, db_path=DB_PATH)
 
 
 def update_dl_token_file(token: str, file_path: str):
-    if not token or not file_path:
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE dl_tokens SET file_path = ? WHERE token = ?", (file_path, token))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.debug(f"update_dl_token_file error: {e}")
+    db.update_dl_token_file(token, file_path, db_path=DB_PATH)
 
 
 def get_dl_token_url(token: str):
-    if not token:
-        return None
-    url, _ = get_dl_token_info(token)
+    url, _ = db.get_dl_token_info(token, db_path=DB_PATH)
     return url
 
 
 def get_dl_token_info(token: str):
-    if not token:
-        return None, None
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT url, file_path FROM dl_tokens WHERE token = ?", (token.strip(),))
-        row = cursor.fetchone()
-        if row:
-            return row[0], row[1]
-    except Exception:
-        cursor.execute("SELECT url FROM dl_tokens WHERE token = ?", (token.strip(),))
-        row = cursor.fetchone()
-        if row:
-            return row[0], None
-    finally:
-        conn.close()
-    return None, None
+    return db.get_dl_token_info(token, db_path=DB_PATH)
 
 
 def get_user_inline_caption(user_id: int) -> bool:
-    if not user_id:
-        return True
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT inline_caption FROM user_settings WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row is not None and row[0] is not None:
-        return bool(row[0])
-    return True  # По умолчанию включена: описание и трек всегда добавляются!
+    return db.get_user_inline_caption(user_id, db_path=DB_PATH)
 
 
 def set_user_inline_caption(user_id: int, enabled: bool):
-    if not user_id:
-        return
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO user_settings (user_id, inline_caption)
-        VALUES (?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            inline_caption = excluded.inline_caption,
-            updated_at = CURRENT_TIMESTAMP
-    """, (user_id, 1 if enabled else 0))
-    conn.commit()
-    conn.close()
+    db.set_user_inline_caption(user_id, enabled, db_path=DB_PATH)
 
 
 def get_user_save_to_pm(user_id: int) -> bool:
-    if not user_id:
-        return False
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT save_inline_to_pm FROM user_settings WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        conn.close()
-        if row is not None and row[0] is not None:
-            return bool(row[0])
-    except Exception:
-        pass
-    return False  # По умолчанию выключено: личка остаётся абсолютно чистой!
+    return db.get_user_save_to_pm(user_id, db_path=DB_PATH)
 
 
 def set_user_save_to_pm(user_id: int, enabled: bool):
-    if not user_id:
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO user_settings (user_id, save_inline_to_pm)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                save_inline_to_pm = excluded.save_inline_to_pm,
-                updated_at = CURRENT_TIMESTAMP
-        """, (user_id, 1 if enabled else 0))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-
-def get_canonical_media_key(url: str) -> str:
-    """Нормализует любые варианты ссылок одного и того же поста к общему ключу"""
-    if not url:
-        return ""
-    import re
-    u = url.strip()
-    # 1. Instagram: ID шорткода (поддерживает /p/, /reel/, /reels/, /tv/, /share/)
-    m_ig = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', u)
-    if m_ig:
-        return f"ig_{m_ig.group(1)}"
-    # 2. YouTube: 11-значный ID ролика (shorts, watch, youtu.be)
-    m_yt = re.search(r'(?:v=|\/shorts\/|\/embed\/|youtu\.be\/|\/v\/)([A-Za-z0-9_-]{11})', u)
-    if m_yt:
-        return f"yt_{m_yt.group(1)}"
-    # 3. TikTok: числовой ID видео или фото-поста
-    m_tt = re.search(r'/(?:video|photo|v)/(\d+)', u)
-    if m_tt:
-        return f"tt_{m_tt.group(1)}"
-    # 4. Spotify: ID трека (игнорирует intl-ru и ?si=...)
-    m_sp = re.search(r'spotify\.com/(?:intl-[a-z]+/)?track/([A-Za-z0-9]+)', u, re.IGNORECASE)
-    if m_sp:
-        return f"sp_{m_sp.group(1)}"
-    return u.split("?")[0].strip().rstrip("/")
+    db.set_user_save_to_pm(user_id, enabled, db_path=DB_PATH)
 
 
 def get_cached_media(url: str):
-    if not url:
-        return None
-    clean_u = url.split("?")[0].strip().rstrip("/")
-    canon_k = get_canonical_media_key(url)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    row = None
-    try:
-        cursor.execute(
-            "SELECT file_id, title, platform, author, media_type, music, music_info_json FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
-            (canon_k, clean_u)
-        )
-        row = cursor.fetchone()
-    except Exception:
-        try:
-            cursor.execute(
-                "SELECT file_id, title, platform, author, media_type FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
-                (canon_k, clean_u)
-            )
-            row = cursor.fetchone()
-        except Exception:
-            cursor.execute(
-                "SELECT file_id, title, platform, author FROM video_cache WHERE url = ? OR url = ? LIMIT 1",
-                (canon_k, clean_u)
-            )
-            row = cursor.fetchone()
-            if row:
-                row = (row[0], row[1], row[2], row[3], "video")
-    conn.close()
-    if row:
-        m_inf = None
-        if len(row) > 6 and row[6]:
-            try:
-                m_inf = json.loads(row[6])
-            except Exception:
-                m_inf = None
-        return {
-            "file_id": row[0],
-            "title": row[1],
-            "platform": row[2],
-            "author": row[3],
-            "media_type": row[4] if len(row) > 4 and row[4] else "video",
-            "music": row[5] if len(row) > 5 else None,
-            "music_info": m_inf
-        }
-    return None
+    return db.get_cached_media(url, db_path=DB_PATH)
 
 
 def get_cached_video(url: str):
-    return get_cached_media(url)
+    return db.get_cached_media(url, db_path=DB_PATH)
 
 
 def save_cached_media(url: str, file_id: str, media_type: str, title: str, platform: str, author: str = "", music: str = None, music_info: dict = None):
-    if not url or not file_id:
-        return
-    clean_u = url.split("?")[0].strip().rstrip("/")
-    canon_k = get_canonical_media_key(url)
-    m_json = json.dumps(music_info) if isinstance(music_info, dict) else None
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    for u_key in set([clean_u, canon_k]):
-        if not u_key:
-            continue
-        try:
-            cursor.execute("""
-                INSERT INTO video_cache (url, file_id, media_type, title, platform, author, music, music_info_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    file_id = excluded.file_id,
-                    media_type = excluded.media_type,
-                    title = excluded.title,
-                    platform = excluded.platform,
-                    author = excluded.author,
-                    music = excluded.music,
-                    music_info_json = excluded.music_info_json,
-                    created_at = CURRENT_TIMESTAMP
-            """, (u_key, file_id, media_type, title, platform, author, music, m_json))
-        except Exception:
-            cursor.execute("""
-                INSERT INTO video_cache (url, file_id, media_type, title, platform, author)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    file_id = excluded.file_id,
-                    media_type = excluded.media_type,
-                    title = excluded.title,
-                    platform = excluded.platform,
-                    author = excluded.author,
-                    created_at = CURRENT_TIMESTAMP
-            """, (u_key, file_id, media_type, title, platform, author))
-    conn.commit()
-    conn.close()
+    db.save_cached_media(url, file_id, media_type, title, platform, author, music=music, music_info=music_info, db_path=DB_PATH)
 
 
 def is_instagram_reel_url(url: str) -> bool:
-    """Reels — это всегда видео. Фото-кэш для такого URL считается битым."""
     return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
 
 
 def delete_cached_media(url: str):
-    """Удаляет запись видео-кэша для URL (включая канонический ключ ig_<code>)."""
-    if not url:
-        return
-    clean_u = url.split("?")[0].strip().rstrip("/")
-    canon_k = get_canonical_media_key(url)
-    keys = [k for k in {clean_u, canon_k} if k]
-    if not keys:
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.executemany("DELETE FROM video_cache WHERE url = ?", [(k,) for k in keys])
-        conn.commit()
-        conn.close()
-        logging.info(f"Removed cached media for {url}")
-    except Exception as e:
-        logging.warning(f"Could not delete cached media for {url}: {e}")
+    db.delete_cached_media(url, db_path=DB_PATH)
 
 
 def drop_poisoned_media_cache(url: str, cached: dict = None) -> bool:
-    """
-    Если для видео (TikTok ролик, Instagram Reel, YouTube Shorts) в кэше ошибочно лежит photo,
-    выкидываем эту запись и перекачиваем чистое видео заново.
-    """
+    """Сбрасывает ошибочный photo-кэш для видеороликов (TikTok, Instagram Reels, Shorts)."""
     if not cached or not cached.get("file_id") or not url:
         return False
     if cached.get("media_type") == "photo":
@@ -717,7 +214,6 @@ def drop_poisoned_media_cache(url: str, cached: dict = None) -> bool:
     return False
 
 
-# Алиас для обратной совместимости
 drop_poisoned_instagram_photo_cache = drop_poisoned_media_cache
 
 
@@ -732,21 +228,63 @@ def get_fallback_upload_chat():
                 return int(aid)
             except Exception:
                 pass
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users ORDER BY created_at DESC LIMIT 1")
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            return int(row[0])
-    except Exception:
-        pass
-    return None
+    uid = db.get_any_known_user_id(db_path=DB_PATH)
+    return int(uid) if uid else None
 
 
+def save_user(user_id: int, username: str, first_name: str, photo_url: str = None, gender: str = None):
+    db.save_user(user_id, username, first_name, photo_url=photo_url, gender=gender, db_path=DB_PATH)
+
+
+def find_user_by_username(username: str):
+    return db.find_user_by_username(username, db_path=DB_PATH)
+
+
+def create_invite_record(sender_id, sender_name, recipient_username, place, day, time_str, vibe, duration, note):
+    return db.create_invite_record(sender_id, sender_name, recipient_username, place, day, time_str, vibe, duration, note, db_path=DB_PATH)
+
+
+def get_invite_record(invite_id: int):
+    return db.get_invite_record(invite_id, db_path=DB_PATH)
+
+
+# ==========================================
+# 📤 ОБЩИЕ ХЕЛПЕРЫ TELEGRAM И ПОДПИСЕЙ
+# ==========================================
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or "0")
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "").strip()
+
+init_db()
+
+bot_session = AiohttpSession(timeout=180.0)
+bot = Bot(token=BOT_TOKEN, session=bot_session) if (BOT_TOKEN and BOT_TOKEN != "YOUR_BOT_TOKEN_HERE") else None
+dp = Dispatcher()
+
+IS_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID"))
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip() or "https://duo-game-date-bot.onrender.com"
+if not RENDER_EXTERNAL_URL.startswith(("http://", "https://")):
+    RENDER_EXTERNAL_URL = f"https://{RENDER_EXTERNAL_URL}"
+RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
+
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "").strip().lower() in ("1", "true", "yes")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip() or None
+
+
+def get_app_url():
+    base = WEBAPP_URL
+    if RENDER_EXTERNAL_URL:
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}srv={RENDER_EXTERNAL_URL}"
+    return base
+
+
+async def _delayed_delete_message(chat_id: int, message_id: int, delay_seconds: int = 60):
+    try:
+        await asyncio.sleep(delay_seconds)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
 
 async def upload_media_to_telegram(
@@ -757,14 +295,9 @@ async def upload_media_to_telegram(
     title: str = "",
     platform: str = "",
     performer: str = "",
-    duration: int = 0
+    duration: int = 0,
 ):
-    """
-    Загружает медиафайл в Telegram для генерации постоянного CDN file_id.
-    1. Если указан target_user_id — пробует отправить в ЛС пользователя (сохраняя как личный архив).
-    2. Если пользователь не запускал бота (Forbidden) — отправляет владельцу бота (OWNER_USER_ID) и сразу удаляет.
-    3. Если и это недоступно — отправляет в STORAGE_CHANNEL_ID или fallback chat.
-    """
+    """Загружает файл в Telegram для получения постоянного CDN file_id."""
     if not file_path or not os.path.exists(file_path):
         return None
 
@@ -780,19 +313,13 @@ async def upload_media_to_telegram(
 
     should_save_in_pm = get_user_save_to_pm(target_user_id) if target_user_id else False
 
-    # 1. Пробуем отправить в ЛС пользователя
     if target_user_id:
         try:
             if is_audio:
                 sent = await bot.send_audio(
-                    chat_id=target_user_id,
-                    audio=FSInputFile(file_path),
-                    performer=performer,
-                    title=title,
-                    duration=duration,
-                    caption=caption_text if should_save_in_pm else None,
-                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
-                    disable_notification=True
+                    chat_id=target_user_id, audio=FSInputFile(file_path), performer=performer, title=title,
+                    duration=duration, caption=caption_text if should_save_in_pm else None,
+                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None, disable_notification=True,
                 )
                 if sent and sent.audio:
                     f_id = sent.audio.file_id
@@ -801,11 +328,9 @@ async def upload_media_to_telegram(
                     return f_id
             elif is_photo:
                 sent = await bot.send_photo(
-                    chat_id=target_user_id,
-                    photo=FSInputFile(file_path),
+                    chat_id=target_user_id, photo=FSInputFile(file_path),
                     caption=caption_text if should_save_in_pm else None,
-                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
-                    disable_notification=True
+                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None, disable_notification=True,
                 )
                 if sent and sent.photo:
                     f_id = sent.photo[-1].file_id
@@ -814,12 +339,10 @@ async def upload_media_to_telegram(
                     return f_id
             else:
                 sent = await bot.send_video(
-                    chat_id=target_user_id,
-                    video=FSInputFile(file_path),
+                    chat_id=target_user_id, video=FSInputFile(file_path),
                     caption=caption_text if should_save_in_pm else None,
                     parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
-                    supports_streaming=True,
-                    disable_notification=True
+                    supports_streaming=True, disable_notification=True,
                 )
                 if sent and sent.video:
                     f_id = sent.video.file_id
@@ -829,13 +352,14 @@ async def upload_media_to_telegram(
         except Exception as u_err:
             logging.info(f"Target user {target_user_id} upload failed ({u_err}), trying silent fallback...")
 
-    # 2. Бесшумный fallback: OWNER_USER_ID или fallback chat с мгновенным удалением
     fallbacks = []
     if OWNER_USER_ID and OWNER_USER_ID != target_user_id:
         fallbacks.append(OWNER_USER_ID)
     if STORAGE_CHANNEL_ID:
-        try: fallbacks.append(int(STORAGE_CHANNEL_ID))
-        except Exception: pass
+        try:
+            fallbacks.append(int(STORAGE_CHANNEL_ID))
+        except Exception:
+            pass
     fb_chat = get_fallback_upload_chat()
     if fb_chat and fb_chat not in fallbacks and fb_chat != target_user_id:
         fallbacks.append(fb_chat)
@@ -844,182 +368,45 @@ async def upload_media_to_telegram(
         try:
             if is_audio:
                 sent = await bot.send_audio(
-                    chat_id=chat_id,
-                    audio=FSInputFile(file_path),
-                    performer=performer,
-                    title=title,
-                    duration=duration,
-                    disable_notification=True
+                    chat_id=chat_id, audio=FSInputFile(file_path), performer=performer,
+                    title=title, duration=duration, disable_notification=True,
                 )
                 if sent and sent.audio:
-                    f_id = sent.audio.file_id
                     if chat_id > 0:
                         asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
-                    return f_id
+                    return sent.audio.file_id
             elif is_photo:
                 sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
                 if sent and sent.photo:
-                    f_id = sent.photo[-1].file_id
                     if chat_id > 0:
                         asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
-                    return f_id
+                    return sent.photo[-1].file_id
             else:
-                sent = await bot.send_video(chat_id=chat_id, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True)
+                sent = await bot.send_video(
+                    chat_id=chat_id, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True,
+                )
                 if sent and sent.video:
-                    f_id = sent.video.file_id
                     if chat_id > 0:
                         asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
-                    return f_id
+                    return sent.video.file_id
         except Exception as fb_err:
             logging.debug(f"Fallback upload chat {chat_id} error: {fb_err}")
 
     return None
 
 
-async def _delayed_delete_message(chat_id: int, message_id: int, delay_seconds: int = 60):
-    try:
-        await asyncio.sleep(delay_seconds)
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-
-def save_user(user_id: int, username: str, first_name: str, photo_url: str = None, gender: str = None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    clean_username = (username or "").lower().replace("@", "").strip()
-    cursor.execute("""
-        INSERT INTO users (user_id, username, first_name, photo_url, gender)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username = excluded.username,
-            first_name = excluded.first_name,
-            photo_url = COALESCE(excluded.photo_url, users.photo_url),
-            gender = COALESCE(excluded.gender, users.gender),
-            updated_at = CURRENT_TIMESTAMP
-    """, (user_id, clean_username, first_name, photo_url, gender))
-    conn.commit()
-    conn.close()
-
-
-def find_user_by_username(username: str):
-    if not username:
-        return None
-    s = str(username).strip()
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    # Если передан числовой user_id
-    if s.isdigit():
-        cursor.execute("SELECT user_id, first_name FROM users WHERE user_id = ?", (int(s),))
-        row = cursor.fetchone()
-        if row:
-            conn.close()
-            return row
-    clean = s.lower().replace("@", "").strip()
-    cursor.execute("SELECT user_id, first_name FROM users WHERE username = ?", (clean,))
-    row = cursor.fetchone()
-    conn.close()
-    return row  # (user_id, first_name)
-
-
-def create_invite_record(sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    clean_recipient = (recipient_username or "").lower().replace("@", "").strip()
-    cursor.execute("""
-        INSERT INTO invites (sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (sender_id, sender_name, clean_recipient, place, day, time, vibe, duration, note))
-    invite_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return invite_id
-
-
-def get_invite_record(invite_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note, status
-        FROM invites WHERE id = ?
-    """, (invite_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "sender_id": row[1],
-            "sender_name": row[2],
-            "recipient_username": row[3],
-            "place": row[4],
-            "day": row[5],
-            "time": row[6],
-            "vibe": row[7],
-            "duration": row[8],
-            "note": row[9],
-            "status": row[10]
-        }
-    return None
-
-
-init_db()
-
-# Бот и Диспетчер
-bot_session = AiohttpSession(timeout=180.0)
-bot = Bot(token=BOT_TOKEN, session=bot_session) if (BOT_TOKEN and BOT_TOKEN != "YOUR_BOT_TOKEN_HERE") else None
-dp = Dispatcher()
-
-
-# Окружение: Render или локальный запуск
-IS_ON_RENDER = bool(
-    os.getenv("RENDER")
-    or os.getenv("RENDER_SERVICE_ID")
-    or os.getenv("RENDER_INSTANCE_ID")
-)
-
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-if not RENDER_EXTERNAL_URL:
-    RENDER_EXTERNAL_URL = "https://duo-game-date-bot.onrender.com"
-if not RENDER_EXTERNAL_URL.startswith("http://") and not RENDER_EXTERNAL_URL.startswith("https://"):
-    RENDER_EXTERNAL_URL = f"https://{RENDER_EXTERNAL_URL}"
-RENDER_EXTERNAL_URL = RENDER_EXTERNAL_URL.rstrip("/")
-
-# Режим работы бота: Webhook или Polling (по умолчанию везде Polling для надёжной доставки ЛС и инлайна)
-# Принудительное управление через USE_WEBHOOK=true/false
-_use_wh_env = os.getenv("USE_WEBHOOK", "").strip().lower()
-if _use_wh_env in ("1", "true", "yes"):
-    USE_WEBHOOK = True
-else:
-    USE_WEBHOOK = False  # По умолчанию всегда Polling (даже на Render) для стабильного ответа в ЛС
-
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip() or None
-
-
-def get_app_url():
-    base = WEBAPP_URL
-    if RENDER_EXTERNAL_URL:
-        sep = "&" if "?" in base else "?"
-        return f"{base}{sep}srv={RENDER_EXTERNAL_URL}"
-    return base
-
-
 async def safe_edit_status(
     msg: Optional[types.Message] = None,
     text: str = "",
     inline_message_id: Optional[str] = None,
-    reply_markup: Optional[InlineKeyboardMarkup] = None
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
 ):
-    """Безопасное обновление статуса без вылета по ошибкам Telegram (в ЛС или через inline_message_id)."""
     if not msg and not inline_message_id:
         return
     try:
         if inline_message_id:
             await bot.edit_message_text(
-                inline_message_id=inline_message_id,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=reply_markup
+                inline_message_id=inline_message_id, text=text, parse_mode="HTML", reply_markup=reply_markup,
             )
         elif msg:
             await msg.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
@@ -1032,17 +419,8 @@ def create_progress_reporter(
     content_info_or_name=None,
     inline_message_id: Optional[str] = None,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
-    throttle_seconds: float = 1.0
+    throttle_seconds: float = 1.0,
 ):
-    """
-    Создает интерактивный живой прогресс-репортер с прогресс-баром для статусного сообщения Telegram.
-    Поддерживает:
-    - Индикацию байтов для видео (МБ, скорость, ETA);
-    - Индикацию слайдов для фото-каруселей (например, 2 из 7);
-    - Понятные названия и значки (фото, видео, Reels, Shorts);
-    - Троттлинг для защиты от Telegram 429 Flood Control;
-    - Работает как в личном чате (status_msg), так и в инлайн-чате с другом (inline_message_id).
-    """
     last_update = 0.0
     last_rendered_pct = -1.0
     last_rendered_text = ""
@@ -1058,264 +436,77 @@ def create_progress_reporter(
         nonlocal last_update, last_rendered_pct, last_rendered_text
         if not status_msg and not inline_message_id:
             return
-
         now = time.time()
 
-        # Финализация / отправка
         if downloaded == -1:
             if now - last_update >= 0.8:
                 last_update = now
-                text = (
-                    f"📤 <b>Отправляю в Telegram...</b>\n"
-                    f"<code>[████████████] 100%</code>"
-                )
+                text = "📤 <b>Отправляю в Telegram...</b>\n<code>[████████████] 100%</code>"
                 if text != last_rendered_text:
                     last_rendered_text = text
-                    await safe_edit_status(
-                        msg=status_msg,
-                        text=text,
-                        inline_message_id=inline_message_id,
-                        reply_markup=reply_markup
-                    )
+                    await safe_edit_status(msg=status_msg, text=text, inline_message_id=inline_message_id, reply_markup=reply_markup)
             return
 
-        # Фаза обработки / конвертации аудио
         if phase in ("converting", "processing"):
             if now - last_update >= 0.5:
                 last_update = now
-                text = (
-                    f"🎵 <b>Конвертирую трек и упаковываю обложку...</b>\n"
-                    f"<code>[██████████░░] 85%</code>\n"
-                    f"✨ Почти готово к отправке..."
-                )
+                text = "🎵 <b>Конвертирую трек и упаковываю обложку...</b>\n<code>[██████████░░] 85%</code>\n✨ Почти готово к отправке..."
                 if text != last_rendered_text:
                     last_rendered_text = text
-                    await safe_edit_status(
-                        msg=status_msg,
-                        text=text,
-                        inline_message_id=inline_message_id,
-                        reply_markup=reply_markup
-                    )
+                    await safe_edit_status(msg=status_msg, text=text, inline_message_id=inline_message_id, reply_markup=reply_markup)
             return
 
-        # Пользовательская фаза (например, подключение или парсинг)
         if phase and total <= 0:
             if now - last_update >= throttle_seconds:
                 last_update = now
-                text = (
-                    f"{icon} <b>Загружаю {label}...</b>\n"
-                    f"<code>[███░░░░░░░░░] 25%</code>\n"
-                    f"ℹ️ {phase}"
-                )
+                text = f"{icon} <b>Загружаю {label}...</b>\n<code>[███░░░░░░░░░] 25%</code>\nℹ️ {phase}"
                 if text != last_rendered_text:
                     last_rendered_text = text
-                    await safe_edit_status(
-                        msg=status_msg,
-                        text=text,
-                        inline_message_id=inline_message_id,
-                        reply_markup=reply_markup
-                    )
+                    await safe_edit_status(msg=status_msg, text=text, inline_message_id=inline_message_id, reply_markup=reply_markup)
             return
 
-        # Слайды фото-карусели (например, 2 из 5 слайдов)
         if is_slide or (0 < total <= 50 and downloaded <= total):
             pct = min(100.0, max(0.0, (downloaded / total) * 100.0))
             if (now - last_update < throttle_seconds) and abs(pct - last_rendered_pct) < 15 and pct < 100:
                 return
-
-            last_update = now
-            last_rendered_pct = pct
-
-            bar_len = 12
-            filled = int(round(bar_len * pct / 100.0))
-            bar = "█" * filled + "░" * (bar_len - filled)
-
-            text = (
-                f"📸 <b>Скачиваю фото-слайды ({downloaded} из {total})...</b>\n"
-                f"<code>[{bar}] {int(pct)}%</code>\n"
-                f"✨ Готовлю слайдшоу для просмотра..."
-            )
+            last_update, last_rendered_pct = now, pct
+            filled = int(round(12 * pct / 100.0))
+            bar = "█" * filled + "░" * (12 - filled)
+            text = f"📸 <b>Скачиваю фото-слайды ({downloaded} из {total})...</b>\n<code>[{bar}] {int(pct)}%</code>\n✨ Готовлю слайдшоу для просмотра..."
             if text != last_rendered_text:
                 last_rendered_text = text
-                await safe_edit_status(
-                    msg=status_msg,
-                    text=text,
-                    inline_message_id=inline_message_id,
-                    reply_markup=reply_markup
-                )
+                await safe_edit_status(msg=status_msg, text=text, inline_message_id=inline_message_id, reply_markup=reply_markup)
             return
 
-        # Потоковое скачивание видео по байтам
         if total > 0:
             pct = min(100.0, max(0.0, (downloaded / total) * 100.0))
             if (now - last_update < throttle_seconds) and abs(pct - last_rendered_pct) < 10 and pct < 100:
                 return
-
-            last_update = now
-            last_rendered_pct = pct
-
-            bar_len = 12
-            filled = int(round(bar_len * pct / 100.0))
-            bar = "█" * filled + "░" * (bar_len - filled)
-
-            cur_mb = downloaded / (1024 * 1024)
-            tot_mb = total / (1024 * 1024)
+            last_update, last_rendered_pct = now, pct
+            filled = int(round(12 * pct / 100.0))
+            bar = "█" * filled + "░" * (12 - filled)
+            cur_mb, tot_mb = downloaded / (1024 * 1024), total / (1024 * 1024)
             spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
             eta_str = f"\n⏱ Осталось: ~{max(1, int(round(eta)))} сек" if eta > 0 else ""
-
-            text = (
-                f"{icon} <b>Скачиваю {label}...</b>\n"
-                f"<code>[{bar}] {int(pct)}%</code>\n"
-                f"📊 {cur_mb:.1f} из {tot_mb:.1f} МБ{spd_str}{eta_str}"
-            )
+            text = f"{icon} <b>Скачиваю {label}...</b>\n<code>[{bar}] {int(pct)}%</code>\n📊 {cur_mb:.1f} из {tot_mb:.1f} МБ{spd_str}{eta_str}"
             if text != last_rendered_text:
                 last_rendered_text = text
-                await safe_edit_status(
-                    msg=status_msg,
-                    text=text,
-                    inline_message_id=inline_message_id,
-                    reply_markup=reply_markup
-                )
+                await safe_edit_status(msg=status_msg, text=text, inline_message_id=inline_message_id, reply_markup=reply_markup)
             return
 
-        # Поток без известного размера
-        if total <= 0 and downloaded > 0:
-            if now - last_update >= throttle_seconds:
-                last_update = now
-                cur_mb = downloaded / (1024 * 1024)
-                spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
-                text = (
-                    f"{icon} <b>Скачиваю {label}...</b>\n"
-                    f"📊 Загружено: {cur_mb:.1f} МБ{spd_str}"
-                )
-                if text != last_rendered_text:
-                    last_rendered_text = text
-                    await safe_edit_status(
-                        msg=status_msg,
-                        text=text,
-                        inline_message_id=inline_message_id,
-                        reply_markup=reply_markup
-                    )
-            return
+        if total <= 0 and downloaded > 0 and now - last_update >= throttle_seconds:
+            last_update = now
+            cur_mb = downloaded / (1024 * 1024)
+            spd_str = f" • {speed / (1024 * 1024):.1f} МБ/с" if speed > 0 else ""
+            text = f"{icon} <b>Скачиваю {label}...</b>\n📊 Загружено: {cur_mb:.1f} МБ{spd_str}"
+            if text != last_rendered_text:
+                last_rendered_text = text
+                await safe_edit_status(msg=status_msg, text=text, inline_message_id=inline_message_id, reply_markup=reply_markup)
 
     return update_progress
 
 
-def format_friendly_error(e: Exception, platform: str = "") -> str:
-    """Преобразует любые технические ошибки в понятные объяснения для пользователя."""
-    err_text = str(e).lower()
-
-    # Специфичные понятные ошибки для музыки (Spotify, SoundCloud, /music)
-    if platform in ("spotify", "soundcloud", "music"):
-        if "not found" in err_text or "not_found" in err_text or "spotify_track_not_found" in err_text:
-            return (
-                "🎵 <b>Трек не найден или недоступен для скачивания.</b>\n\n"
-                "💡 <i>Попробуй найти этот трек по названию через команду:</i> <code>/music &lt;название&gt;</code>"
-            )
-        elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
-            return (
-                "🎵 <b>Облачный сервер временно ограничил прямое подключение к аудиопотоку.</b>\n\n"
-                "Попробуй отправить ссылку ещё раз через пару секунд или найти трек по названию через команду: <code>/music &lt;название&gt;</code>"
-            )
-        else:
-            return (
-                f"🎵 <b>Не удалось скачать аудиозапись.</b>\n\n"
-                f"⚠️ Ошибка: <code>{html.escape(str(e)[:150])}</code>\n\n"
-                f"💡 <i>Попробуй найти трек по названию через команду:</i> <code>/music &lt;название&gt;</code>"
-            )
-    if "is_photo_post" in err_text:
-        return (
-            "📸 <b>Не удалось извлечь фото из этой публикации Instagram.</b>\n\n"
-            "Возможно, публикация удалена, является приватной или автор ограничил доступ для гостей."
-        )
-    elif "instagram_login_required" in err_text or "empty media response" in err_text:
-        return (
-            "🔒 <b>Instagram ограничил доступ к этой публикации.</b>\n\n"
-            "Instagram закрыл анонимный просмотр (публикация 18+, из закрытого аккаунта или автор ограничил доступ).\n\n"
-            "💡 <i>Публикации из TikTok и YouTube Shorts скачиваются всегда и без ограничений!</i>"
-        )
-    elif "instagram_video_unavailable" in err_text:
-        return (
-            "🎬 <b>Instagram не отдал видеофайл.</b>\n\n"
-            "Сервер Instagram не предоставил доступ к потоку этого ролика (возможно, он удален или закрыт для прямого скачивания).\n\n"
-            "💡 <i>Попробуй отправить ролик из TikTok или YouTube Shorts — они работают моментально!</i>"
-        )
-    elif "private" in err_text or "login" in err_text or "401" in err_text or "403" in err_text:
-        return (
-            "🔒 <b>Это видео из закрытого (приватного) профиля.</b>\n\n"
-            "Telegram не может получить доступ к закрытым профилям без пароля. "
-            "Скачивать можно только видео из открытых публичных аккаунтов."
-        )
-    elif "confirm your age" in err_text or "age-restricted" in err_text or "instagram_age_restricted" in err_text or "available to everyone" in err_text or "certain audiences" in err_text:
-        return (
-            "🔞 <b>Это видео имеет возрастное ограничение (18+) в Instagram.</b>\n\n"
-            "Instagram закрыл доступ к этому ролику для гостей и требует подтверждения возраста.\n\n"
-            "💡 <i>Ты можешь отправить мне куки от любого пустого аккаунта командой <code>/cookies sessionid=...; ds_user_id=...</code> прямо сюда в чат, и бот сразу сможет скачивать такие ролики!</i>"
-        )
-    elif "confirm you’re not a bot" in err_text or "confirm you're not a bot" in err_text or "youtube_bot_detection" in err_text:
-        return (
-            "🤖 <b>YouTube временно ограничил прямое скачивание с облачного сервера.</b>\n\n"
-            "Попробуй отправить ролик ещё раз через пару секунд или отправить другое видео/Shorts.\n\n"
-            "<i>(Instagram Reels и ролики из TikTok работают мгновенно!)</i>"
-        )
-    elif "file_too_large" in err_text or "too large" in err_text:
-        return (
-            "⚠️ <b>Файл превышает 50 МБ (лимит Telegram).</b>\n\n"
-            "Telegram Bot API запрещает ботам отправлять файлы больше 50 МБ. Попробуй более короткий ролик."
-        )
-    elif "live event" in err_text or "live stream" in err_text:
-        return (
-            "🔴 <b>Это ссылка на прямой эфир (стрим).</b>\n\n"
-            "Бот может скачивать только завершенные опубликованные видео, а не идущую трансляцию."
-        )
-    elif "unavailable" in err_text or "not found" in err_text or "404" in err_text:
-        return (
-            "🗑 <b>Видео не найдено или было удалено автором.</b>\n\n"
-            "Проверь, открывается ли ссылка в обычном браузере."
-        )
-    elif "timed out" in err_text or "timeout" in err_text:
-        return (
-            "⏱ <b>Сервер источника не ответил вовремя.</b>\n\n"
-            "Возможно, временный сбой на стороне платформы. Попробуй еще раз через минуту."
-        )
-    else:
-        return f"❌ <b>Не удалось скачать видео.</b>\n\n⚠️ Детали: <code>{html.escape(str(e)[:150])}</code>"
-
-
-# 🖼 КЭШ СЛАЙДШОУ (КАРУСЕЛЕЙ) И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-_slideshow_cache = {}
-
-async def _expire_slideshow_session(sid: str, delay_seconds: int = 3600):
-    """Удаляет временные файлы со слайдами через 1 час, когда сессия просмотра завершена."""
-    await asyncio.sleep(delay_seconds)
-    data = _slideshow_cache.pop(sid, None)
-    if data and data.get("photos"):
-        for p in data["photos"]:
-            try:
-                if p and os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
-
-async def _preupload_slideshow_file_ids(sid: str):
-    """Фоновая предварительная загрузка всех слайдов в Telegram для мгновенного перелистывания без лагов."""
-    data = _slideshow_cache.get(sid)
-    if not data or not data.get("photos"):
-        return
-    for idx, p_path in enumerate(data["photos"]):
-        if idx >= len(data.get("file_ids", [])):
-            break
-        if data["file_ids"][idx] is None and p_path and os.path.exists(p_path):
-            try:
-                is_vid = p_path.lower().endswith((".mp4", ".mov", ".m4v"))
-                fid = await upload_media_to_telegram(p_path, is_photo=not is_vid)
-                if fid and sid in _slideshow_cache:
-                    _slideshow_cache[sid]["file_ids"][idx] = fid
-            except Exception as up_err:
-                logging.debug(f"Preupload slide #{idx} failed: {up_err}")
-
 def format_count(n) -> str:
-    """Форматирует число в компактный вид: 368 -> 368, 51200 -> 51.2K, 1500000 -> 1.5M"""
     try:
         val = int(n or 0)
     except (ValueError, TypeError):
@@ -1326,57 +517,34 @@ def format_count(n) -> str:
         return str(val)
     if val < 1_000_000:
         k_val = val / 1000.0
-        if k_val >= 100:
-            return f"{int(k_val)}K"
-        s = f"{k_val:.1f}K"
-        return s.replace(".0K", "K")
+        return f"{int(k_val)}K" if k_val >= 100 else f"{k_val:.1f}K".replace(".0K", "K")
     m_val = val / 1_000_000.0
-    if m_val >= 100:
-        return f"{int(m_val)}M"
-    s = f"{m_val:.1f}M"
-    return s.replace(".0M", "M")
+    return f"{int(m_val)}M" if m_val >= 100 else f"{m_val:.1f}M".replace(".0M", "M")
 
 
 def format_description_line(title: str, is_photo: bool = False, is_audio: bool = False) -> Optional[str]:
-    """
-    Форматирует строку с описанием публикации:
-    - Очищает от мусорных хэштегов (#fyp, #рек, #trending и т.д.)
-    - Скрыто под <tg-spoiler>, чтобы описание не раскрывалось само при прокрутке чата
-      и оставалось аккуратно свёрнутым.
-    - Открывается по нажатию пользователем.
-    """
     title_raw = (title or "").strip()
-    # 1. Удаляем хэштеги (#tag, #хэштег, #fyp123 и т.д.)
     title_no_tags = re.sub(r'#[^\s#]+', '', title_raw)
     title_no_tags = re.sub(r'\s+([,.:!?])', r'\1', title_no_tags)
     title_clean = re.sub(r'\s+', ' ', title_no_tags).strip()
-
     if not title_clean:
         return None
     if title_clean.lower() in (
         "медиа", "видео", "фото", "tiktok video", "reels", "shorts",
         "instagram публикация", "публикация", "tiktok фото", "instagram reel",
-        "instagram", "tiktok", "youtube", "media", "audio", "sound"
+        "instagram", "tiktok", "youtube", "media", "audio", "sound",
     ):
         return None
     if len(title_clean) > 280:
         title_clean = title_clean[:280].rstrip() + "..."
-    title_esc = html.escape(title_clean)
     icon = "🎵" if is_audio else ("📸" if is_photo else "🎬")
     label = "Трек" if is_audio else "Описание"
-    return f"{icon} <b>{label}:</b> <tg-spoiler>{title_esc}</tg-spoiler>"
+    return f"{icon} <b>{label}:</b> <tg-spoiler>{html.escape(title_clean)}</tg-spoiler>"
 
 
 def format_music_line(music_info: dict = None, music: str = None, post_title: str = None) -> Optional[str]:
-    """
-    Форматирует строку с информацией о музыке/треке:
-    - 🎵 Музыка: Название — Исполнитель (для распознанных песен и треков)
-    - 🎵 Звук: Автор (для оригинальных звуков)
-    - None (если трек отсутствует, пустой или дублирует описание ролика)
-    """
     m_title = ""
     m_author = ""
-
     if isinstance(music_info, dict):
         m_title = (music_info.get("title") or music_info.get("song") or "").strip()
         m_author = (music_info.get("author") or music_info.get("artist") or "").strip()
@@ -1385,2739 +553,124 @@ def format_music_line(music_info: dict = None, music: str = None, post_title: st
 
     if not m_title:
         return None
-
-    # Очищаем от мусорных/заглушечных названий
     m_lower = m_title.lower()
     if m_lower in (
         "original sound", "оригинальный звук", "original audio", "оригинальное аудио",
-        "tiktok", "instagram", "video", "shorts", "audio", "sound"
+        "tiktok", "instagram", "video", "shorts", "audio", "sound",
     ):
         return None
 
-    # Защита от дублирования описания ролика в поле музыки:
     if post_title:
         c_m = re.sub(r'#[^\s#]+', '', m_title).strip().lower()
         c_p = re.sub(r'#[^\s#]+', '', post_title).strip().lower()
         if c_m and (c_m == c_p or c_m in c_p or c_p in c_m):
             return None
 
-    # Если это оригинальный звук автора (e.g. "original sound - nickname" или "оригинальный звук - nickname")
     for orig_prefix in ("original sound -", "оригинальный звук -", "original audio -", "оригинальное аудио -"):
         if m_lower.startswith(orig_prefix):
             clean_orig = m_title[len(orig_prefix):].strip()
-            if clean_orig:
-                return f"🎵 <b>Звук:</b> {html.escape(clean_orig)}"
-            return None
+            return f"🎵 <b>Звук:</b> {html.escape(clean_orig)}" if clean_orig else None
 
     m_title_esc = html.escape(m_title)
     if m_author and m_author.lower() not in ("tiktok", "instagram", "artist", "author", "creator", "unknown"):
-        m_author_esc = html.escape(m_author)
-        # Избегаем дублирования если исполнитель уже содержится в названии трека
         if m_author.lower() in m_lower:
             return f"🎵 <b>Музыка:</b> {m_title_esc}"
-        return f"🎵 <b>Музыка:</b> {m_title_esc} — {m_author_esc}"
+        return f"🎵 <b>Музыка:</b> {m_title_esc} — {html.escape(m_author)}"
     return f"🎵 <b>Музыка:</b> {m_title_esc}"
 
 
-def make_inline_caption(
-    title: str = "",
-    platform: str = "",
-    author: str = "",
-    music_info: dict = None,
-    music: str = None,
-    is_photo: bool = False,
-    is_audio: bool = False,
-    caption_enabled: bool = True
-) -> Optional[str]:
-    """
-    Генерирует аккуратную подпись для отправки медиа в инлайн-режиме:
-    - Скрытое описание <tg-spoiler> (всегда свёрнуто, без лишних хэштегов)
-    - Играющий музыкальный трек (если есть и не дублирует описание)
-    - Источник и автор
-    - Отметка 'Скачано через @duo_play_date_bot'
-    """
-    if not caption_enabled:
-        return None
-
-    plat_name = (platform or "медиа").capitalize()
-    author_raw = (author or "").strip()[:50]
-    author_esc = html.escape(author_raw)
-
-    lines = []
-    desc_line = format_description_line(title, is_photo=is_photo, is_audio=is_audio)
-    if desc_line:
-        lines.append(desc_line)
-
-    music_line = format_music_line(music_info=music_info, music=music, post_title=title)
-    if music_line:
-        lines.append(music_line)
-
-    meta = f"📱 <b>Источник:</b> {plat_name}"
-    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео", "creator", "unknown"):
-        meta += f" | {author_esc}"
-    lines.append(meta)
-
-    lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
-    return "\n\n".join(lines)
-
-
-def make_slide_caption(data: dict, current_idx: int, total: int) -> str:
-    """
-    Генерирует аккуратную, компактную подпись к слайду фото-карусели:
-    с поддержкой скрытого описания <tg-spoiler> (без хэштегов) и отображением играющего трека.
-    """
-    plat_raw = (data.get("platform") or "TikTok").capitalize()
-    author_raw = (data.get("author") or "").strip()[:50]
-    author_esc = html.escape(author_raw)
-
-    lines = []
-    desc_line = format_description_line(data.get("title") or "", is_photo=True)
-    if desc_line:
-        lines.append(desc_line)
-
-    music_line = format_music_line(music_info=data.get("music_info"), music=data.get("music"), post_title=data.get("title"))
-    if music_line:
-        lines.append(music_line)
-
-    meta = f"📱 <b>Источник:</b> {plat_raw}"
-    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео", "creator", "unknown"):
-        meta += f" | {author_esc}"
-    lines.append(meta)
-
-    if total > 1:
-        lines.append(f"🖼 <b>Слайд {current_idx + 1} из {total}</b> <i>(листай стрелками ниже 👇)</i>")
-
-    lines.append("✨ <i>Скачано через @duo_play_date_bot</i>")
-    return "\n".join(lines)
-
-
-def build_slideshow_keyboard(sid: str, current_idx: int, total: int, data: dict, is_inline: bool = False, is_collapsed: bool = False) -> InlineKeyboardMarkup:
-    """
-    Создает клавиатуру управления слайдшоу:
-    - В свернутом виде (is_collapsed=True): [ 🔼 Листать слайды (1/X) ]
-    - В развернутом виде (is_collapsed=False):
-      Ряд 1: [ 🔘 / ⬅️ ]  [ 1/X ]  [ ➡️ / 🔘 ]
-      Ряд 2: [ 📥 Скачать все слайды альбомом ] и [ 🎧 Скачать MP3 ]
-      Ряд 3: [ 👥 Отправить другу ] и [ 🎮 В чат ] (целевой шеринг)
-      Ряд 4: [ 🔽 Скрыть кнопки ]
-    """
-    if is_collapsed:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"🔼 Листать слайды ({current_idx + 1}/{total})",
-                        callback_data=f"slide_expand:{sid}:{current_idx}"
-                    )
-                ]
-            ]
-        )
-
-    # Ряд 1: Интерактивная навигация (активные стрелки / неактивные кружочки)
-    btn_prev = InlineKeyboardButton(
-        text="⬅️" if current_idx > 0 else "🔘",
-        callback_data=f"slide:{sid}:{current_idx - 1}" if current_idx > 0 else "slide_noop"
-    )
-    btn_counter = InlineKeyboardButton(
-        text=f"{current_idx + 1}/{total}",
-        callback_data=f"slide_info:{current_idx + 1}:{total}"
-    )
-    btn_next = InlineKeyboardButton(
-        text="➡️" if current_idx < total - 1 else "🔘",
-        callback_data=f"slide:{sid}:{current_idx + 1}" if current_idx < total - 1 else "slide_noop"
-    )
-    row1 = [btn_prev, btn_counter, btn_next]
-    rows = [row1]
-
-    orig_url = data.get("original_url") or ""
-    m_info = data.get("music_info") or {}
-    m_id = m_info.get("id") if isinstance(m_info, dict) else None
-    music_u = data.get("music") or (m_info.get("play") if isinstance(m_info, dict) else None)
-
-    if is_inline:
-        row2 = []
-        if m_id:
-            row2.append(InlineKeyboardButton(text="🎵 Звук", url=f"https://www.tiktok.com/music/-{m_id}"))
-        elif music_u and str(music_u).startswith("http"):
-            row2.append(InlineKeyboardButton(text="🎵 Звук", url=str(music_u)))
-        if row2:
-            rows.append(row2)
-    else:
-        # Для личного чата
-        row_pm = [
-            InlineKeyboardButton(
-                text="📥 Скачать все слайды альбомом",
-                callback_data=f"album_all:{sid}"
-            )
-        ]
-        if music_u:
-            row_pm.append(
-                InlineKeyboardButton(
-                    text="🎧 Скачать MP3",
-                    callback_data=f"music:{sid}"
-                )
-            )
-        rows.append(row_pm)
-
-    # Кнопка скрытия кнопок управления (доступна и в ЛС, и в инлайн-режиме)
-    rows.append([
-        InlineKeyboardButton(
-            text="🔽 Скрыть кнопки",
-            callback_data=f"slide_collapse:{sid}:{current_idx}"
-        )
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def process_video_download(message: types.Message, url: str):
-    clean_url = extract_url(url) or url
-    platform = detect_platform(clean_url)
-    logging.info(f"🚀 [СКАЧИВАНИЕ] Старт: {clean_url} (платформа: {platform}, от user: {message.from_user.id})")
-    if not platform:
-        await message.answer("⚠️ Не удалось определить платформу. Поддерживаются: TikTok, YouTube Shorts, Reels.")
+def _safe_remove(path: Optional[str]):
+    """Удаляет временный файл после успешной отправки в Telegram."""
+    if not path:
         return
-
-    # 1. Проверяем кэш (если видео/фото уже скачивалось ранее — отдаём МГНОВЕННО)
-    user_id = message.from_user.id
-    cached = get_cached_media(clean_url)
-    if drop_poisoned_instagram_photo_cache(clean_url, cached):
-        cached = None
-    if cached and ("/photo/" in clean_url or "/p/" in clean_url):
-        logging.info(f"Bypassing cache for potential album: {clean_url}")
-        cached = None
-    if cached and cached.get("file_id"):
-        title_esc = html.escape(cached.get("title") or "Медиа")
-        plat_esc = html.escape(cached.get('platform', 'Медиа').capitalize())
-        f_id = cached["file_id"]
-        m_type = cached.get("media_type", "video")
-        record_user_download(user_id, clean_url, f_id, m_type, cached.get("title", ""), cached.get("platform", ""))
-
-        # Извлекаем играющий трек, если сохранен в кэше
-        m_info = cached.get("music_info") or {}
-        m_title = (m_info.get("title") if isinstance(m_info, dict) else None) or cached.get("music")
-        m_author = m_info.get("author") if isinstance(m_info, dict) else ""
-
-        if m_type == "photo":
-            p_lines = []
-            desc_line = format_description_line(cached.get("title") or "", is_photo=True)
-            if desc_line:
-                p_lines.append(desc_line)
-
-            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"), post_title=cached.get("title"))
-            if m_line:
-                p_lines.append(m_line)
-
-            p_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot (мгновенно из кэша ⚡)</i>")
-            caption = "\n\n".join(p_lines)
-            try:
-                await message.answer_photo(
-                    photo=f_id,
-                    caption=caption,
-                    reply_markup=None,
-                    parse_mode="HTML"
-                )
-                return
-            except Exception as e:
-                logging.warning(f"Failed to send cached photo file_id {f_id}: {e}")
-        else:
-            v_lines = []
-            desc_line = format_description_line(cached.get("title") or "", is_photo=False)
-            if desc_line:
-                v_lines.append(desc_line)
-
-            m_line = format_music_line(music_info=cached.get("music_info"), music=cached.get("music"), post_title=cached.get("title"))
-            if m_line:
-                v_lines.append(m_line)
-
-            v_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы (мгновенно из кэша ⚡)</i>")
-            caption = "\n\n".join(v_lines)
-            try:
-                await message.answer_video(
-                    video=f_id,
-                    caption=caption,
-                    reply_markup=None,
-                    parse_mode="HTML"
-                )
-                return
-            except Exception as e:
-                logging.warning(f"Failed to send cached video file_id {f_id}: {e}")
-            # Если Telegram удалил file_id или ошибка — скачиваем заново
-
-    is_vip = str(user_id) in ADMIN_IDS
-
-    c_info = detect_content_info(clean_url)
-    target_platform = c_info.get("platform") or detect_platform(clean_url) or "youtube"
-    if target_platform == "tiktok":
-        sem = TIKTOK_SEMAPHORE
-        lock = tiktok_lock
-    elif target_platform == "instagram":
-        sem = INSTAGRAM_SEMAPHORE
-        lock = instagram_lock
-    elif target_platform in ("spotify", "soundcloud", "music"):
-        sem = MUSIC_SEMAPHORE
-        lock = music_lock
-    else:
-        sem = YOUTUBE_SEMAPHORE
-        lock = youtube_lock
-
-    p_label = c_info.get("label", "медиа")
-    p_icon = c_info.get("icon", "⚡")
-
-    status_msg = None
-    queue_acquired = False
-    res = None
-
     try:
-        # Проверяем занятость независимого слота платформы
-        if sem.locked() and not is_vip:
-            async with lock:
-                if target_platform == "tiktok":
-                    global tiktok_waiting_count
-                    tiktok_waiting_count += 1
-                    pos = tiktok_waiting_count
-                elif target_platform == "instagram":
-                    global instagram_waiting_count
-                    instagram_waiting_count += 1
-                    pos = instagram_waiting_count
-                elif target_platform in ("spotify", "soundcloud", "music"):
-                    global music_waiting_count
-                    music_waiting_count += 1
-                    pos = music_waiting_count
-                else:
-                    global youtube_waiting_count
-                    youtube_waiting_count += 1
-                    pos = youtube_waiting_count
-            status_msg = await message.answer(
-                f"⏳ <b>В очереди на загрузку ({p_label})...</b>\n"
-                f"Твоя позиция: {pos}. Ожидаем завершения предыдущих загрузок 🚀",
-                parse_mode="HTML"
-            )
-        else:
-            status_msg = await message.answer(
-                f"{p_icon} <b>Загружаю {p_label}...</b>\n"
-                f"<code>[██░░░░░░░░░░] 15%</code>\n"
-                f"🔍 Получаю данные публикации...",
-                parse_mode="HTML"
-            )
-
-        # VIP пользователи имеют безусловный приоритет
-        if is_vip:
-            queue_acquired = True
-            await safe_edit_status(
-                status_msg,
-                f"👑 <b>VIP приоритет активен!</b>\n"
-                f"<code>[███░░░░░░░░░] 25%</code>\n"
-                f"Загружаю {p_label} вне очереди..."
-            )
-        else:
-            await sem.acquire()
-            queue_acquired = True
-            async with lock:
-                if target_platform == "tiktok" and tiktok_waiting_count > 0:
-                    tiktok_waiting_count -= 1
-                elif target_platform == "instagram" and instagram_waiting_count > 0:
-                    instagram_waiting_count -= 1
-                elif target_platform in ("spotify", "soundcloud", "music") and music_waiting_count > 0:
-                    music_waiting_count -= 1
-                elif target_platform == "youtube" and youtube_waiting_count > 0:
-                    youtube_waiting_count -= 1
-            await safe_edit_status(
-                status_msg,
-                f"{p_icon} <b>Загружаю {p_label}...</b>\n"
-                f"<code>[███░░░░░░░░░] 25%</code>\n"
-                f"Подключаюсь и начинаю скачивание..."
-            )
-
-        # Выполняем скачивание с живым прогресс-баром
-        progress_cb = create_progress_reporter(status_msg, c_info)
-        res = await download_video(clean_url, user_id, progress_callback=progress_cb)
-        if not res or not isinstance(res, dict):
-            await safe_edit_status(
-                status_msg,
-                f"❌ <b>Не удалось загрузить {p_label}.</b>\n"
-                f"Возможно, публикация удалена или автор ограничил доступ."
-            )
-            return
-
-        # 🖼 СНАЧАЛА проверяем: если это фото-слайдшоу (альбом картинок)
-        if res.get("is_album") and (res.get("photos") or res.get("photo_urls")):
-            photos = res.get("photos") or []
-            photo_urls = res.get("photo_urls") or []
-            total_slides = max(len(photos), len(photo_urls))
-            await safe_edit_status(
-                status_msg,
-                f"📸 <b>Подготавливаю слайдшоу ({total_slides} слайдов)...</b>\n"
-                f"<code>[████████████] 100%</code>\n"
-                f"Отправляю в Telegram..."
-            )
-            sid = uuid.uuid4().hex[:10]
-            plat_name = res.get("platform", "tiktok")
-            default_ttl = f"{plat_name.capitalize()} Слайдшоу"
-            _slideshow_cache[sid] = {
-                "photos": photos,
-                "photo_urls": photo_urls,
-                "file_ids": [None] * total_slides,
-                "total": total_slides,
-                "title": res.get("title") or default_ttl,
-                "author": res.get("author") or "",
-                "platform": plat_name,
-                "original_url": clean_url,
-                "music": res.get("music"),
-                "music_info": res.get("music_info"),
-                "digg_count": res.get("digg_count", 0),
-                "comment_count": res.get("comment_count", 0),
-                "chat_id": message.chat.id,
-                "created_at": time.time()
-            }
-            save_slideshow_session_db(sid, _slideshow_cache[sid])
-
-            first_media = FSInputFile(photos[0]) if (photos and os.path.exists(photos[0])) else photo_urls[0]
-            caption = make_slide_caption(_slideshow_cache[sid], 0, total_slides)
-            kb = build_slideshow_keyboard(sid, 0, total_slides, _slideshow_cache[sid])
-            is_vid = str(first_media).lower().endswith((".mp4", ".mov", ".m4v"))
-            if is_vid:
-                sent = await message.answer_video(
-                    video=first_media,
-                    caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML"
-                )
-                if sent and sent.video:
-                    _slideshow_cache[sid]["file_ids"][0] = sent.video.file_id
-                    save_slideshow_session_db(sid, _slideshow_cache[sid])
-            else:
-                sent = await message.answer_photo(
-                    photo=first_media,
-                    caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML"
-                )
-                if sent and sent.photo:
-                    _slideshow_cache[sid]["file_ids"][0] = sent.photo[-1].file_id
-                    save_slideshow_session_db(sid, _slideshow_cache[sid])
-
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            return
-
-        file_path = res.get("file_path")
-
-        if not file_path or not os.path.exists(file_path):
-            await safe_edit_status(status_msg, "❌ Не удалось загрузить видео файл. Возможно, видео удалено или автор ограничил доступ.")
-            return
-
-        file_size = os.path.getsize(file_path)
-
-        platform_names = {
-            "tiktok": "TikTok",
-            "youtube": "YouTube Shorts",
-            "instagram": "Instagram Reels",
-            "spotify": "Spotify",
-            "soundcloud": "SoundCloud",
-        }
-        plat_str = platform_names.get(res.get("platform"), "Медиа")
-
-        title_raw = (res.get("title") or "Аудиозапись")[:200]
-        author_raw = (res.get("performer") or res.get("author") or "")[:50]
-        title_esc = html.escape(title_raw)
-        author_esc = html.escape(author_raw)
-
-        # 🎧 Если это аудиозапись (Spotify, SoundCloud, музыка или подкаст)
-        if res.get("is_audio"):
-            try:
-                await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VOICE)
-            except Exception:
-                pass
-            file_size_mb = round(file_size / (1024 * 1024), 1)
-            await safe_edit_status(
-                status_msg,
-                f"🎵 <b>Отправляю трек в Telegram ({file_size_mb} МБ)...</b>\n<code>[████████████] 100%</code>"
-            )
-
-            is_music_source = res.get("platform") in ("spotify", "soundcloud", "music")
-            performer = res.get("performer") or author_raw or "Исполнитель"
-            track_title = res.get("title") or title_raw or "Трек"
-
-            if is_music_source:
-                src_name = "Spotify" if res.get("platform") == "spotify" else ("SoundCloud" if res.get("platform") == "soundcloud" else "Музыка")
-                audio_caption = (
-                    f"🎧 <b>{html.escape(track_title)}</b> — {html.escape(performer)}\n\n"
-                    f"📱 <b>Источник:</b> {src_name}\n"
-                    f"✨ <i>Скачано через @duo_play_date_bot</i>"
-                )
-            else:
-                audio_caption = (
-                    f"🎧 <b>{title_esc}</b>\n\n"
-                    f"📱 <b>Источник:</b> {plat_str} (Аудио / Подкаст)\n"
-                    f"ℹ️ <i>(Ролик больше 50 МБ — видео-лимит Telegram, поэтому отправлен как чистая аудиозапись для удобного прослушивания)</i>\n"
-                    f"✨ <i>Скачано через @duo_play_date_bot</i>"
-                )
-
-            thumb_path = res.get("thumbnail_path")
-            thumb_input = FSInputFile(thumb_path) if (thumb_path and os.path.exists(thumb_path)) else None
-
-            audio_input = FSInputFile(file_path)
-            sent = await message.answer_audio(
-                audio=audio_input,
-                caption=audio_caption,
-                title=track_title[:80],
-                performer=performer[:50],
-                duration=int(res.get("duration", 0)),
-                thumbnail=thumb_input,
-                reply_markup=None,
-                parse_mode="HTML"
-            )
-            if sent and sent.audio:
-                save_cached_media(
-                    clean_url,
-                    sent.audio.file_id,
-                    "audio",
-                    track_title,
-                    res.get("platform", "music"),
-                    performer,
-                    music=res.get("music"),
-                    music_info=res.get("music_info")
-                )
-                _safe_remove(file_path)
-                _safe_remove(thumb_path)
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            return
-
-        # 🛡️ Строгая валидация медиа-типа по бинарным сигнатурам (magic bytes) скачанного файла:
-        # Исключает баг, когда внешний парсер ошибочно пометил ролик как 'is_photo'
-        if file_path and os.path.exists(file_path):
-            if is_valid_mp4_file(file_path, allow_audio=False):
-                res["is_photo"] = False
-                res["is_video"] = True
-
-        # 📸 Если в посте оказалась одиночная фотография
-        if res.get("is_photo"):
-            await safe_edit_status(
-                status_msg,
-                "📸 <b>Отправляю фото в Telegram...</b>\n<code>[████████████] 100%</code>"
-            )
-            try:
-                await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
-            except Exception:
-                pass
-
-            plat_disp = "Instagram" if res.get("platform") == "instagram" else ("TikTok" if res.get("platform") == "tiktok" else "Медиа")
-            
-            p_lines = []
-            desc_line = format_description_line(res.get("title") or "", is_photo=True)
-            if desc_line:
-                p_lines.append(desc_line)
-
-            m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"), post_title=res.get("title"))
-            if m_line:
-                p_lines.append(m_line)
-
-            p_lines.append(f"📱 <b>Источник:</b> {plat_disp}\n✨ <i>Скачано через @duo_play_date_bot</i>")
-            photo_caption = "\n\n".join(p_lines)
-            photo_input = FSInputFile(file_path)
-            sent = await message.answer_photo(
-                photo=photo_input,
-                caption=photo_caption,
-                reply_markup=None,
-                parse_mode="HTML"
-            )
-            if sent and sent.photo:
-                f_id = sent.photo[-1].file_id
-                save_cached_media(
-                    clean_url,
-                    f_id,
-                    "photo",
-                    res.get("title", ""),
-                    res.get("platform", ""),
-                    res.get("author", ""),
-                    music=res.get("music"),
-                    music_info=res.get("music_info")
-                )
-                record_user_download(
-                    user_id,
-                    clean_url,
-                    f_id,
-                    "photo",
-                    res.get("title", ""),
-                    res.get("platform", "")
-                )
-                _safe_remove(file_path)
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            return
-
-        # Проверка размера (Telegram Bot API лимит 50 МБ)
-        if file_size > 50 * 1024 * 1024:
-            await safe_edit_status(
-                status_msg,
-                f"⚠️ <b>Файл слишком большой ({round(file_size / (1024*1024), 1)} МБ)</b>\n\n"
-                f"Telegram Bot API не позволяет отправлять ботам видео больше 50 МБ.\n"
-                f"Попробуй более короткое видео или шортс."
-            )
-            return
-
-        file_size_mb = round(file_size / (1024 * 1024), 1)
-        await safe_edit_status(
-            status_msg,
-            f"🎬 <b>Отправляю чистое видео ({file_size_mb} МБ)...</b>\n<code>[████████████] 100%</code>"
-        )
-        try:
-            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
-        except Exception:
-            pass
-
-        v_lines = []
-        desc_line = format_description_line(res.get("title") or "", is_photo=False)
-        if desc_line:
-            v_lines.append(desc_line)
-
-        m_line = format_music_line(music_info=res.get("music_info"), music=res.get("music"), post_title=res.get("title"))
-        if m_line:
-            v_lines.append(m_line)
-
-        meta = f"📱 <b>Источник:</b> {plat_str}"
-        if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео", "creator", "unknown"):
-            meta += f" | {author_esc}"
-        v_lines.append(meta)
-
-        v_lines.append("✨ <i>Скачано через @duo_play_date_bot без водяных знаков и рекламы</i>")
-
-        if res.get("low_quality_notice"):
-            v_lines.append("<i>(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)</i>")
-
-        caption = "\n\n".join(v_lines)
-
-        sent = None
-        # Для TikTok: пробуем мгновенную отправку напрямую по CDN URL (1-2 сек вместо 20 сек)
-        if target_platform == "tiktok" and res.get("direct_url") and not res.get("is_photo") and not res.get("is_album"):
-            try:
-                sent = await message.answer_video(
-                    video=res["direct_url"],
-                    caption=caption,
-                    reply_markup=None,
-                    parse_mode="HTML"
-                )
-            except Exception as direct_send_err:
-                logging.info(f"TikTok direct URL send bypassed ({direct_send_err}), sending local file...")
-                sent = None
-
-        if not sent:
-            video_input = FSInputFile(file_path)
-            try:
-                sent = await message.answer_video(
-                    video=video_input,
-                    caption=caption,
-                    reply_markup=None,
-                    parse_mode="HTML"
-                )
-            except Exception as html_send_err:
-                logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
-                sent = await message.answer_video(
-                    video=video_input,
-                    caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
-                    reply_markup=None
-                )
-
-        # Сохраняем file_id в кэш для мгновенных ответов в будущем
-        if sent and sent.video and sent.video.file_id:
-            v_id = sent.video.file_id
-            save_cached_media(
-                clean_url,
-                v_id,
-                "video",
-                res.get("title", ""),
-                res.get("platform", ""),
-                res.get("author", ""),
-                music=res.get("music"),
-                music_info=res.get("music_info")
-            )
-            record_user_download(
-                user_id,
-                clean_url,
-                v_id,
-                "video",
-                res.get("title", ""),
-                res.get("platform", "")
-            )
-            _safe_remove(file_path)
-
-        # Удаляем сервисное сообщение со статусом
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-    except Exception as e:
-        record_error("process_video_download", e, clean_url)
-        logging.error(f"Download processing failed for {clean_url}: {e}", exc_info=True)
-        msg = format_friendly_error(e, platform=target_platform)
-
-        if status_msg:
-            try:
-                await status_msg.edit_text(msg, parse_mode="HTML")
-            except Exception:
-                await message.answer(msg, parse_mode="HTML")
-        else:
-            await message.answer(msg, parse_mode="HTML")
-
-
-    finally:
-        # Освобождаем независимый семафор соответствующей платформы
-        if queue_acquired and not is_vip:
-            sem.release()
-        # Удаляем временные файлы с диска ТОЛЬКО для одиночных роликов (альбомы живут в _slideshow_cache 1 час)
-        if res and isinstance(res, dict) and not res.get("is_album"):
-            fp = res.get("file_path")
-            if fp and os.path.exists(fp):
-                try:
-                    os.remove(fp)
-                except Exception:
-                    pass
-                if os.path.exists(fp):
-                    try:
-                        os.remove(fp)
-                    except Exception as del_err:
-                        logging.warning(f"Could not remove temp file {fp}: {del_err}")
-
-
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message, command: CommandObject = None):
-    user = message.from_user
-    logging.info(f"🚀 [КОМАНДА /start] от {user.id} (@{user.username or user.first_name}) args={command.args if command else None}")
-    save_user(
-        user_id=user.id,
-        username=user.username,
-        first_name=user.first_name
-    )
-
-    app_link = get_app_url()
-
-    # 🔗 Обработка перехода по ссылке на быстрое скачивание (?start=dl_...)
-    if command and command.args and command.args.startswith("dl_"):
-        try:
-            token_or_b64 = command.args.replace("dl_", "").strip()
-            target_url = get_dl_token_url(token_or_b64)
-            if not target_url:
-                try:
-                    raw_b64 = token_or_b64
-                    missing_padding = len(raw_b64) % 4
-                    if missing_padding:
-                        raw_b64 += '=' * (4 - missing_padding)
-                    target_url = base64.b64decode(raw_b64).decode('utf-8')
-                except Exception:
-                    target_url = None
-
-            if target_url and detect_platform(target_url):
-                await process_video_download(message, target_url)
-                return
-        except Exception as e:
-            logging.error(f"Error handling dl_ start: {e}")
-
-    # 🔗 Обработка перехода по умной вирусной ссылке (?start=inv_123)
-    if command and command.args and command.args.startswith("inv_"):
-        try:
-            inv_id_str = command.args.replace("inv_", "").strip()
-            if inv_id_str.isdigit():
-                inv = get_invite_record(int(inv_id_str))
-                if inv:
-                    sender_name = inv["sender_name"] or "Твой тиммейт"
-                    invite_msg = (
-                        f"👾 **ТЕБЯ ЗОВУТ В ИГРУ В DUO!** 🎮\n"
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"👤 **От кого:** {sender_name}\n"
-                        f"🕹 **Игра:** {inv['place']}\n"
-                        f"📅 **Время:** {inv['day']} в {inv['time']}\n"
-                        f"✨ **Вайб:** {inv['vibe']}\n"
-                        f"⏳ **Сколько играем:** {inv['duration']}\n"
-                    )
-                    if inv["note"] and inv["note"] != "Без записки":
-                        invite_msg += f"💌 **Записка:** _{inv['note']}_\n"
-                    invite_msg += (
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"Ты в деле? Выбери ответ ниже 👇"
-                    )
-
-                    reply_kb = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="✅ Я в деле! Погнали!",
-                                    callback_data=f"accept_{inv['sender_id'] or 0}_{inv['id']}"
-                                )
-                            ],
-                            [
-                                InlineKeyboardButton(
-                                    text="⏰ Давай, но позже",
-                                    callback_data=f"later_{inv['sender_id'] or 0}_{inv['id']}"
-                                ),
-                                InlineKeyboardButton(
-                                    text="💔 Не сегодня",
-                                    callback_data=f"decline_{inv['sender_id'] or 0}_{inv['id']}"
-                                )
-                            ],
-                            [
-                                InlineKeyboardButton(
-                                    text="🎮 Открыть DUO ✨",
-                                    web_app=WebAppInfo(url=app_link)
-                                )
-                            ]
-                        ]
-                    )
-                    await message.answer(invite_msg, reply_markup=reply_kb, parse_mode="Markdown")
-                    return
-        except Exception as e:
-            logging.error(f"Error handling deep link invite: {e}")
-
-    welcome_text = (
-        f"👾 **DUO — ИГРЫ И ЗАГРУЗЧИК МЕДИА БЕЗ РЕКЛАМЫ** 🎮\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Привет, {user.first_name}! 👋\n\n"
-        f"✨ **Совместные игры в DUO:**\n"
-        f"• Зови тиммейтов в любимые игры за 2 клика\n"
-        f"• Назначай тайминги и собирай дуэты\n\n"
-        f"📥 **Загрузка видео и музыки:**\n"
-        f"• Отправь ссылку на **TikTok, Shorts, Reels, Spotify или SoundCloud**\n"
-        f"• Для поиска любого трека напиши: `/music <название>`\n"
-        f"• В чатах с друзьями пиши: `@duo_play_date_bot <ссылка>`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Открой лобби игр ниже или скинь ссылку прямо в чат 👇"
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🎮 Открыть лобби DUO ✨",
-                    web_app=WebAppInfo(url=app_link)
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎵 Найти музыку (/music)",
-                    callback_data="btn_music_search"
-                ),
-                InlineKeyboardButton(
-                    text="⚙️ Настройки",
-                    callback_data="open_settings"
-                )
-            ]
-        ]
-    )
-
-    try:
-        await bot.set_chat_menu_button(
-            chat_id=message.chat.id,
-            menu_button=MenuButtonWebApp(
-                text="🎮 DUO",
-                web_app=WebAppInfo(url=app_link)
-            )
-        )
-    except Exception as e:
-        logging.warning(f"Menu button warning: {e}")
-
-    await message.answer(welcome_text, reply_markup=keyboard, parse_mode="Markdown")
-
-
-def get_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    is_caption = get_user_inline_caption(user_id)
-    is_pm_save = get_user_save_to_pm(user_id)
-
-    cap_btn = "🟢 Подпись: Включена" if is_caption else "⚪ Подпись: Выключена"
-    toggle_cap = "0" if is_caption else "1"
-
-    pm_btn = "🟢 Архив в ЛС: Включен" if is_pm_save else "⚪ Архив в ЛС: Выключен (чистая личка)"
-    toggle_pm = "0" if is_pm_save else "1"
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{cap_btn} (сменить)",
-                    callback_data=f"toggle_caption_{toggle_cap}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"{pm_btn} (сменить)",
-                    callback_data=f"toggle_pm_{toggle_pm}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎮 Открыть лобби DUO ✨",
-                    web_app=WebAppInfo(url=get_app_url())
-                )
-            ]
-        ]
-    )
-
-
-def get_settings_text(user_id: int) -> str:
-    is_caption = get_user_inline_caption(user_id)
-    is_pm_save = get_user_save_to_pm(user_id)
-
-    mode_descr = (
-        "🟢 <b>Включена (по умолчанию)</b> — под видео добавляется скрытое описание и музыкальный трек"
-        if is_caption else
-        "⚪ <b>Выключена</b> — видео отправляется абсолютно чистым, без текста"
-    )
-
-    pm_descr = (
-        "🟢 <b>Включен</b> — копии отправленных через @ видео сохраняются в вашей переписке с ботом"
-        if is_pm_save else
-        "⚪ <b>Выключен (по умолчанию)</b> — личка бота остаётся чистой, сообщения мгновенно удаляются после отправки другу"
-    )
-
-    return (
-        "⚙️ <b>НАСТРОЙКИ ЗАГРУЗЧИКА И DUO</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n\n"
-        "💬 <b>Подпись к видео (при отправке через @):</b>\n"
-        f"{mode_descr}\n\n"
-        "📥 <b>Сохранение видео в ЛС бота:</b>\n"
-        f"{pm_descr}\n\n"
-        "<i>Нажмите на кнопку ниже, чтобы переключить режим 👇</i>"
-    )
-
-
-@dp.message(Command("settings"))
-@dp.message(F.text == "/settings")
-@dp.message(F.text == "⚙️ Настройки")
-async def cmd_settings(message: types.Message):
-    user_id = message.from_user.id
-    await message.answer(
-        get_settings_text(user_id),
-        reply_markup=get_settings_keyboard(user_id),
-        parse_mode="HTML"
-    )
-
-
-@dp.callback_query(F.data == "open_settings")
-async def handle_open_settings(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    await callback.answer()
-    try:
-        await callback.message.edit_text(
-            get_settings_text(user_id),
-            reply_markup=get_settings_keyboard(user_id),
-            parse_mode="HTML"
-        )
-    except Exception:
-        await callback.message.answer(
-            get_settings_text(user_id),
-            reply_markup=get_settings_keyboard(user_id),
-            parse_mode="HTML"
-        )
-
-
-@dp.callback_query(F.data == "btn_music_search")
-async def handle_btn_music_search(callback: types.CallbackQuery):
-    await callback.answer()
-    text = (
-        "🎵 <b>Поиск и скачивание музыки:</b>\n\n"
-        "Чтобы найти трек, напиши команду <code>/music</code> и название или автора:\n\n"
-        "• <code>/music VLDONE Не пробил</code>\n"
-        "• <code>/music Linkin Park Numb</code>\n"
-        "• <code>/music Instasamka</code>\n\n"
-        "Либо просто <b>отправь ссылку</b> на трек из <b>Spotify</b> или <b>SoundCloud</b> прямо в этот чат! ✨\n\n"
-        "<i>(Нажми на любой пример выше, чтобы быстро скопировать команду)</i>"
-    )
-    await callback.message.answer(text, parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("toggle_caption_"))
-async def callback_toggle_caption(callback: types.CallbackQuery):
-    new_val = callback.data.replace("toggle_caption_", "") == "1"
-    set_user_inline_caption(callback.from_user.id, new_val)
-
-    tip = "🟢 Подпись к видео включена!" if new_val else "⚪ Чистый режим активирован (без текста)!"
-    await callback.answer(tip)
-    try:
-        await callback.message.edit_text(
-            get_settings_text(callback.from_user.id),
-            reply_markup=get_settings_keyboard(callback.from_user.id),
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-
-@dp.callback_query(F.data.startswith("toggle_pm_"))
-async def callback_toggle_pm(callback: types.CallbackQuery):
-    new_val = callback.data.replace("toggle_pm_", "") == "1"
-    set_user_save_to_pm(callback.from_user.id, new_val)
-
-    tip = "🟢 Архив в ЛС включен!" if new_val else "⚪ Личка будет чистой (видео не сохраняются в ЛС)!"
-    await callback.answer(tip)
-    try:
-        await callback.message.edit_text(
-            get_settings_text(callback.from_user.id),
-            reply_markup=get_settings_keyboard(callback.from_user.id),
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-
-
-@dp.callback_query(F.data.startswith("accept_"))
-async def handle_accept(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    sender_id = int(parts[1]) if len(parts) > 1 and parts[1] != "0" else None
-    
-    await callback.answer("Приглашение принято! 🎉")
-    await callback.message.edit_text(
-        callback.message.text + "\n\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "✅ **Ты в деле! Запускай игру! 🚀**\n"
-        "Твой напарник уже получил уведомление.",
-        parse_mode="Markdown"
-    )
-
-    if sender_id and bot:
-        try:
-            await bot.send_message(
-                chat_id=sender_id,
-                text=(
-                    f"🎉 **ЕСТЬ КОНТАКТ! ТИММЕЙТ В ДЕЛЕ!** 🚀\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 **{callback.from_user.full_name}** принял(а) твой инвайт в DUO!\n"
-                    f"Готовьтесь к совместной кате 🎮✨"
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.warning(f"Could not notify sender: {e}")
-
-
-@dp.callback_query(F.data.startswith("later_"))
-async def handle_later(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    sender_id = int(parts[1]) if len(parts) > 1 and parts[1] != "0" else None
-
-    await callback.answer("Ответ отправлен ⏰")
-    await callback.message.edit_text(
-        callback.message.text + "\n\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "⏰ **Ответ:** Давай, но чуть попозже!",
-        parse_mode="Markdown"
-    )
-
-    if sender_id and bot:
-        try:
-            await bot.send_message(
-                chat_id=sender_id,
-                text=(
-                    f"⏰ **ОТВЕТ ОТ НАПАРНИКА**\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 **{callback.from_user.full_name}** не против сыграть, но предлагает чуть позже!"
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.warning(f"Could not notify sender: {e}")
-
-
-@dp.callback_query(F.data.startswith("decline_"))
-async def handle_decline(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    sender_id = int(parts[1]) if len(parts) > 1 and parts[1] != "0" else None
-
-    await callback.answer("Отклонено 💔")
-    await callback.message.edit_text(
-        callback.message.text + "\n\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "💔 **Ответ:** Сегодня не получится.",
-        parse_mode="Markdown"
-    )
-
-    if sender_id and bot:
-        try:
-            await bot.send_message(
-                chat_id=sender_id,
-                text=(
-                    f"💔 **ОТВЕТ ОТ НАПАРНИКА**\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 **{callback.from_user.full_name}** сегодня не сможет пойти в игру."
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.warning(f"Could not notify sender: {e}")
-
-
-_stream_files = {}   # token -> local_file_path
-_stream_locks = {}   # token -> asyncio.Lock
-# Даже если несколько пользователей одновременно вставят ссылки в inline,
-# качаем не больше одного видео: на 512 МБ это критично.
-_precache_semaphore = asyncio.Semaphore(1)
-
-
-async def _expire_stream_file(token: str, path: str, delay: int = 900):
-    """Через 15 минут удаляет неиспользованный pre-cache, чтобы не забить диск."""
-    try:
-        await asyncio.sleep(delay)
-        if _stream_files.get(token) != path:
-            return
-        _stream_files.pop(token, None)
-        if os.path.exists(path):
+        if os.path.isfile(path):
             os.remove(path)
-            logging.info(f"Pre-cache cleanup: removed {path}")
-    except Exception:
-        pass
-
-
-async def pre_cache_video_to_disk(clean_url: str, token: str):
-    """
-    Фоновая предварительная загрузка видео на диск в temp_downloads,
-    чтобы оно было готово к моменту запроса серверами Telegram.
-    """
-    if token in _stream_files and os.path.exists(_stream_files[token]):
-        return
-    # Чистим ссылки на уже удалённые файлы, чтобы лимит не «залипал».
-    for stale_token in [k for k, v in _stream_files.items() if not os.path.exists(v)]:
-        _stream_files.pop(stale_token, None)
-    # Не запускаем десятки фоновых скачиваний, если пользователи просто
-    # перебирают ссылки в inline-режиме: на 512 МБ это лишняя нагрузка.
-    if len(_stream_files) >= 5:
-        logging.info("Pre-cache skipped: already 5 files pending")
-        return
-    lock = _stream_locks.setdefault(token, asyncio.Lock())
-    async with lock:
-        if token in _stream_files and os.path.exists(_stream_files[token]):
-            return
-        async with _precache_semaphore:
-            if token in _stream_files and os.path.exists(_stream_files[token]):
-                return
-            if len(_stream_files) >= 5:
-                logging.info("Pre-cache skipped inside semaphore: 5 files pending")
-                return
-            try:
-                res = await download_video(clean_url, 0)
-                if res and res.get("file_path") and os.path.exists(res["file_path"]):
-                    _stream_files[token] = res["file_path"]
-                    asyncio.create_task(_expire_stream_file(token, res["file_path"]))
-            except Exception as e:
-                logging.warning(f"Pre-cache error for {clean_url}: {e}")
-
-
-async def handle_stream_video(request: web.Request) -> web.StreamResponse:
-    """
-    HTTP endpoint для отдачи видео напрямую серверам Telegram (RFC 7233 Range requests).
-    Когда пользователь отправляет InlineQueryResultVideo в чат, Telegram скачивает MP4 отсюда.
-    """
-    media_key = request.match_info.get("media_key", "")
-    token = media_key.replace(".mp4", "").replace(".jpg", "").strip()
-
-    target_url, db_file_path = get_dl_token_info(token)
-    if not target_url and not db_file_path:
-        return web.Response(text="Token not found or expired", status=404)
-
-    file_path = _stream_files.get(token) or db_file_path
-    if not file_path or not os.path.exists(file_path):
-        for fname in os.listdir(DOWNLOAD_DIR):
-            if token in fname and (fname.endswith(".mp4") or fname.endswith(".jpg")):
-                cand = os.path.join(DOWNLOAD_DIR, fname)
-                if os.path.exists(cand) and os.path.getsize(cand) > 500:
-                    file_path = cand
-                    _stream_files[token] = file_path
-                    break
-
-    if not file_path or not os.path.exists(file_path):
-        lock = _stream_locks.setdefault(token, asyncio.Lock())
-        async with lock:
-            file_path = _stream_files.get(token)
-            if not file_path or not os.path.exists(file_path):
-                try:
-                    res = await download_video(target_url, 0)
-                    if res and res.get("file_path") and os.path.exists(res["file_path"]):
-                        file_path = res["file_path"]
-                        _stream_files[token] = file_path
-                        update_dl_token_file(token, file_path)
-                except Exception as e:
-                    logging.error(f"Stream handler download error: {e}")
-                    return web.Response(text=f"Download error: {e}", status=502)
-
-    if file_path and os.path.exists(file_path):
-        content_type = "video/mp4" if file_path.endswith(".mp4") else "image/jpeg"
-        return web.FileResponse(
-            file_path,
-            headers={
-                "Content-Type": content_type,
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=86400"
-            }
-        )
-    return web.Response(text="File not found", status=404)
-
-
-# ==========================================
-# 📥 ИНЛАЙН РЕЖИМ (@duo_play_date_bot <ссылка>)
-# ==========================================
-@dp.inline_query()
-async def inline_query_handler(inline_query: InlineQuery):
-    query = inline_query.query.strip()
-    user_id = inline_query.from_user.id
-    caption_enabled = get_user_inline_caption(user_id)
-
-    # 1. Если запрос ПУСТОЙ — подсказка
-    if not query:
-        results = [
-            InlineQueryResultArticle(
-                id="hint_empty",
-                title="📥 Вставь ссылку на видео или фото",
-                description="TikTok, YouTube Shorts или Instagram Reels/Фото",
-                thumbnail_url="https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png",
-                input_message_content=InputTextMessageContent(
-                    message_text=(
-                        "💡 <b>Как отправить видео или фото другу через @duo_play_date_bot:</b>\n\n"
-                        "Вставь ссылку на TikTok, Shorts или Instagram после имени бота:\n"
-                        "<code>@duo_play_date_bot https://...</code>\n\n"
-                        "И нажми на появившуюся кнопку — чистое медиа улетит прямо в чат!"
-                    ),
-                    parse_mode="HTML"
-                )
-            )
-        ]
-        await inline_query.answer(results=results, cache_time=5, is_personal=True)
-        return
-
-    clean_url = extract_url(query)
-    platform = detect_platform(clean_url) if clean_url else None
-
-    if not platform or not clean_url:
-        results = [
-            InlineQueryResultArticle(
-                id="hint_unsupported",
-                title="⚠️ Ссылка не распознана",
-                description="Поддерживаются: TikTok, YouTube Shorts, Instagram Reels",
-                thumbnail_url="https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png",
-                input_message_content=InputTextMessageContent(
-                    message_text="⚠️ Отправьте прямую ссылку на TikTok, YouTube Shorts или Instagram Reels!"
-                )
-            )
-        ]
-        await inline_query.answer(results=results, cache_time=10, is_personal=True)
-        return
-
-    # Названия и официальные иконки платформ (стиль SavXBot с определением типа медиа)
-    c_info = detect_content_info(clean_url)
-    p_noun = c_info.get("label", "медиа")
-    p_icon = c_info.get("icon", "🎬")
-    plat_source = c_info.get("platform", "").capitalize() or "Медиа"
-
-    if platform == "instagram":
-        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/instagram.png"
-    elif platform == "tiktok":
-        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tiktok.png"
-    elif platform == "youtube":
-        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
-    else:
-        plat_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/youtube.png"
-
-    inline_title = f"💌 Поделиться {p_noun}"
-
-    # ─── 2. КЭШ: если видео уже есть — МГНОВЕННО ───
-    cached = get_cached_media(clean_url)
-    if drop_poisoned_instagram_photo_cache(clean_url, cached):
-        cached = None
-    if cached and ("/photo/" in clean_url or "/p/" in clean_url):
-        logging.info(f"Bypassing cache for potential album: {clean_url}")
-        cached = None
-    if cached and cached.get("file_id"):
-        m_type = cached.get("media_type", "video")
-        cap = make_inline_caption(
-            title=cached.get("title") or "",
-            platform=cached.get("platform") or plat_source,
-            author=cached.get("author") or "",
-            music_info=cached.get("music_info"),
-            music=cached.get("music"),
-            is_photo=(m_type == "photo"),
-            is_audio=(m_type == "audio"),
-            caption_enabled=caption_enabled
-        )
-        if m_type == "photo":
-            single_result = InlineQueryResultCachedPhoto(
-                id=f"c_p_{abs(hash(cached['file_id']))}",
-                photo_file_id=cached["file_id"],
-                title=inline_title,
-                caption=cap,
-                parse_mode="HTML" if cap else None
-            )
-        else:
-            single_result = InlineQueryResultCachedVideo(
-                id=f"c_v_{abs(hash(cached['file_id']))}",
-                video_file_id=cached["file_id"],
-                title=inline_title,
-                caption=cap,
-                parse_mode="HTML" if cap else None
-            )
-        await inline_query.answer(results=[single_result], cache_time=300, is_personal=True)
-        return
-
-    # ─── 3. БЫСТРЫЙ ПРЯМОЙ ПОТОК (Только для TikTok) ───
-    # Для TikTok CDN отдает видео серверам Telegram без блокировок.
-    # Для Instagram и YouTube прямые CDN-ссылки НЕЛЬЗЯ отдавать в InlineQueryResultVideo,
-    # так как CDN Instagram и YouTube блокируют серверы Telegram (403), вызывая восклицательный знак (!).
-    direct_video_url = None
-    direct_title = None
-
-    if platform == "tiktok":
-        try:
-            direct_info = await asyncio.wait_for(parse_tiktok_tikwm(clean_url), timeout=4.0)
-            if direct_info and (direct_info.get("video_url") or direct_info.get("is_video")):
-                direct_video_url = direct_info.get("video_url")
-                direct_title = direct_info.get("title")
-        except Exception as e:
-            logging.debug(f"TikTok direct parse failed: {e}")
-
-    if direct_video_url:
-        cap = make_inline_caption(
-            title=direct_title or "",
-            platform="TikTok",
-            author=direct_info.get("author") or "",
-            music_info=direct_info.get("music_info"),
-            music=direct_info.get("music"),
-            is_photo=False,
-            caption_enabled=caption_enabled
-        )
-        single_result = InlineQueryResultVideo(
-            id=f"dir_tt_{abs(hash(clean_url))}",
-            video_url=direct_video_url,
-            mime_type="video/mp4",
-            thumbnail_url=plat_icon,
-            title=inline_title,
-            caption=cap,
-            parse_mode="HTML" if cap else None
-        )
-        await inline_query.answer(results=[single_result], cache_time=30, is_personal=True)
-        return
-
-    # ─── 4. ДВУХФАЗНАЯ ПОДМЕНА (Стиль SavXBot: 100% надежно для Instagram и YouTube) ───
-    # Если ролик ещё не в кэше — отдаём аккуратную карточку с кнопкой-индикатором.
-    # При клике Telegram отправляет ChosenInlineResult (или юзер жмет кнопку), бот скачивает видео
-    # и подменяет сообщение на чистое нативное видео через edit_message_media без битых ссылок!
-    token = save_dl_token(clean_url)
-    import uuid
-    fresh_id = f"art_v4_{token}_{uuid.uuid4().hex[:6]}"
-
-    loading_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"⏳ Загрузка {p_noun}...", callback_data=f"get_vid:{token}")]
-        ]
-    )
-
-    article_result = InlineQueryResultArticle(
-        id=fresh_id,
-        title=inline_title,
-        description=f"Нажми, чтобы {p_noun} улетело прямо в чат ✨",
-        thumbnail_url=plat_icon,
-        input_message_content=InputTextMessageContent(
-            message_text=(
-                f"{p_icon} <b>Загружаю {p_noun}...</b>\n"
-                f"<code>[██░░░░░░░░░░] 15%</code>\n"
-                f"<i>Скоро появится в этом сообщении ✨</i>"
-            ),
-            parse_mode="HTML"
-        ),
-        reply_markup=loading_kb
-    )
-
-    try:
-        await inline_query.answer(results=[article_result], cache_time=0, is_personal=True)
-    except Exception as ans_err:
-        logging.error(f"Error answering inline query: {ans_err}")
-
-
-# ==========================================
-# 🔄 ОБРАБОТКА ВЫБОРА ИНЛАЙН-РЕЗУЛЬТАТА (SavXBot паттерн)
-# ==========================================
-_active_inline_jobs = set()
-
-async def execute_inline_delivery(inline_message_id: str, token: str, user_id: int):
-    """Единая функция выполнения скачивания и подмены сообщения в инлайне с живым прогресс-баром."""
-    job_key = f"{inline_message_id}_{token}"
-    if job_key in _active_inline_jobs:
-        return
-    _active_inline_jobs.add(job_key)
-
-    try:
-        url = get_dl_token_url(token)
-        if not url:
-            try:
-                await bot.edit_message_text(
-                    inline_message_id=inline_message_id,
-                    text="⚠️ <b>Ссылка устарела.</b> Пожалуйста, вызовите бота заново через инлайн.",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
-            return
-
-        c_info = detect_content_info(url)
-        p_noun = c_info.get("label", "медиа")
-        p_icon = c_info.get("icon", "⚡")
-
-        loading_kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=f"⏳ Загрузка {p_noun}...", callback_data=f"get_vid:{token}")]
-            ]
-        )
-
-        cached = get_cached_media(url)
-        if drop_poisoned_media_cache(url, cached):
-            cached = None
-        file_id = cached.get("file_id") if cached else None
-        is_photo = (cached.get("media_type") == "photo") if cached else False
-        is_audio = (cached.get("media_type") == "audio") if cached else False
-        res = None
-
-        if not file_id:
-            try:
-                # Первичный статус в чате друга
-                await safe_edit_status(
-                    inline_message_id=inline_message_id,
-                    text=(
-                        f"{p_icon} <b>Загружаю {p_noun}...</b>\n"
-                        f"<code>[███░░░░░░░░░] 25%</code>\n"
-                        f"🔍 Подключаюсь и начинаю скачивание..."
-                    ),
-                    reply_markup=loading_kb
-                )
-
-                # Прогресс-репортер с троттлингом для inline
-                progress_cb = create_progress_reporter(
-                    status_msg=None,
-                    content_info_or_name=c_info,
-                    inline_message_id=inline_message_id,
-                    reply_markup=loading_kb,
-                    throttle_seconds=1.2
-                )
-                res = await download_video(url, user_id, progress_callback=progress_cb)
-
-                # 🖼 Обработка каруселей/слайдшоу в инлайн-режиме
-                if res and isinstance(res, dict) and res.get("is_album") and (res.get("photos") or res.get("photo_urls")):
-                    photos = res.get("photos") or []
-                    photo_urls = res.get("photo_urls") or []
-                    total_slides = max(len(photos), len(photo_urls))
-
-                    await safe_edit_status(
-                        inline_message_id=inline_message_id,
-                        text=(
-                            f"📸 <b>Подготавливаю слайдшоу ({total_slides} слайдов)...</b>\n"
-                            f"<code>[████████████] 100%</code>\n"
-                            f"✨ Отправляю в чат..."
-                        ),
-                        reply_markup=loading_kb
-                    )
-
-                    sid = uuid.uuid4().hex[:10]
-                    plat_name = res.get("platform", "tiktok")
-                    default_ttl = f"{plat_name.capitalize()} Слайдшоу"
-                    _slideshow_cache[sid] = {
-                        "photos": photos,
-                        "photo_urls": photo_urls,
-                        "file_ids": [None] * total_slides,
-                        "total": total_slides,
-                        "title": res.get("title") or default_ttl,
-                        "author": res.get("author") or "",
-                        "platform": plat_name,
-                        "original_url": url,
-                        "music": res.get("music"),
-                        "music_info": res.get("music_info"),
-                        "digg_count": res.get("digg_count", 0),
-                        "comment_count": res.get("comment_count", 0),
-                        "chat_id": 0,
-                        "created_at": time.time()
-                    }
-                    save_slideshow_session_db(sid, _slideshow_cache[sid])
-
-                    first_file = photos[0] if (photos and os.path.exists(photos[0])) else None
-                    first_u = photo_urls[0] if photo_urls else None
-                    first_fid = await upload_media_to_telegram(first_file, is_photo=True, target_user_id=user_id) if first_file else None
-                    if first_fid:
-                        _slideshow_cache[sid]["file_ids"][0] = first_fid
-                        save_slideshow_session_db(sid, _slideshow_cache[sid])
-
-                    media_target = first_fid or first_u or (FSInputFile(first_file) if first_file else None)
-                    caption = make_slide_caption(_slideshow_cache[sid], 0, total_slides)
-                    kb = build_slideshow_keyboard(sid, 0, total_slides, _slideshow_cache[sid], is_inline=True)
-                    is_vid = str(media_target).lower().endswith((".mp4", ".mov", ".m4v"))
-                    media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-                    if media_target:
-                        try:
-                            await bot.edit_message_media(
-                                inline_message_id=inline_message_id,
-                                media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
-                                reply_markup=kb
-                            )
-                        except Exception as emm_err:
-                            if hasattr(emm_err, "retry_after"):
-                                await asyncio.sleep(getattr(emm_err, "retry_after") + 0.2)
-                                await bot.edit_message_media(
-                                    inline_message_id=inline_message_id,
-                                    media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
-                                    reply_markup=kb
-                                )
-                            else:
-                                raise emm_err
-                    _stream_files.pop(token, None)
-                    return
-
-                if res and isinstance(res, dict) and res.get("file_path"):
-                    await safe_edit_status(
-                        inline_message_id=inline_message_id,
-                        text=(
-                            f"📤 <b>Отправляю {p_noun} в чат...</b>\n"
-                            f"<code>[████████████] 100%</code>"
-                        ),
-                        reply_markup=loading_kb
-                    )
-
-                    is_photo = bool(res.get("is_photo"))
-                    is_audio = bool(res.get("is_audio"))
-                    file_id = await upload_media_to_telegram(
-                        res["file_path"],
-                        is_photo=is_photo,
-                        is_audio=is_audio,
-                        target_user_id=user_id,
-                        title=res.get("title", ""),
-                        platform=res.get("platform", ""),
-                        performer=res.get("performer", ""),
-                        duration=int(res.get("duration", 0))
-                    )
-                    if file_id:
-                        m_type = "audio" if is_audio else ("photo" if is_photo else "video")
-                        save_cached_media(
-                            url, file_id,
-                            m_type,
-                            res.get("title", ""),
-                            res.get("platform", ""),
-                            res.get("author", "") or res.get("performer", ""),
-                            music=res.get("music"),
-                            music_info=res.get("music_info")
-                        )
-                    try:
-                        if os.path.exists(res["file_path"]):
-                            os.remove(res["file_path"])
-                    except Exception:
-                        pass
-                    # Больше не держим ссылку на уже удалённый pre-cache файл.
-                    _stream_files.pop(token, None)
-                else:
-                    raise Exception("download_failed")
-            except Exception as e:
-                logging.error(f"Inline download error for {url}: {e}")
-                target_platform = detect_platform(url)
-                err_text = format_friendly_error(e, platform=target_platform)
-                retry_kb = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")]]
-                )
-                try:
-                    await bot.edit_message_text(
-                        inline_message_id=inline_message_id,
-                        text=f"{err_text}\n\n<i>Нажмите кнопку ниже для повторной попытки 👇</i>",
-                        parse_mode="HTML",
-                        reply_markup=retry_kb
-                    )
-                except Exception:
-                    pass
-                return
-
-        if file_id:
-            caption_enabled = get_user_inline_caption(user_id)
-            title = ""
-            author = ""
-            plat = ""
-            m_info = None
-            music_val = None
-            if res and isinstance(res, dict):
-                title = res.get("title") or ""
-                author = res.get("author") or res.get("performer") or ""
-                plat = res.get("platform") or ""
-                m_info = res.get("music_info")
-                music_val = res.get("music")
-            elif cached and isinstance(cached, dict):
-                title = cached.get("title") or ""
-                author = cached.get("author") or ""
-                plat = cached.get("platform") or ""
-                m_info = cached.get("music_info")
-                music_val = cached.get("music")
-
-            caption = make_inline_caption(
-                title=title,
-                platform=plat or plat_source,
-                author=author,
-                music_info=m_info,
-                music=music_val,
-                is_photo=is_photo,
-                is_audio=is_audio,
-                caption_enabled=caption_enabled
-            )
-
-            try:
-                if is_audio:
-                    media_obj = InputMediaAudio(
-                        media=file_id,
-                        caption=caption,
-                        parse_mode="HTML" if caption else None,
-                        title=(res.get("title") if res else (cached.get("title") if cached else "")),
-                        performer=(res.get("performer") if res else (cached.get("author") if cached else "")),
-                        duration=int(res.get("duration", 0)) if res else 0
-                    )
-                elif is_photo:
-                    media_obj = InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
-                else:
-                    media_obj = InputMediaVideo(media=file_id, caption=caption, parse_mode="HTML" if caption else None, supports_streaming=True)
-                try:
-                    await bot.edit_message_media(
-                        inline_message_id=inline_message_id,
-                        media=media_obj,
-                        reply_markup=None
-                    )
-                except Exception as emm_err:
-                    if hasattr(emm_err, "retry_after"):
-                        await asyncio.sleep(getattr(emm_err, "retry_after") + 0.2)
-                        await bot.edit_message_media(
-                            inline_message_id=inline_message_id,
-                            media=media_obj,
-                            reply_markup=None
-                        )
-                    else:
-                        raise emm_err
-                logging.info(f"Successfully replaced inline message {inline_message_id} with media!")
-            except Exception as edit_err:
-                logging.error(f"Failed to edit_message_media: {edit_err}")
-    finally:
-        _active_inline_jobs.discard(job_key)
-
-
-@dp.chosen_inline_result()
-async def handle_chosen_inline_result(chosen: ChosenInlineResult):
-    """
-    Срабатывает сразу после того, как пользователь нажал на кнопку в инлайне.
-    Бот скачивает видео, загружает его в Telegram и подменяет текстовую плашку
-    'Загружаю видео...' на готовое чистое видео!
-    """
-    if not chosen.inline_message_id:
-        return
-
-    rid = chosen.result_id
-    if rid.startswith("art_v4_"):
-        parts = rid.split("_")
-        token = parts[2]
-    else:
-        token = rid.replace("ytv2_", "").replace("tok_", "").strip()
-    await execute_inline_delivery(chosen.inline_message_id, token, chosen.from_user.id)
-
-
-@dp.callback_query(F.data.startswith("get_vid:"))
-async def handle_get_vid_callback(callback: CallbackQuery):
-    if not callback.inline_message_id:
-        await callback.answer()
-        return
-    token = callback.data.split(":", 1)[1]
-    await callback.answer("⏳ Скачиваю в чат...", show_alert=False)
-    await execute_inline_delivery(callback.inline_message_id, token, callback.from_user.id)
-
-
-@dp.callback_query(F.data == "noop")
-async def handle_noop_callback(callback: CallbackQuery):
-    await callback.answer("⏳ Медиа обрабатывается и появится в этом сообщении через пару секунд!", show_alert=False)
-
-
-@dp.callback_query(F.data.startswith("retry_dl:"))
-async def handle_retry_callback(callback: CallbackQuery):
-    if not callback.inline_message_id:
-        await callback.answer()
-        return
-    token = callback.data.split(":", 1)[1]
-    await callback.answer("🔄 Перезапускаю загрузку...")
-    try:
-        url = get_dl_token_url(token)
-        c_info = detect_content_info(url) if url else {}
-        p_noun = c_info.get("label", "медиа")
-        p_icon = c_info.get("icon", "⚡")
-        await bot.edit_message_text(
-            inline_message_id=callback.inline_message_id,
-            text=(
-                f"{p_icon} <b>Повторная загрузка {p_noun}...</b>\n"
-                f"<code>[██░░░░░░░░░░] 15%</code>\n"
-                f"<i>Пожалуйста, подождите ✨</i>"
-            ),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text=f"⏳ Загрузка {p_noun}...", callback_data=f"get_vid:{token}")]]
-            )
-        )
-    except Exception:
-        pass
-    await execute_inline_delivery(callback.inline_message_id, token, callback.from_user.id)
-
-
-# ==========================================
-# 🖼 ОБРАБОТЧИКИ ИНТЕРАКТИВНОГО СЛАЙДШОУ (КАРУСЕЛИ)
-# ==========================================
-
-@dp.callback_query(F.data.startswith("slide:"))
-async def handle_slide_switch_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer()
-        return
-    sid = parts[1]
-    try:
-        new_idx = int(parts[2])
-    except ValueError:
-        await callback.answer()
-        return
-
-    logging.info(f"🖼 [СЛАЙДШОУ] Переключение: sid={sid}, на слайд={new_idx}")
-
-    data = get_slideshow_session_db(sid)
-    if not data:
-        # Сессия не найдена в памяти и БД (например, старое сообщение до обновления)
-        # Добавляем кнопку прямо в сообщение для перезагрузки!
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔄 Загрузить слайды заново", callback_data=f"refresh_slide:{sid}")
-        ]])
-        try:
-            if callback.message:
-                await callback.message.edit_reply_markup(reply_markup=kb)
-            elif callback.inline_message_id:
-                await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
-        except Exception:
-            pass
-        await callback.answer("⚠️ Сессия устарела. Нажмите '🔄 Загрузить слайды заново' 👇", show_alert=True)
-        return
-
-    total = data.get("total", 1)
-    if new_idx < 0 or new_idx >= total:
-        await callback.answer()
-        return
-
-    caption = make_slide_caption(data, new_idx, total)
-    is_in = bool(callback.inline_message_id)
-    kb = build_slideshow_keyboard(sid, new_idx, total, data, is_inline=is_in)
-
-    file_ids = data.get("file_ids") or []
-    if len(file_ids) < total:
-        file_ids.extend([None] * (total - len(file_ids)))
-        data["file_ids"] = file_ids
-    photo_urls = data.get("photo_urls") or []
-    photos = data.get("photos") or []
-
-    cached_fid = file_ids[new_idx] if new_idx < len(file_ids) else None
-    photo_u = photo_urls[new_idx] if new_idx < len(photo_urls) else None
-    file_path = photos[new_idx] if new_idx < len(photos) else None
-    local_exists = bool(file_path and os.path.exists(file_path))
-
-    # Приоритет источника (исправляет HTTP 403 при смене слайда в Instagram/TikTok):
-    # 1. Telegram file_id (самый быстрый, проверенный CDN)
-    # 2. Локальный файл на диске (загружен при скачивании)
-    # 3. Прямой CDN URL фото (резерв после рестарта, если файлы уже удалены)
-    def _is_video_slide(target) -> bool:
-        return str(target or "").split("?")[0].lower().endswith((".mp4", ".mov", ".m4v"))
-
-    def _extract_msg_fid(msg) -> Optional[str]:
-        if not msg:
-            return None
-        if getattr(msg, "video", None):
-            return msg.video.file_id
-        if getattr(msg, "photo", None):
-            return msg.photo[-1].file_id
-        return None
-
-    # Если переключение в инлайне
-    if callback.inline_message_id:
-        if not cached_fid and local_exists:
-            is_vid_local = _is_video_slide(file_path)
-            uid = callback.from_user.id if callback.from_user else None
-            cached_fid = await upload_media_to_telegram(
-                file_path,
-                is_photo=not is_vid_local,
-                target_user_id=uid,
-                title=data.get("title", ""),
-                platform=data.get("platform", ""),
-            )
-            if cached_fid:
-                data["file_ids"][new_idx] = cached_fid
-                save_slideshow_session_db(sid, data)
-
-        media_target = cached_fid or photo_u
-        if not media_target:
-            await callback.answer("❌ Слайд временно недоступен.", show_alert=True)
-            return
-
-        is_vid = _is_video_slide(file_path) if local_exists else _is_video_slide(media_target)
-        media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-        try:
-            await bot.edit_message_media(
-                inline_message_id=callback.inline_message_id,
-                media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
-                reply_markup=kb
-            )
-        except Exception as in_err:
-            logging.debug(f"Inline slide edit error: {in_err}")
-        await callback.answer()
-        return
-
-    # Если переключение в личном чате или группе
-    media_target = cached_fid or (FSInputFile(file_path) if local_exists else photo_u)
-    if not media_target:
-        await callback.answer("❌ Слайд временно недоступен.", show_alert=True)
-        return
-
-    is_vid = _is_video_slide(file_path) if local_exists else _is_video_slide(media_target)
-    media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-    media_obj = media_cls(media=media_target, caption=caption, parse_mode="HTML")
-
-    try:
-        if callback.message:
-            res_msg = await callback.message.edit_media(media=media_obj, reply_markup=kb)
-            new_fid = _extract_msg_fid(res_msg)
-            if new_fid:
-                data["file_ids"][new_idx] = new_fid
-                save_slideshow_session_db(sid, data)
-        await callback.answer()
-    except Exception as e:
-        logging.warning(f"Slide edit media error: {e}")
-        # Если Telegram отклонил FSInputFile/URL в edit_media — загружаем локальный файл и подменяем по file_id
-        if local_exists and callback.message:
-            try:
-                if is_vid:
-                    tmp_sent = await bot.send_video(chat_id=callback.message.chat.id, video=FSInputFile(file_path), disable_notification=True)
-                else:
-                    tmp_sent = await bot.send_photo(chat_id=callback.message.chat.id, photo=FSInputFile(file_path), disable_notification=True)
-                new_fid = _extract_msg_fid(tmp_sent)
-                if tmp_sent:
-                    try:
-                        await tmp_sent.delete()
-                    except Exception:
-                        pass
-                if new_fid:
-                    data["file_ids"][new_idx] = new_fid
-                    save_slideshow_session_db(sid, data)
-                    await callback.message.edit_media(
-                        media=media_cls(media=new_fid, caption=caption, parse_mode="HTML"),
-                        reply_markup=kb
-                    )
-            except Exception as retry_err:
-                logging.debug(f"Slide edit media retry error: {retry_err}")
-        await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("refresh_slide:"))
-async def handle_refresh_slide_callback(callback: CallbackQuery):
-    sid = callback.data.split(":")[1] if ":" in callback.data else ""
-    await callback.answer("🔄 Проверяю сессию...", show_alert=False)
-    data = get_slideshow_session_db(sid)
-    if data:
-        total = data.get("total", 1)
-        is_in = bool(callback.inline_message_id)
-        kb = build_slideshow_keyboard(sid, 0, total, data, is_inline=is_in)
-        try:
-            if callback.message:
-                await callback.message.edit_reply_markup(reply_markup=kb)
-            elif callback.inline_message_id:
-                await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
-        except Exception:
-            pass
-    else:
-        await callback.answer("ℹ️ Отправьте ссылку заново в чат, чтобы создать новую активную сессию.", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("slide_collapse:"))
-async def handle_slide_collapse_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) < 3:
-        await callback.answer()
-        return
-    sid = parts[1]
-    try:
-        idx = int(parts[2])
-    except ValueError:
-        idx = 0
-    data = get_slideshow_session_db(sid)
-    if not data:
-        await callback.answer("Сессия слайдшоу устарела.", show_alert=False)
-        return
-    total = data.get("total", 1)
-    is_in = bool(callback.inline_message_id)
-    kb = build_slideshow_keyboard(sid, idx, total, data, is_inline=is_in, is_collapsed=True)
-    try:
-        if callback.message:
-            await callback.message.edit_reply_markup(reply_markup=kb)
-        elif callback.inline_message_id:
-            await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
-    except Exception:
-        pass
-    await callback.answer("Кнопки скрыты. Нажми «🔼 Листать слайды», чтобы вернуть.")
-
-
-@dp.callback_query(F.data.startswith("slide_expand:"))
-async def handle_slide_expand_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) < 3:
-        await callback.answer()
-        return
-    sid = parts[1]
-    try:
-        idx = int(parts[2])
-    except ValueError:
-        idx = 0
-    data = get_slideshow_session_db(sid)
-    if not data:
-        await callback.answer("Сессия слайдшоу устарела.", show_alert=False)
-        return
-    total = data.get("total", 1)
-    is_in = bool(callback.inline_message_id)
-    kb = build_slideshow_keyboard(sid, idx, total, data, is_inline=is_in, is_collapsed=False)
-    try:
-        if callback.message:
-            await callback.message.edit_reply_markup(reply_markup=kb)
-        elif callback.inline_message_id:
-            await bot.edit_message_reply_markup(inline_message_id=callback.inline_message_id, reply_markup=kb)
-    except Exception:
-        pass
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("stat:"))
-async def handle_slide_stat_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    sid = parts[1] if len(parts) > 1 else ""
-    data = _slideshow_cache.get(sid)
-    if not data:
-        await callback.answer("📊 Статистика недоступна", show_alert=False)
-        return
-    digg = data.get("digg_count", 0)
-    comm = data.get("comment_count", 0)
-    shares = data.get("share_count", 0)
-    plat = (data.get("platform") or "Публикации").capitalize()
-    alert_text = (
-        f"📊 Статистика {plat}:\n\n"
-        f"❤️ Лайков: {digg:,}\n"
-        f"💬 Комментариев: {comm:,}\n"
-    )
-    if shares > 0:
-        alert_text += f"🔄 Репостов: {shares:,}\n"
-    alert_text = alert_text.replace(",", " ")
-    await callback.answer(alert_text, show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("music:"))
-async def handle_slide_music_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    sid = parts[1] if len(parts) > 1 else ""
-    data = _slideshow_cache.get(sid)
-    if not data or not data.get("music"):
-        await callback.answer("🎵 В этом посте нет отдельной аудиодорожки.", show_alert=True)
-        return
-
-    music_url = data["music"]
-    music_info = data.get("music_info") or {}
-    m_title = (music_info.get("title") or data.get("title") or "TikTok Audio")[:80]
-    m_author = (music_info.get("author") or data.get("author") or "TikTok")[:50]
-    m_dur = int(music_info.get("duration", 0))
-
-    await callback.answer("🎵 Отправляю аудиодорожку...")
-    try:
-        import tiktok_service
-        tmp_audio = os.path.join(tempfile.gettempdir(), f"tt_music_{sid}.mp3")
-        if not os.path.exists(tmp_audio):
-            await tiktok_service.download_file_stream(music_url, tmp_audio)
-        audio_file = FSInputFile(tmp_audio)
-        target_chat = callback.message.chat.id if callback.message else callback.from_user.id
-        await bot.send_audio(
-            chat_id=target_chat,
-            audio=audio_file,
-            title=m_title,
-            performer=m_author,
-            duration=m_dur,
-            caption=f"🎵 <b>{html.escape(m_title)}</b>\n👤 {html.escape(m_author)}\n✨ <i>@duo_play_date_bot</i>",
-            parse_mode="HTML"
-        )
-        try:
-            if os.path.exists(tmp_audio):
-                os.remove(tmp_audio)
-        except Exception:
-            pass
-    except Exception as e:
-        logging.warning(f"Failed to send tiktok audio: {e}")
-        target_chat = callback.message.chat.id if callback.message else callback.from_user.id
-        try:
-            await bot.send_message(chat_id=target_chat, text=f"⚠️ Не удалось отправить аудиодорожку: {e}")
-        except Exception:
-            pass
-
-
-@dp.callback_query(F.data.startswith("album_all:"))
-async def handle_slide_album_all_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    sid = parts[1] if len(parts) > 1 else ""
-    data = _slideshow_cache.get(sid)
-    if not data or not data.get("photos"):
-        await callback.answer("⚠️ Сессия слайдшоу устарела.", show_alert=True)
-        return
-
-    photos = data["photos"]
-    await callback.answer("📥 Отправляю все слайды альбомом...")
-    plat_raw = (data.get("platform") or "Медиа").capitalize()
-    default_title = f"{plat_raw} Альбом"
-    title_esc = html.escape((data.get("title") or default_title)[:200])
-    author_raw = (data.get("author") or "")[:50]
-    author_esc = html.escape(author_raw)
-    album_caption = (
-        f"📸 <b>{title_esc}</b>\n\n"
-        f"📱 <b>Источник:</b> {plat_raw}"
-    )
-    if author_esc and author_esc.lower() not in ("tiktok", "instagram", "media", "видео"):
-        album_caption += f" | {author_esc}"
-    album_caption += (
-        f"\n🖼 <b>Всего слайдов:</b> {len(photos)}\n"
-        f"✨ <i>Скачано через @duo_play_date_bot</i>"
-    )
-
-    for chunk_start in range(0, len(photos), 10):
-        chunk = photos[chunk_start:chunk_start + 10]
-        media_group = []
-        for i, p_path in enumerate(chunk):
-            if os.path.exists(p_path):
-                p_file = FSInputFile(p_path)
-                is_vid = p_path.lower().endswith((".mp4", ".mov", ".m4v"))
-                media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-                if chunk_start == 0 and i == 0:
-                    media_group.append(media_cls(media=p_file, caption=album_caption, parse_mode="HTML"))
-                else:
-                    media_group.append(media_cls(media=p_file))
-        if media_group:
-            try:
-                target_chat = callback.message.chat.id if callback.message else callback.from_user.id
-                await bot.send_media_group(chat_id=target_chat, media=media_group)
-            except Exception as e:
-                logging.warning(f"Failed to send media group chunk: {e}")
-
-
-@dp.callback_query(F.data.startswith("slide_info:"))
-async def handle_slide_info_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) == 3:
-        await callback.answer(f"Слайд {parts[1]} из {parts[2]}", show_alert=False)
-    else:
-        await callback.answer()
-
-
-@dp.callback_query(F.data == "slide_noop")
-async def handle_slide_noop_callback(callback: CallbackQuery):
-    await callback.answer()
-
-
-# ==========================================
-# 🎵 ПОИСК И СКАЧИВАНИЕ МУЗЫКИ (/music)
-# ==========================================
-
-@dp.message(Command("music", "song", "track", "audio", "музыка", "трек", "песня"))
-async def cmd_music_search(message: types.Message, command: CommandObject = None):
-    query = (command.args or "").strip() if command else ""
-    if not query:
-        await message.answer(
-            "🎵 <b>Поиск и скачивание музыки:</b>\n\n"
-            "Напиши название трека или имя исполнителя после команды, например:\n"
-            "<code>/music Linkin Park Numb</code>\n"
-            "<code>/music Queen Bohemian Rhapsody</code>\n"
-            "<code>/music Instasamka</code>\n\n"
-            "Или просто отправь ссылку на трек из <b>Spotify</b> или <b>SoundCloud</b> прямо в чат! ✨",
-            parse_mode="HTML"
-        )
-        return
-
-    status_msg = await message.answer(
-        f"🔍 <b>Ищу треки по запросу:</b> <i>«{html.escape(query)}»</i>...\n<code>[███░░░░░░░░░] 25%</code>",
-        parse_mode="HTML"
-    )
-
-    try:
-        warp_proxy_url = None
-        if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
-            try:
-                if await warp_proxy.warp.ensure_ready(timeout=20.0):
-                    warp_proxy_url = warp_proxy.warp.proxy_url
-            except Exception:
-                pass
-
-        tracks = await music_service.search_tracks(query, limit=5, proxy_url=warp_proxy_url)
-        if not tracks and warp_proxy_url:
-            tracks = await music_service.search_tracks(query, limit=5, proxy_url=None)
-
-        if not tracks:
-            await safe_edit_status(
-                status_msg,
-                f"❌ <b>По запросу «{html.escape(query)}» ничего не найдено.</b>\n"
-                f"Попробуй изменить запрос или указать имя исполнителя."
-            )
-            return
-
-        sid = music_service.save_search_session(query, tracks)
-
-        lines = [f"🎵 <b>Результаты поиска:</b> <i>«{html.escape(query)}»</i>\n"]
-        num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-        buttons_row = []
-
-        for idx, tr in enumerate(tracks):
-            icon = num_emojis[idx] if idx < len(num_emojis) else f"[{idx+1}]"
-            t_title = html.escape(tr.get("title", "Трек"))
-            t_artist = html.escape(tr.get("artist", "Исполнитель"))
-            t_dur = tr.get("duration_str", "")
-            lines.append(f"{icon} <b>{t_title}</b> — {t_artist} <code>({t_dur})</code>")
-            buttons_row.append(
-                InlineKeyboardButton(text=icon, callback_data=f"dl_m:{sid}:{idx}")
-            )
-
-        lines.append("\n<i>Нажми на номер трека ниже, чтобы скачать 👇</i>")
-        text = "\n".join(lines)
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                buttons_row,
-                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_m:{sid}")]
-            ]
-        )
-
-        await safe_edit_status(status_msg, text, reply_markup=keyboard)
-
-    except Exception as e:
-        logging.error(f"Music search handler error: {e}")
-        await safe_edit_status(status_msg, "❌ <b>Произошла ошибка при поиске музыки.</b> Попробуйте позже.")
-
-
-@dp.callback_query(F.data.startswith("dl_m:"))
-async def handle_music_download_callback(callback: CallbackQuery):
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer()
-        return
-    sid = parts[1]
-    try:
-        idx = int(parts[2])
-    except ValueError:
-        await callback.answer()
-        return
-
-    track = music_service.get_search_track(sid, idx)
-    if not track:
-        await callback.answer("⚠️ Сессия поиска устарела. Пожалуйста, выполните поиск заново.", show_alert=True)
-        return
-
-    t_title = track.get("title", "Трек")
-    t_artist = track.get("artist", "Исполнитель")
-    await callback.answer(f"⏳ Скачиваю: {t_title[:30]}...")
-
-    status_msg = callback.message
-
-    await safe_edit_status(
-        status_msg,
-        f"🎵 <b>Скачиваю трек:</b> «{html.escape(t_title)} — {html.escape(t_artist)}»...\n"
-        f"<code>[██░░░░░░░░░░] 15%</code>\n"
-        f"🔍 Подключаюсь к аудиопотоку..."
-    )
-
-    c_info = {"label": f"трек «{t_title}»", "icon": "🎵"}
-    progress_cb = create_progress_reporter(status_msg, c_info, throttle_seconds=1.0)
-
-    uid = str(uuid.uuid4())[:8]
-    output_prefix = os.path.join(DOWNLOAD_DIR, f"music_{callback.from_user.id}_{uid}")
-
-    try:
-        warp_proxy_url = None
-        if warp_proxy and hasattr(warp_proxy, "warp") and warp_proxy.warp.enabled and warp_proxy.warp.supported:
-            try:
-                if await warp_proxy.warp.ensure_ready(timeout=20.0):
-                    warp_proxy_url = warp_proxy.warp.proxy_url
-            except Exception:
-                pass
-
-        res = await music_service.download_track(
-            track,
-            output_prefix,
-            progress_callback=progress_cb,
-            proxy_url=warp_proxy_url
-        )
-
-        if not res or not res.get("file_path") or not os.path.exists(res["file_path"]):
-            raise Exception("audio_file_missing")
-
-        await safe_edit_status(
-            status_msg,
-            f"🎵 <b>Отправляю в Telegram...</b>\n"
-            f"<code>[████████████] 100%</code>"
-        )
-
-        thumb_path = res.get("thumbnail_path")
-        thumb_file = FSInputFile(thumb_path) if (thumb_path and os.path.exists(thumb_path)) else None
-
-        caption = (
-            f"🎧 <b>{html.escape(res.get('title', 'Трек'))}</b> — {html.escape(res.get('performer', 'Исполнитель'))}\n"
-            f"✨ <i>Скачано через @duo_play_date_bot</i>"
-        )
-
-        target_chat = callback.message.chat.id if callback.message else callback.from_user.id
-        await bot.send_audio(
-            chat_id=target_chat,
-            audio=FSInputFile(res["file_path"]),
-            performer=res.get("performer"),
-            title=res.get("title"),
-            duration=res.get("duration", 0),
-            thumbnail=thumb_file,
-            caption=caption,
-            parse_mode="HTML"
-        )
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-    except Exception as dl_err:
-        logging.error(f"Error downloading selected track: {dl_err}")
-        err_msg = format_friendly_error(dl_err, platform="music")
-        await safe_edit_status(
-            status_msg,
-            f"❌ <b>Не удалось скачать аудиозапись:</b> {err_msg}"
-        )
-    finally:
-        try:
-            for f in os.listdir(DOWNLOAD_DIR):
-                if f.startswith(f"music_{callback.from_user.id}_{uid}"):
-                    p = os.path.join(DOWNLOAD_DIR, f)
-                    if os.path.exists(p):
-                        os.remove(p)
-        except Exception:
-            pass
-
-
-@dp.callback_query(F.data.startswith("cancel_m:"))
-async def handle_cancel_music_callback(callback: CallbackQuery):
-    await callback.answer("Поиск отменён")
-    try:
-        await callback.message.delete()
-    except Exception:
+    except OSError:
         pass
 
 
 # ==========================================
-# 💬 ОБРАБОТЧИК СООБЩЕНИЙ В ЛС БОТА
+# 🧩 РЕГИСТРАЦИЯ МОДУЛЬНЫХ РОУТЕРОВ И РЕЭКСПОРТЫ
 # ==========================================
-_user_active_downloads: Dict[int, int] = {}
-_user_recent_links: Dict[int, Dict[str, float]] = {}
-_user_last_msg_ts: Dict[int, float] = {}
-_user_last_download_ts: Dict[int, float] = {}
-_user_last_welcome_ts: Dict[int, float] = {}
+routers.set_app_module(sys.modules[__name__])
+routers.setup_all_routers(dp)
 
-CHATTER_WORDS = {
-    "привет", "хай", "ку", "hello", "hi", "спасибо", "спс", "спс)", "ок", "круто", 
-    "топ", "хаха", "ахах", "лол", "вай", "кайф", "норм", "класс", "ого", "ппц", 
-    "жесть", "👍", "🔥", "❤️", "😂", "ясно", "понял", "понятно", "супер", "от души"
-}
-
-def is_bot_admin(user_id: int) -> bool:
-    """
-    Fail-closed: если ADMIN_ID / ORGANIZER_CHAT_ID не заданы, админов нет вообще
-    (раньше в этом случае админом считался ЛЮБОЙ пользователь).
-    """
-    uid_str = str(user_id)
-    if ADMIN_IDS and uid_str in ADMIN_IDS:
-        return True
-    if ORGANIZER_CHAT_ID and uid_str == str(ORGANIZER_CHAT_ID):
-        return True
-    return False
-
-
-def admin_denied_text(user_id: int) -> str:
-    return (
-        "🔒 Эта команда доступна только администратору бота.\n\n"
-        f"Твой Telegram ID: <code>{user_id}</code>\n"
-        "Если бот твой — добавь <code>ADMIN_ID</code> с этим числом в Environment на Render."
-    )
-
-
-@dp.message(Command("cookies"))
-async def handle_cookies_command(message: types.Message):
-    user_id = message.from_user.id if message.from_user else 0
-    if not is_bot_admin(user_id):
-        await message.answer(admin_denied_text(user_id), parse_mode="HTML")
-        return
-
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
-    if len(parts) > 1:
-        cookie_val = parts[1].strip()
-        if "=" not in cookie_val and "%3A" in cookie_val:
-            u_id = cookie_val.split("%3A")[0]
-            cookie_val = f"sessionid={cookie_val}; ds_user_id={u_id}"
-        set_bot_setting("instagram_cookies", cookie_val)
-        os.environ["INSTAGRAM_COOKIES"] = cookie_val
-        try:
-            from downloader import setup_cookies_file
-            cf = setup_cookies_file("instagram")
-        except Exception:
-            cf = None
-
-        await message.answer(
-            "🍪 <b>Cookies Instagram успешно сохранены и активированы!</b>\n\n"
-            f"✅ Файл сессии: <code>{html.escape(str(cf or 'instagram_cookies.txt'))}</code>\n"
-            "✨ Теперь бот может скачивать ролики 18+ и закрытые посты без ограничений.\n\n"
-            "<i>Чтобы удалить куки:</i> <code>/del_cookies</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    from downloader import setup_cookies_file
-    active_file = setup_cookies_file("instagram")
-    db_val = get_bot_setting("instagram_cookies", "")
-
-    if active_file or db_val or os.environ.get("INSTAGRAM_COOKIES"):
-        src = "База данных бота" if db_val else ("Переменные окружения" if os.environ.get("INSTAGRAM_COOKIES") else "Файл на диске")
-        await message.answer(
-            f"🍪 <b>Статус Cookies Instagram:</b>\n"
-            f"✅ <b>Активны</b> (Источник: {src})\n"
-            f"📁 Файл: <code>{html.escape(str(active_file or 'instagram_cookies.txt'))}</code>\n\n"
-            f"💡 <b>Как обновить:</b>\n"
-            f"1. Отправь: <code>/cookies sessionid=...; ds_user_id=...</code>\n"
-            f"2. Или просто скинь текстовый файл <code>cookies.txt</code> сюда в чат с подписью <code>/cookies</code>\n\n"
-            f"❌ <i>Удалить:</i> <code>/del_cookies</code>",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(
-            "🍪 <b>Статус Cookies Instagram:</b>\n"
-            "⚠️ <b>Не установлены</b> (ролики 18+ могут блокироваться Instagram)\n\n"
-            "💡 <b>Как легко добавить куки без личного аккаунта:</b>\n"
-            "1. Зарегистрируй любой пустой аккаунт в браузере (в режиме Инкогнито на временную почту, возраст 18+).\n"
-            "2. Скопируй строку куки (<code>sessionid=...; ds_user_id=...</code>) или экспортируй файл <code>cookies.txt</code>.\n"
-            "3. Отправь мне команду:\n"
-            "<code>/cookies sessionid=ВАШ_SESSION_ID; ds_user_id=ВАШ_ID</code>\n"
-            "или просто скинь файл <code>cookies.txt</code> сюда в чат!",
-            parse_mode="HTML"
-        )
-
-
-@dp.message(Command("del_cookies"))
-async def handle_del_cookies_command(message: types.Message):
-    user_id = message.from_user.id if message.from_user else 0
-    if not is_bot_admin(user_id):
-        await message.answer(admin_denied_text(user_id), parse_mode="HTML")
-        return
-
-    set_bot_setting("instagram_cookies", "")
-    os.environ.pop("INSTAGRAM_COOKIES", None)
-    base_dir = os.path.dirname(__file__)
-    for fn in ("instagram_cookies.txt", "cookies.txt"):
-        p = os.path.join(base_dir, fn)
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except Exception:
-            pass
-    await message.answer("🗑 <b>Cookies Instagram удалены.</b> Бот снова работает в чистом гостевом режиме.", parse_mode="HTML")
-
-
-@dp.message(F.document)
-async def handle_cookies_document(message: types.Message):
-    doc = message.document
-    if not doc:
-        return
-    caption = (message.caption or "").strip()
-    fn = (doc.file_name or "").lower()
-    user_id = message.from_user.id if message.from_user else 0
-
-    if not is_bot_admin(user_id):
-        return
-
-    if caption.startswith("/cookies") or "cookie" in fn:
-        if doc.file_size and doc.file_size > 512 * 1024:
-            await message.answer("⚠️ Файл слишком большой для файла cookies (лимит 512 КБ).")
-            return
-        try:
-            file_info = await bot.get_file(doc.file_id)
-            dest = os.path.join(os.path.dirname(__file__), "instagram_cookies.txt")
-            await bot.download_file(file_info.file_path, dest)
-            with open(dest, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            set_bot_setting("instagram_cookies", content)
-            os.environ["INSTAGRAM_COOKIES"] = content
-            await message.answer(
-                "🍪 <b>Файл cookies успешно загружен и сохранен!</b>\n\n"
-                f"✅ Сохранено в <code>instagram_cookies.txt</code> ({round(len(content)/1024, 1)} КБ).\n"
-                "✨ Теперь ролики 18+ и закрытые посты будут скачиваться с этой сессией.",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await message.answer(f"❌ Ошибка сохранения cookies: {e}")
-
-
-@dp.message(F.text | F.caption)
-async def handle_text_messages(message: types.Message):
-    # Проверяем наличие ссылок на видео как в тексте, так и в подписи (при пересылке/шеринге)
-    raw_text = message.text or message.caption or ""
-    user_id = message.from_user.id if message.from_user else 0
-    u_name = (message.from_user.username or message.from_user.first_name or "no_user") if message.from_user else "unknown"
-    logging.info(f"📩 [ЛС от {user_id} (@{u_name})]: {raw_text[:120]}")
-
-    now = time.time()
-    media_urls = extract_all_media_urls(raw_text)
-
-    if media_urls:
-        # Берём только ПЕРВУЮ уникальную ссылку (не качаем кучу ссылок разом и не устраиваем спам)
-        url = media_urls[0]
-        clean_u = url.split("?")[0].strip().rstrip("/")
-
-        # 1. Защита от дубликатов: проверяем, не скачивал ли пользователь эту же ссылку за последние 60 сек
-        user_links = _user_recent_links.setdefault(user_id, {})
-        for k in list(user_links.keys()):
-            if now - user_links[k] > 300:
-                user_links.pop(k, None)
-
-        if clean_u in user_links and (now - user_links[clean_u] < 60):
-            logging.info(f"⏭ [ДУБЛИКАТ] Пропускаю повторную ссылку от {user_id}: {clean_u}")
-            return
-
-        # 2. Защита от спама ссылками подряд (если у пользователя уже идёт активное скачивание)
-        if _user_active_downloads.get(user_id, 0) >= 1:
-            if now - _user_last_msg_ts.get(user_id, 0) < 5:
-                logging.info(f"⏭ [ОЧЕРЕДЬ] Пропускаю ссылку подряд от {user_id} (загрузка уже в процессе): {clean_u}")
-                return
-
-        _user_last_msg_ts[user_id] = now
-        _user_recent_links[user_id][clean_u] = now
-        _user_last_download_ts[user_id] = now
-
-        _user_active_downloads[user_id] = _user_active_downloads.get(user_id, 0) + 1
-        try:
-            await process_video_download(message, url)
-        finally:
-            _user_active_downloads[user_id] = max(0, _user_active_downloads.get(user_id, 0) - 1)
-        return
-
-    # Если в сообщении нет ссылок на медиа:
-    # 1. Если пользователь активно скачивал видео в последние 15 минут — не спамим приветствием на каждый текст!
-    if now - _user_last_download_ts.get(user_id, 0) < 900:
-        logging.info(f"ℹ️ Текст в активной сессии от {user_id}: '{raw_text[:50]}' (без спама)")
-        return
-
-    # 2. Если это короткий чаттер или реакция ("спасибо", "круто", "👍" и т.п.) — не спамим приветствием!
-    text_strip = raw_text.strip().lower()
-    if text_strip in CHATTER_WORDS or len(text_strip) <= 6:
-        logging.info(f"ℹ️ Чаттер от {user_id}: '{text_strip}' (без спама)")
-        return
-
-    # 3. Не отправляем приветствие чаще одного раза в 12 часов одному пользователю
-    if now - _user_last_welcome_ts.get(user_id, 0) < 43200:
-        logging.info(f"ℹ️ Приветствие уже отправлялось {user_id} недавно, пропускаю")
-        return
-
-    _user_last_welcome_ts[user_id] = now
-    app_link = get_app_url()
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🎮 Открыть лобби DUO ✨",
-                    web_app=WebAppInfo(url=app_link)
-                )
-            ]
-        ]
-    )
-    await message.answer(
-        "👾 **Я умею две вещи:**\n\n"
-        "1. 📥 **Скачивать видео без водяных знаков и рекламы** — просто отправь мне ссылку на **TikTok, YouTube Shorts или Instagram Reels**!\n\n"
-        "2. 🎮 **Организовывать совместные игры в DUO** — открой лобби по кнопке ниже и пригласи напарника в пару кликов!",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
+# Реэкспорт функций модулей для обратной совместимости (тесты и прямые импорты)
+from routers.admin import (  # noqa: E402
+    is_bot_admin,
+    admin_denied_text,
+    verify_telegram_init_data,
+    debug_api_allowed as _debug_api_allowed,
+    handle_cookies_command,
+    handle_del_cookies_command,
+    handle_cookies_document,
+)
+from routers.slideshow import (  # noqa: E402
+    expire_slideshow_session as _expire_slideshow_session,
+    preupload_slideshow_file_ids as _preupload_slideshow_file_ids,
+    make_slide_caption,
+    build_slideshow_keyboard,
+    handle_slide_switch_callback,
+    handle_refresh_slide_callback,
+    handle_slide_collapse_callback,
+    handle_slide_expand_callback,
+    handle_slide_stat_callback,
+    handle_slide_music_callback,
+    handle_slide_album_all_callback,
+    handle_slide_info_callback,
+    handle_slide_noop_callback,
+)
+from routers.music import (  # noqa: E402
+    handle_btn_music_search,
+    cmd_music_search,
+    handle_music_download_callback,
+    handle_cancel_music_callback,
+)
+from routers.inline import (  # noqa: E402
+    make_inline_caption,
+    execute_inline_delivery,
+    inline_query_handler,
+    handle_chosen_inline_result,
+    handle_get_vid_callback,
+    handle_noop_callback,
+    handle_retry_callback,
+    _active_inline_jobs,
+)
+from routers.downloads import (  # noqa: E402
+    format_friendly_error,
+    process_video_download,
+    handle_text_messages,
+    CHATTER_WORDS,
+)
+from routers.webapp_api import (  # noqa: E402
+    cmd_start,
+    get_settings_keyboard,
+    get_settings_text,
+    cmd_settings,
+    handle_open_settings,
+    callback_toggle_caption,
+    callback_toggle_pm,
+    handle_accept,
+    handle_later,
+    handle_decline,
+    expire_stream_file as _expire_stream_file,
+    pre_cache_video_to_disk,
+    handle_stream_video,
+    handle_health,
+    handle_api_warp,
+    handle_api_check_user,
+    handle_api_send_invite,
+    handle_api_logs,
+    handle_api_test_dl,
+    create_web_app,
+)
 
 
 # ==========================================
-# 🌐 ВСТРОЕННЫЙ HTTP API ДЛЯ САЙТА (MINI APP)
+# 🔄 ФОНОВЫЕ СЕРВИСЫ И ТОЧКА ВХОДА
 # ==========================================
-async def handle_health(request):
-    warp_status = warp_proxy.warp.status()
-    return web.json_response({
-        "status": "ok",
-        "app": "DUO 24/7 Bot Server",
-        "bot_configured": bool(bot),
-        "mode": "webhook" if USE_WEBHOOK else "polling",
-        "webhook_url": f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if USE_WEBHOOK else None,
-        "warp_enabled": warp_status["enabled"],
-        "warp_ready": warp_status["ready"],
-    })
-
-
-async def handle_api_warp(request):
-    """Диагностика WARP: GET /api/warp (или ?check=1, чтобы поднять прокси сразу)."""
-    if request.query.get("check", "").lower() in ("1", "true", "yes", "on"):
-        try:
-            await warp_proxy.warp.ensure_ready()
-        except Exception as e:
-            logging.warning(f"WARP check failed: {e}")
-    return web.json_response(warp_proxy.warp.status())
-
-
-async def handle_api_check_user(request):
-    try:
-        username = request.query.get("username", "").strip()
-        if not username:
-            return web.json_response({"found": False, "error": "empty_username"})
-        user = find_user_by_username(username)
-        if user:
-            return web.json_response({
-                "found": True,
-                "user_id": user[0],
-                "first_name": user[1]
-            })
-        return web.json_response({"found": False})
-    except Exception as e:
-        return web.json_response({"found": False, "error": str(e)}, status=500)
-
-
-async def handle_api_send_invite(request):
-    try:
-        data = await request.json()
-        sender_id = data.get("sender_id")
-        sender_name = data.get("sender_name", "Тиммейт")
-        sender_username = data.get("sender_username", "")
-        recipient_username = data.get("recipient_username", "")
-        place = data.get("place", "Roblox")
-        day = data.get("day", "Сегодня")
-        time = data.get("time", "20:00")
-        vibe = data.get("vibe", "🍵 Уютный чилл")
-        duration = data.get("duration", "1-2 часа")
-        note = data.get("note", "")
-
-        # Авто-регистрация отправителя в базе (если переданы данные из Telegram)
-        if sender_id and str(sender_id) != "0":
-            try:
-                save_user(int(sender_id), sender_username, sender_name)
-            except Exception as e:
-                logging.warning(f"Error auto-saving sender: {e}")
-
-        invite_id = create_invite_record(
-            sender_id, sender_name, recipient_username, place, day, time, vibe, duration, note
-        )
-        invite_link = f"https://t.me/duo_play_date_bot?start=inv_{invite_id}"
-        app_link = get_app_url()
-
-        recipient_db = find_user_by_username(recipient_username)
-        if not recipient_db:
-            return web.json_response({
-                "success": True,
-                "delivered": False,
-                "invite_id": invite_id,
-                "invite_link": invite_link,
-                "reason": "not_in_bot",
-                "message": f"Пользователь @{recipient_username} еще не нажал /start в боте"
-            })
-
-        target_chat_id, target_first_name = recipient_db
-
-        invite_msg = (
-            f"👾 **ТЕБЯ ЗОВУТ В ИГРУ В DUO!** 🎮\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 **От кого:** {sender_name}\n"
-            f"🕹 **Игра:** {place}\n"
-            f"📅 **Время:** {day} в {time}\n"
-            f"✨ **Вайб:** {vibe}\n"
-            f"⏳ **Сколько играем:** {duration}\n"
-        )
-        if note and note != "Без записки":
-            invite_msg += f"💌 **Записка:** _{note}_\n"
-
-        invite_msg += (
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"Ты в деле? Выбери ответ ниже 👇"
-        )
-
-        reply_kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Я в деле! Погнали!",
-                        callback_data=f"accept_{sender_id or 0}_{invite_id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="⏰ Давай, но позже",
-                        callback_data=f"later_{sender_id or 0}_{invite_id}"
-                    ),
-                    InlineKeyboardButton(
-                        text="💔 Не сегодня",
-                        callback_data=f"decline_{sender_id or 0}_{invite_id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="🎮 Открыть DUO ✨",
-                        web_app=WebAppInfo(url=app_link)
-                    )
-                ]
-            ]
-        )
-
-        if bot:
-            try:
-                await bot.send_message(
-                    chat_id=target_chat_id,
-                    text=invite_msg,
-                    reply_markup=reply_kb,
-                    parse_mode="Markdown"
-                )
-                return web.json_response({
-                    "success": True,
-                    "delivered": True,
-                    "invite_id": invite_id,
-                    "invite_link": invite_link,
-                    "recipient_name": target_first_name
-                })
-            except Exception as send_err:
-                logging.warning(f"Failed to send bot message to {target_chat_id}: {send_err}")
-                return web.json_response({
-                    "success": True,
-                    "delivered": False,
-                    "invite_id": invite_id,
-                    "invite_link": invite_link,
-                    "reason": "forbidden",
-                    "message": f"Telegram не разрешил отправить сообщение: {send_err}"
-                })
-        else:
-            return web.json_response({
-                "success": True,
-                "delivered": False,
-                "invite_id": invite_id,
-                "invite_link": invite_link,
-                "reason": "no_bot",
-                "message": "Бот не настроен на сервере"
-            })
-
-    except Exception as e:
-        logging.error(f"Error in api_send_invite: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
-
-
-DEBUG_API_KEY = os.getenv("DEBUG_API_KEY", "").strip()
-
-
-def _debug_api_allowed(request) -> bool:
-    """
-    /api/logs и /api/test_dl раньше были открыты всему интернету:
-    любой мог запустить тяжёлое скачивание (мимо семафоров) и уронить 512 МБ,
-    а также читать ссылки из логов ошибок. Теперь нужен ?key=DEBUG_API_KEY.
-    """
-    if not DEBUG_API_KEY:
-        return False
-    import hmac
-    return hmac.compare_digest(request.query.get("key", ""), DEBUG_API_KEY)
-
-
-async def handle_api_logs(request):
-    if not _debug_api_allowed(request):
-        return web.json_response({"error": "forbidden"}, status=403)
-    return web.json_response({
-        "status": "ok",
-        "recent_errors": recent_errors,
-        "ffmpeg_path": str(FFMPEG_PATH),
-        "ffmpeg_exists": os.path.exists(FFMPEG_PATH) if FFMPEG_PATH else False,
-        "system_ffmpeg": shutil.which("ffmpeg"),
-        "warp": warp_proxy.warp.status(),
-    })
-
-
-async def handle_api_test_dl(request):
-    if not _debug_api_allowed(request):
-        return web.json_response({"error": "forbidden"}, status=403)
-    url = request.query.get("url", "").strip()
-    if not url:
-        return web.json_response({"error": "missing url query parameter"})
-    fp = None
-    try:
-        res = await download_video(url, 9999)
-        fp = res.get("file_path")
-        sz = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
-        return web.json_response({
-            "status": "success",
-            "title": res.get("title"),
-            "platform": res.get("platform"),
-            "size_bytes": sz,
-            "warp": warp_proxy.warp.status(),
-        })
-    except Exception as e:
-        import traceback
-        return web.json_response({
-            "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "warp": warp_proxy.warp.status(),
-        }, status=500)
-    finally:
-        # Не оставляем тестовые файлы на диске Render.
-        if fp and os.path.exists(fp):
-            try:
-                os.remove(fp)
-            except OSError:
-                pass
-
-
-def create_web_app():
-    app = web.Application()
-
-    @web.middleware
-    async def cors_middleware(request, handler):
-        if request.method == "OPTIONS":
-            resp = web.Response(status=200)
-        else:
-            try:
-                resp = await handler(request)
-            except web.HTTPException as ex:
-                resp = ex
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        return resp
-
-    app.middlewares.append(cors_middleware)
-    app.router.add_get("/", handle_health)
-    app.router.add_get("/health", handle_health)
-    app.router.add_get("/stream/{media_key}", handle_stream_video)
-    app.router.add_get("/api/logs", handle_api_logs)
-    app.router.add_get("/api/warp", handle_api_warp)
-    app.router.add_get("/api/test_dl", handle_api_test_dl)
-    app.router.add_get("/api/check_user", handle_api_check_user)
-    app.router.add_post("/api/send_invite", handle_api_send_invite)
-
-    # Если включен режим Webhook и бот инициализирован — регистрируем aiogram webhook handler
-    if bot and USE_WEBHOOK:
-        webhook_requests_handler = SimpleRequestHandler(
-            dispatcher=dp,
-            bot=bot,
-            handle_in_background=True,
-            secret_token=WEBHOOK_SECRET,
-        )
-        webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-        setup_application(app, dp, bot=bot)
-        logging.info(f"🔗 Aiogram SimpleRequestHandler зарегистрирован на {WEBHOOK_PATH}")
-
-    return app
-
-
 async def warm_up_warp():
-    """Фоновая подготовка WARP, чтобы первое YouTube-видео не ждало 5-10 сек."""
     status = warp_proxy.warp.status()
     if not status["enabled"]:
         logging.info("WARP отключён (WARP_ENABLED=false)")
@@ -4140,13 +693,7 @@ async def warm_up_warp():
 
 
 async def storage_janitor(interval_seconds: int = 900, max_age_seconds: int = 2 * 60 * 60):
-    """
-    Фоновая уборка (бот работает 24/7 благодаря keep_alive_ping, поэтому
-    «уборка раз за жизнь процесса» в downloader никогда не повторялась):
-    - выгружает из RAM старые сессии слайдшоу (они остаются в SQLite и
-      восстанавливаются по file_ids / photo_urls при перелистывании);
-    - удаляет файлы старше max_age_seconds из temp_downloads.
-    """
+    """Фоновая уборка temp_downloads, RAM-кэша слайдшоу и старых записей SQLite."""
     await asyncio.sleep(120)
     while True:
         try:
@@ -4172,46 +719,37 @@ async def storage_janitor(interval_seconds: int = 900, max_age_seconds: int = 2 
                         removed += 1
                 except OSError:
                     pass
-            if removed or stale_sids:
+
+            pruned = await db.run_db(db.cleanup_old_db_records, DB_PATH)
+            pruned_total = sum(pruned.values()) if isinstance(pruned, dict) else 0
+            if removed or stale_sids or pruned_total:
                 logging.info(
                     f"🧹 Janitor: удалено файлов {removed} ({freed / 1048576:.1f} МБ), "
-                    f"выгружено слайдшоу из RAM: {len(stale_sids)}"
+                    f"выгружено слайдшоу из RAM: {len(stale_sids)}, очищено в БД: {pruned}"
                 )
         except Exception as e:
             logging.warning(f"storage_janitor error: {e}")
         await asyncio.sleep(interval_seconds)
 
 
-def _safe_remove(path: Optional[str]):
-    """Удаляет временный файл после успешной отправки в Telegram (file_id уже в кэше)."""
-    if not path:
-        return
-    try:
-        if os.path.isfile(path):
-            os.remove(path)
-    except OSError:
-        pass
-
-
 async def keep_alive_ping():
-    """
-    Каждые 9 минут отправляет внешний HTTP GET запрос на свой собственный /health endpoint.
-    Это сбрасывает 15-минутный счетчик неактивности Render и не даёт серверу уснуть (24/7 бодрствование).
-    """
-    await asyncio.sleep(45)  # ждем полного старта сервера
+    """Каждые 9 минут отправляет HTTP GET на /health через общий пул соединений."""
+    await asyncio.sleep(45)
     target_url = f"{RENDER_EXTERNAL_URL}/health"
     logging.info(f"🔄 Фоновый анти-сон запущен: цель {target_url}")
     while True:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    logging.info(f"⏰ Anti-sleep keepalive: HTTP {resp.status}")
+            session = await http_pool.get_http_session()
+            async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                logging.info(f"⏰ Anti-sleep keepalive: HTTP {resp.status}")
         except Exception as e:
             logging.debug(f"Anti-sleep ping error: {e}")
-        await asyncio.sleep(540)  # каждые 9 минут (Render засыпает через 15)
+        await asyncio.sleep(540)
 
 
 async def main():
+    from aiohttp import web
+
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("⚠️ ВНИМАНИЕ: BOT_TOKEN не указан в .env файле!")
         print("Пожалуйста, получи токен у @BotFather и пропиши BOT_TOKEN=твой_токен")
@@ -4223,71 +761,62 @@ async def main():
     await site.start()
     logging.info(f"🌐 HTTP API запущен на порту {PORT}")
 
-    # Запускаем фоновый пингер анти-сна
-    asyncio.create_task(keep_alive_ping())
-
-    # Фоновая уборка временных файлов и RAM-кэша слайдшоу
-    asyncio.create_task(storage_janitor())
-
-    # Заранее поднимаем WARP для YouTube (не блокирует polling бота)
+    keepalive_task = asyncio.create_task(keep_alive_ping())
+    janitor_task = asyncio.create_task(storage_janitor())
     asyncio.create_task(warm_up_warp())
 
-    if bot:
-        try:
-            await bot.set_my_commands([
-                types.BotCommand(command="start", description="Главное меню и игры в DUO"),
-                types.BotCommand(command="music", description="Поиск и скачивание треков (Spotify/MP3)"),
-                types.BotCommand(command="settings", description="Настройки подписи медиа"),
-            ])
-        except Exception as cmd_err:
-            logging.debug(f"set_my_commands notice: {cmd_err}")
-
-        if USE_WEBHOOK:
-            webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
-            logging.info(f"🌐 Режим WEBHOOK активирован. Целевой URL: {webhook_url}")
+    try:
+        if bot:
             try:
-                info = await bot.get_webhook_info()
-                if info.url != webhook_url:
-                    await bot.set_webhook(
-                        url=webhook_url,
-                        allowed_updates=dp.resolve_used_update_types(),
-                        drop_pending_updates=False,
-                        secret_token=WEBHOOK_SECRET,
-                    )
-                    logging.info(f"✅ Webhook успешно установлен: {webhook_url}")
-                else:
-                    logging.info(f"✅ Webhook уже активен: {webhook_url}")
-            except Exception as e:
-                logging.error(f"❌ Не удалось установить Webhook: {e}")
-                record_error("webhook_setup", e)
+                await bot.set_my_commands([
+                    types.BotCommand(command="start", description="Главное меню и игры в DUO"),
+                    types.BotCommand(command="music", description="Поиск и скачивание треков (Spotify/MP3)"),
+                    types.BotCommand(command="settings", description="Настройки подписи медиа"),
+                ])
+            except Exception as cmd_err:
+                logging.debug(f"set_my_commands notice: {cmd_err}")
 
-            logging.info("🤖 Бот слушает Telegram через Webhook (24/7)...")
-            try:
+            if USE_WEBHOOK:
+                webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+                logging.info(f"🌐 Режим WEBHOOK активирован. Целевой URL: {webhook_url}")
+                try:
+                    info = await bot.get_webhook_info()
+                    if info.url != webhook_url:
+                        await bot.set_webhook(
+                            url=webhook_url,
+                            allowed_updates=dp.resolve_used_update_types(),
+                            drop_pending_updates=False,
+                            secret_token=WEBHOOK_SECRET,
+                        )
+                        logging.info(f"✅ Webhook успешно установлен: {webhook_url}")
+                    else:
+                        logging.info(f"✅ Webhook уже активен: {webhook_url}")
+                except Exception as e:
+                    logging.error(f"❌ Не удалось установить Webhook: {e}")
+                    record_error("webhook_setup", e)
+
+                logging.info("🤖 Бот слушает Telegram через Webhook (24/7)...")
                 while True:
                     await asyncio.sleep(3600)
-            finally:
-                await runner.cleanup()
-                await bot.session.close()
-        else:
-            try:
-                await bot.delete_webhook(drop_pending_updates=False)
-                logging.info("🧹 Webhook снят для работы в режиме Polling")
-            except Exception as e:
-                logging.debug(f"delete_webhook error: {e}")
-            logging.info("🤖 Бот запущен в режиме Polling (локально)...")
-            try:
+            else:
+                try:
+                    await bot.delete_webhook(drop_pending_updates=False)
+                    logging.info("🧹 Webhook снят для работы в режиме Polling")
+                except Exception as e:
+                    logging.debug(f"delete_webhook error: {e}")
+                logging.info("🤖 Бот запущен в режиме Polling (локально)...")
                 await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-            finally:
-                await runner.cleanup()
-                await bot.session.close()
-    else:
-        logging.warning("⚠️ Бот не запущен, так как нет BOT_TOKEN. HTTP сервер работает.")
-        try:
+        else:
+            logging.warning("⚠️ Бот не запущен, так как нет BOT_TOKEN. HTTP сервер работает.")
             while True:
                 await asyncio.sleep(3600)
-        finally:
-            await runner.cleanup()
-
+    finally:
+        for t in (keepalive_task, janitor_task):
+            t.cancel()
+        await http_pool.close_http_session()
+        await runner.cleanup()
+        if bot:
+            await bot.session.close()
 
 
 if __name__ == "__main__":
