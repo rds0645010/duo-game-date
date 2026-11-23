@@ -9,9 +9,9 @@ import http_pool
 
 logger = logging.getLogger("instagram_service")
 
-# Regex для Instagram (Reels, Posts, Stories/Share, TV)
+# Regex для Instagram (Reels, Posts, Stories/Share, TV, профильные /username/reel/...)
 INSTAGRAM_REGEX = re.compile(
-    r'https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/(?:reel|reels|p|tv|share/(?:reel|p))/[^\s]+'
+    r'https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/(?:(?:[A-Za-z0-9._]+/)?(?:reel|reels|p|tv)|share(?:/(?:reel|p))?)/[^\s]+'
 )
 
 INSTAGRAM_HEIGHTS = [1280, 720, 480]
@@ -89,12 +89,138 @@ patch_instagram_music_extraction()
 
 
 def is_reel_url(url: str) -> bool:
-    return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
+    return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:[A-Za-z0-9._]+/)?(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
 
 
 def extract_shortcode(url: str) -> Optional[str]:
-    m = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', url or "")
+    m = re.search(r'(?:instagram\.com|instagr\.am)/(?:[A-Za-z0-9._]+/)?(?:reel|p|reels|tv)/([A-Za-z0-9_-]+)', url or "")
     return m.group(1) if m else None
+
+
+async def _resolve_instagram_share_url(url: str, proxy: Optional[str] = None) -> str:
+    """Разворачивает /share/... ссылки Instagram через редирект до канонического /reel/ или /p/ URL."""
+    if "/share/" not in (url or "").lower():
+        return url
+    attempts = [None]
+    if proxy and proxy not in attempts:
+        attempts.append(proxy)
+    try:
+        session = await http_pool.get_http_session()
+        for p in attempts:
+            try:
+                async with session.get(
+                    url,
+                    allow_redirects=True,
+                    headers=EMBED_HEADERS,
+                    proxy=p,
+                    timeout=aiohttp.ClientTimeout(total=5.0),
+                ) as resp:
+                    target = str(resp.url)
+                    if extract_shortcode(target):
+                        clean = target.split("?")[0]
+                        logger.info(f"🔗 [Instagram] Развернута share-ссылка: {url} -> {clean}")
+                        return clean
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"Instagram share resolve error: {e}")
+    return url
+
+
+def _clean_ig_url(raw: str) -> str:
+    import html as py_html
+    cleaned = py_html.unescape(str(raw or ""))
+    cleaned = (
+        cleaned.replace("\\\\/", "/")
+        .replace("\\/", "/")
+        .replace("\\\\u0026", "&")
+        .replace("\\u0026", "&")
+        .replace("\\u0025", "%")
+        .replace("\\u003d", "=")
+        .replace("\\u003f", "?")
+        .rstrip("\\")
+        .strip()
+    )
+    return cleaned
+
+
+def _extract_embed_video_urls(html_text: str) -> List[str]:
+    """Извлекает прямые MP4/видео URL из HTML embed-страницы (включая экранированный JSON)."""
+    if not html_text:
+        return []
+    unescaped = html_text.replace('\\\\"', '"').replace('\\"', '"')
+    candidates = []
+    for text_var in (html_text, unescaped):
+        for pat in (
+            r'"video_url"\s*:\s*"([^"]+)"',
+            r'"playable_url"\s*:\s*"([^"]+)"',
+            r'"playback_url"\s*:\s*"([^"]+)"',
+            r'video_url&quot;:&quot;([^&]+)&quot;',
+            r'<(?:video|source)[^>]+src="(https://[^"]+?\.mp4[^"]*)"',
+        ):
+            candidates.extend(re.findall(pat, text_var))
+        for arr in re.findall(r'"video_versions"\s*:\s*\[(.*?)\]', text_var, re.S):
+            candidates.extend(re.findall(r'"url"\s*:\s*"([^"]+)"', arr))
+
+    result = []
+    seen = set()
+    for u in candidates:
+        cleaned = _clean_ig_url(u)
+        if not cleaned.startswith(("http://", "https://")):
+            continue
+        base_lower = cleaned.split("?")[0].lower()
+        if base_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            continue
+        if cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+    return result
+
+
+def _extract_embed_image_urls(html_text: str) -> List[str]:
+    """Извлекает только контентные изображения публикации, отсекая аватарки и статику."""
+    if not html_text:
+        return []
+    unescaped = html_text.replace('\\\\"', '"').replace('\\"', '"')
+    raw_imgs = []
+    for text_var in (html_text, unescaped):
+        raw_imgs.extend(re.findall(r'"display_url"\s*:\s*"([^"]+)"', text_var))
+        raw_imgs.extend(re.findall(r'<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)"', text_var))
+        raw_imgs.extend(re.findall(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', text_var))
+
+    result = []
+    seen_bases = set()
+    for u in raw_imgs:
+        cleaned = _clean_ig_url(u)
+        if not cleaned.startswith(("http://", "https://")):
+            continue
+        low = cleaned.lower()
+        if any(bad in low for bad in ("t51.2885-19", "s150x150", "s320x320", "profile_pic", "static.cdninstagram.com", "/rsrc.php/", "instagram.com/static/")):
+            continue
+        base = cleaned.split("?")[0]
+        if base not in seen_bases:
+            seen_bases.add(base)
+            result.append(cleaned)
+    return result
+
+
+def _embed_html_looks_like_video(html_text: str) -> bool:
+    if not html_text:
+        return False
+    unescaped = html_text.replace('\\\\"', '"').replace('\\"', '"')
+    if '"GraphSidecar"' in unescaped:
+        return False
+    return any(
+        marker in unescaped
+        for marker in (
+            '"is_video":true',
+            '"__typename":"GraphVideo"',
+            '"product_type":"clips"',
+            '"media_type":2',
+            "EmbeddedMediaVideo",
+            "<video ",
+        )
+    )
 
 
 async def parse_instagram_embed(url: str) -> Optional[Dict[str, Any]]:
@@ -146,13 +272,11 @@ async def parse_instagram_embed(url: str) -> Optional[Dict[str, Any]]:
                     m_inf = {"title": m_track, "author": m_artist or ""} if m_track else None
 
                     # Прямое видео
-                    video_matches = re.findall(r'"video_url":\s*"([^"]+)"', text)
+                    video_matches = _extract_embed_video_urls(text)
                     if video_matches:
-                        v_url = py_html.unescape(video_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
-                        thumb = ""
-                        disp_matches = re.findall(r'"display_url":\s*"([^"]+)"', text)
-                        if disp_matches:
-                            thumb = py_html.unescape(disp_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
+                        v_url = video_matches[0]
+                        disp_matches = _extract_embed_image_urls(text)
+                        thumb = disp_matches[0] if disp_matches else f"https://www.instagram.com/p/{shortcode}/media/?size=l"
                         return {
                             "success": True,
                             "platform": "instagram",
@@ -160,20 +284,19 @@ async def parse_instagram_embed(url: str) -> Optional[Dict[str, Any]]:
                             "video_url": v_url,
                             "title": title or "Instagram Reels",
                             "author": author or "Instagram",
-                            "thumbnail": thumb or f"https://www.instagram.com/p/{shortcode}/media/?size=l",
+                            "thumbnail": thumb,
                             "music": m_track,
                             "music_info": m_inf
                         }
 
+                    if _embed_html_looks_like_video(text):
+                        return None
+
                     # Прямое фото (только для обычных фотопостов, не для Reels)
-                    photo_matches = re.findall(r'"display_url":\s*"([^"]+)"', text)
-                    if not photo_matches:
-                        photo_matches = re.findall(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', text)
-                    if not photo_matches:
-                        photo_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', text)
+                    photo_matches = _extract_embed_image_urls(text)
 
                     if photo_matches and not is_reel:
-                        p_url = py_html.unescape(photo_matches[0]).replace("\\/", "/").replace("\\u0026", "&")
+                        p_url = photo_matches[0]
                         return {
                             "success": True,
                             "platform": "instagram",
@@ -267,7 +390,8 @@ async def _download_from_instagram_meta(
     proxy_url: Optional[str],
     download_file_func,
     is_valid_mp4_func = None,
-    progress_callback = None
+    progress_callback = None,
+    allow_photo: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
     Скачивает слайды карусели, фото или видео на основе структуры метаданных yt-dlp.
@@ -279,6 +403,15 @@ async def _download_from_instagram_meta(
     """
     if not info:
         return None
+
+    info_is_video = bool(
+        info.get("duration")
+        or info.get("video_url")
+        or info.get("is_video")
+        or info.get("media_type") == 2
+        or str(info.get("product_type") or "").lower() in ("clips", "igtv", "feed_video")
+        or "video" in str(info.get("__typename") or "").lower()
+    )
 
     title = info.get("description") or info.get("title") or "Instagram Публикация"
     author = info.get("uploader") or info.get("channel") or "Instagram"
@@ -323,10 +456,11 @@ async def _download_from_instagram_meta(
             if not item:
                 return
             try:
-                # Если в слайде есть видео
+                # Если в слайде есть видео (предпочитаем muxed со звуком)
                 v_formats = [f for f in item.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
                 if v_formats:
-                    best_v = max(v_formats, key=lambda f: f.get("height") or 0)
+                    muxed_v = [f for f in v_formats if f.get("acodec") not in (None, "none")]
+                    best_v = max(muxed_v or v_formats, key=lambda f: f.get("height") or 0)
                     dest = f"{output_prefix}_{idx}.mp4"
                     tmp_dest = f"{dest}.part"
                     try:
@@ -448,9 +582,9 @@ async def _download_from_instagram_meta(
                 "original_url": clean_url
             }
 
-    # 2. Сценарий: Одиночное фото
+    # 2. Сценарий: Одиночное фото (строго запрещён для видео и при allow_photo=False)
     thumbs = info.get("thumbnails", [])
-    if thumbs and not info.get("formats"):
+    if allow_photo and not info_is_video and thumbs and not info.get("formats"):
         best_t = max(thumbs, key=lambda t: (t.get("width") or 0) * (t.get("height") or 0))
         dest = f"{output_prefix}.jpg"
         try:
@@ -473,10 +607,13 @@ async def _download_from_instagram_meta(
         except Exception as dl_err:
             logger.debug(f"Instagram single photo download failed: {dl_err}")
 
-    # 3. Сценарий: Одиночное видео
+    # 3. Сценарий: Одиночное видео (только muxed со звуком; DASH без звука отдаём yt-dlp+ffmpeg)
     v_formats = [f for f in info.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
     if v_formats:
-        best_v = max(v_formats, key=lambda f: f.get("height") or 0)
+        muxed_v = [f for f in v_formats if f.get("acodec") not in (None, "none")]
+        if not muxed_v:
+            return None
+        best_v = max(muxed_v, key=lambda f: f.get("height") or 0)
         dest = f"{output_prefix}.mp4"
         try:
             await download_file_func(best_v["url"], dest, proxy=proxy_url)
@@ -520,8 +657,19 @@ async def download_instagram(
     if not output_prefix:
         import tempfile, uuid
         output_prefix = os.path.join(tempfile.gettempdir(), f"ig_{uuid.uuid4().hex[:8]}")
-    is_reel = is_reel_url(clean_url)
     loop = asyncio.get_running_loop()
+
+    warp_proxy_url = None
+    if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
+        try:
+            if await warp_proxy_module.warp.ensure_ready() and warp_proxy_module.warp.proxy_url:
+                warp_proxy_url = warp_proxy_module.warp.proxy_url
+        except Exception as e:
+            logger.warning(f"Instagram WARP init error: {e}")
+
+    # 0. Разворачиваем /share/... ссылки до канонического /reel/ или /p/
+    clean_url = await _resolve_instagram_share_url(clean_url, proxy=warp_proxy_url)
+    is_reel = is_reel_url(clean_url)
 
     cookie_file = None
     try:
@@ -531,12 +679,8 @@ async def download_instagram(
         pass
 
     strategies = []
-    if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
-        try:
-            if await warp_proxy_module.warp.ensure_ready() and warp_proxy_module.warp.proxy_url:
-                strategies.append(("warp", warp_proxy_module.warp.proxy_url))
-        except Exception as e:
-            logger.warning(f"Instagram WARP init error: {e}")
+    if warp_proxy_url:
+        strategies.append(("warp", warp_proxy_url))
     strategies.append(("direct", ""))
 
     last_error = None
@@ -549,7 +693,14 @@ async def download_instagram(
                 info = await asyncio.to_thread(_extract_instagram_metadata_sync, clean_url, strategy_proxy, cookie_file)
                 if info:
                     media_res = await _download_from_instagram_meta(
-                        info, output_prefix, clean_url, strategy_proxy, download_file_func, is_valid_mp4_func, progress_callback=progress_callback
+                        info,
+                        output_prefix,
+                        clean_url,
+                        strategy_proxy,
+                        download_file_func,
+                        is_valid_mp4_func,
+                        progress_callback=progress_callback,
+                        allow_photo=True,
                     )
                     if media_res:
                         logger.info(f"✅ [Instagram] Фото/карусель получена через {strategy_name}")
@@ -557,92 +708,113 @@ async def download_instagram(
             except Exception as e:
                 logger.debug(f"[Instagram] Metadata {strategy_name} error: {e}")
 
-    # 2. Выполняем попытку yt-dlp для видео
-    for strategy_name, strategy_proxy in strategies:
-        try:
-            socket_timeout = 8 if strategy_name == "direct" else 10
-            res = await asyncio.to_thread(
-                ytdlp_sync_func,
-                clean_url,
-                output_prefix,
-                1280,
-                platform="instagram",
-                use_cookies=True,
-                proxy_url=strategy_proxy,
-                socket_timeout=socket_timeout,
-                progress_callback=progress_callback,
-                event_loop=loop,
-            )
-        except Exception as e:
-            last_error = e
-            err_str = str(e).lower()
-            logger.warning(f"[Instagram] {strategy_name} download failed: {e}")
-            if any(k in err_str for k in [
-                "no video in this post",
-                "there is no video",
-                "requested format is not available",
-                "no video formats found",
-                "no formats found",
-                "no video could be found",
-                "there are no video formats",
-                "is not a video",
-                "no video stream"
-            ]):
-                no_video = True
-                break
-            if any(k in err_str for k in [
-                "empty media response",
-                "checkpoint_required",
-                "restricted video",
-                "not granting access"
-            ]):
-                break
-            continue
-
-        if not res or not res.get("file_path"):
-            last_error = Exception("empty download result")
-            continue
-
-        size = res.get("filesize") or 0
-        if size > 50 * 1024 * 1024:
-            logger.warning(f"[Instagram] {strategy_name}: {size / 1048576:.1f} МБ > 50 МБ, пробуем 480p")
+    async def _run_ytdlp_pass(use_cookies_flag: bool) -> Optional[Dict[str, Any]]:
+        nonlocal last_error, no_video
+        for strategy_name, strategy_proxy in strategies:
             try:
-                if os.path.exists(res["file_path"]):
-                    os.remove(res["file_path"])
+                socket_timeout = 8 if strategy_name == "direct" else 10
                 res = await asyncio.to_thread(
                     ytdlp_sync_func,
                     clean_url,
                     output_prefix,
-                    480,
+                    1280,
                     platform="instagram",
-                    use_cookies=True,
+                    use_cookies=use_cookies_flag,
                     proxy_url=strategy_proxy,
                     socket_timeout=socket_timeout,
                     progress_callback=progress_callback,
                     event_loop=loop,
                 )
-                if res and res.get("file_path") and (res.get("filesize") or 0) <= 50 * 1024 * 1024:
-                    res["platform"] = "instagram"
-                    res["low_quality_notice"] = True
-                    return res
-            except Exception as e_low:
-                logger.warning(f"[Instagram] 480p retry failed: {e_low}")
-            continue
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                logger.warning(f"[Instagram] {strategy_name} (cookies={use_cookies_flag}) download failed: {e}")
+                if not is_reel and any(k in err_str for k in [
+                    "no video in this post",
+                    "there is no video",
+                    "requested format is not available",
+                    "no video formats found",
+                    "no formats found",
+                    "no video could be found",
+                    "there are no video formats",
+                    "is not a video",
+                    "no video stream"
+                ]):
+                    no_video = True
+                    break
+                if "checkpoint_required" in err_str:
+                    break
+                continue
 
-        res["platform"] = "instagram"
-        logger.info(
-            f"✅ [Instagram] Скачано через {strategy_name} ({size / 1048576:.1f} МБ)"
-        )
-        return res
+            if not res or not res.get("file_path"):
+                last_error = Exception("empty download result")
+                continue
 
-    # 3. Если видео не найдено — это фото или карусель! Пробуем метаданные еще раз со всеми стратегиями
-    if no_video or not is_reel:
+            size = res.get("filesize") or 0
+            if size > 50 * 1024 * 1024:
+                logger.warning(f"[Instagram] {strategy_name}: {size / 1048576:.1f} МБ > 50 МБ, пробуем 480p")
+                try:
+                    if os.path.exists(res["file_path"]):
+                        os.remove(res["file_path"])
+                    res = await asyncio.to_thread(
+                        ytdlp_sync_func,
+                        clean_url,
+                        output_prefix,
+                        480,
+                        platform="instagram",
+                        use_cookies=use_cookies_flag,
+                        proxy_url=strategy_proxy,
+                        socket_timeout=socket_timeout,
+                        progress_callback=progress_callback,
+                        event_loop=loop,
+                    )
+                    if res and res.get("file_path") and (res.get("filesize") or 0) <= 50 * 1024 * 1024:
+                        res["platform"] = "instagram"
+                        res["low_quality_notice"] = True
+                        return res
+                except Exception as e_low:
+                    logger.warning(f"[Instagram] 480p retry failed: {e_low}")
+                continue
+
+            res["platform"] = "instagram"
+            logger.info(
+                f"✅ [Instagram] Скачано через {strategy_name} (cookies={use_cookies_flag}, {size / 1048576:.1f} МБ)"
+            )
+            return res
+        return None
+
+    # 2. Выполняем попытку yt-dlp для видео (сначала с cookies, если они есть)
+    yt_res = await _run_ytdlp_pass(bool(cookie_file))
+    if yt_res:
+        return yt_res
+
+    # 2b. Если протухшие/ограниченные cookies вызвали ошибку авторизации — пробуем анонимно без cookies
+    if cookie_file and last_error:
+        err_l = str(last_error).lower()
+        if any(k in err_l for k in (
+            "empty media response", "checkpoint_required", "login", "logged-in",
+            "401", "403", "not granting access", "rate-limit", "rate limit", "restricted video"
+        )):
+            logger.info("[Instagram] Повторяю yt-dlp без cookies (анонимный Polaris + curl_cffi)...")
+            yt_anon_res = await _run_ytdlp_pass(False)
+            if yt_anon_res:
+                return yt_anon_res
+
+    # 3. Если это НЕ Reel (обычный пост /p/) — пробуем метаданные для фото/карусели
+    if not is_reel:
         for strategy_name, strategy_proxy in strategies:
             try:
                 info = await asyncio.to_thread(_extract_instagram_metadata_sync, clean_url, strategy_proxy, cookie_file)
                 if info:
                     media_res = await _download_from_instagram_meta(
-                        info, output_prefix, clean_url, strategy_proxy, download_file_func, is_valid_mp4_func, progress_callback=progress_callback
+                        info,
+                        output_prefix,
+                        clean_url,
+                        strategy_proxy,
+                        download_file_func,
+                        is_valid_mp4_func,
+                        progress_callback=progress_callback,
+                        allow_photo=True,
                     )
                     if media_res:
                         logger.info(f"✅ [Instagram] Фото/карусель получена через {strategy_name} (фоллбэк)")
@@ -650,16 +822,15 @@ async def download_instagram(
             except Exception as e:
                 logger.debug(f"[Instagram] Metadata fallback {strategy_name} error: {e}")
 
-    # 4. Резервный Embed-фоллбэк для постов /p/
+    # 4. Резервный Embed-фоллбэк (для Reels фото строго запрещено!)
     shortcode = extract_shortcode(clean_url)
     if shortcode:
         try:
-            proxy_url = warp_proxy_module.warp.proxy_url if warp_proxy_module else None
             media_res = await _try_download_instagram_embed_media(
                 shortcode,
                 output_prefix,
-                allow_photo=True,
-                proxy_url=proxy_url,
+                allow_photo=not is_reel,
+                proxy_url=warp_proxy_url,
                 download_file_func=download_file_func,
                 is_valid_mp4_func=is_valid_mp4_func,
                 ffmpeg_path=ffmpeg_path
@@ -704,6 +875,9 @@ async def _try_download_instagram_embed_media(
     img_urls = []
     title = ""
     author = ""
+    m_track = None
+    m_artist = None
+    detected_video_post = False
 
     session = await http_pool.get_http_session()
     if True:
@@ -745,37 +919,14 @@ async def _try_download_instagram_embed_media(
                                 if orig_sound_match:
                                     m_track = py_html.unescape(orig_sound_match.group(1)).strip()
 
-                            candidates = []
-                            for pat in (
-                                r'"video_url"\s*:\s*"([^"]+)"',
-                                r'"playable_url"\s*:\s*"([^"]+)"',
-                                r'video_url&quot;:&quot;([^&]+)&quot;',
-                                r'"playback_url"\s*:\s*"([^"]+)"',
-                                r'src="(https://[^"]+?\.mp4[^"]*)"',
-                            ):
-                                candidates.extend(re.findall(pat, html_text))
-                            for arr in re.findall(r'"video_versions"\s*:\s*\[(.*?)\]', html_text, re.S):
-                                candidates.extend(re.findall(r'"url"\s*:\s*"([^"]+)"', arr))
+                            if _embed_html_looks_like_video(html_text):
+                                detected_video_post = True
 
-                            seen_v = set()
-                            for u in candidates:
-                                cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
-                                if cleaned.startswith("http") and cleaned not in seen_v:
-                                    seen_v.add(cleaned)
+                            for cleaned in _extract_embed_video_urls(html_text):
+                                if cleaned not in direct_video_urls:
                                     direct_video_urls.append(cleaned)
 
-                            raw_imgs = []
-                            for m in re.finditer(r'"display_url"\s*:\s*"([^"]+)"', html_text):
-                                raw_imgs.append(m.group(1))
-                            for m in re.finditer(r'<img[^>]+class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html_text):
-                                raw_imgs.append(m.group(1))
-                            for m in re.finditer(r'"(https://[^"]+?cdninstagram\.com/[^"]+?\.jpg[^"]*)"', html_text):
-                                raw_imgs.append(m.group(1))
-                            for m in re.finditer(r'"(https://[^"]+?fbcdn\.net/[^"]+?\.jpg[^"]*)"', html_text):
-                                raw_imgs.append(m.group(1))
-
-                            for u in raw_imgs:
-                                cleaned = py_html.unescape(u).replace("\\/", "/").replace("\\u0026", "&")
+                            for cleaned in _extract_embed_image_urls(html_text):
                                 base = cleaned.split("?")[0]
                                 if base not in [x.split("?")[0] for x in img_urls]:
                                     img_urls.append(cleaned)
@@ -787,32 +938,37 @@ async def _try_download_instagram_embed_media(
             if direct_video_urls:
                 break
 
-    # Пробуем прямое видео из embed
+    # Пробуем прямое видео из embed (сначала через proxy, затем напрямую)
+    video_proxies = [proxy_url, None] if proxy_url else [None]
     for video_url in direct_video_urls:
         dest_video = f"{output_prefix}.mp4"
-        try:
-            await download_file_func(video_url, dest_video, proxy=proxy_url)
-            if (not is_valid_mp4_func or is_valid_mp4_func(dest_video)):
-                m_inf = {"title": m_track, "author": m_artist or ""} if m_track else None
-                return {
-                    "file_path": dest_video,
-                    "platform": "instagram",
-                    "title": title or "Instagram Reels",
-                    "author": author or "Instagram",
-                    "filesize": os.path.getsize(dest_video),
-                    "digg_count": 0,
-                    "comment_count": 0,
-                    "share_count": 0,
-                    "music": m_track,
-                    "music_info": m_inf,
-                    "original_url": f"https://www.instagram.com/p/{shortcode}/"
-                }
-        except Exception:
+        for cur_v_proxy in video_proxies:
+            try:
+                await download_file_func(video_url, dest_video, proxy=cur_v_proxy)
+                if os.path.exists(dest_video) and (not is_valid_mp4_func or is_valid_mp4_func(dest_video)):
+                    m_inf = {"title": m_track, "author": m_artist or ""} if m_track else None
+                    return {
+                        "file_path": dest_video,
+                        "platform": "instagram",
+                        "title": title or "Instagram Reels",
+                        "author": author or "Instagram",
+                        "filesize": os.path.getsize(dest_video),
+                        "digg_count": 0,
+                        "comment_count": 0,
+                        "share_count": 0,
+                        "music": m_track,
+                        "music_info": m_inf,
+                        "original_url": f"https://www.instagram.com/p/{shortcode}/"
+                    }
+            except Exception:
+                pass
             if os.path.exists(dest_video):
-                try: os.remove(dest_video)
-                except OSError: pass
+                try:
+                    os.remove(dest_video)
+                except OSError:
+                    pass
 
-    if not allow_photo:
+    if not allow_photo or detected_video_post:
         raise Exception("instagram_video_unavailable")
 
     # Для обычных фотопостов

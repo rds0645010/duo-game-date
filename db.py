@@ -125,7 +125,7 @@ def init_db(db_path: str = None):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
-                inline_caption INTEGER DEFAULT 0,
+                inline_caption INTEGER DEFAULT 1,
                 save_inline_to_pm INTEGER DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -329,7 +329,7 @@ def get_canonical_media_key(url: str) -> str:
     if not url:
         return ""
     u = url.strip()
-    m_ig = re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|p|reels|tv|share/(?:reel|p))/([A-Za-z0-9_-]+)', u)
+    m_ig = re.search(r'(?:instagram\.com|instagr\.am)/(?:[A-Za-z0-9._]+/)?(?:reel|p|reels|tv)/([A-Za-z0-9_-]+)', u)
     if m_ig:
         return f"ig_{m_ig.group(1)}"
     m_yt = re.search(r'(?:v=|\/shorts\/|\/embed\/|youtu\.be\/|\/v\/)([A-Za-z0-9_-]{11})', u)
@@ -452,8 +452,8 @@ def set_user_inline_caption(user_id: int, enabled: bool, db_path: str = None):
         return
     with get_db_connection(db_path) as conn:
         conn.execute("""
-            INSERT INTO user_settings (user_id, inline_caption)
-            VALUES (?, ?)
+            INSERT INTO user_settings (user_id, inline_caption, save_inline_to_pm)
+            VALUES (?, ?, 0)
             ON CONFLICT(user_id) DO UPDATE SET
                 inline_caption = excluded.inline_caption,
                 updated_at = CURRENT_TIMESTAMP
@@ -482,8 +482,8 @@ def set_user_save_to_pm(user_id: int, enabled: bool, db_path: str = None):
     try:
         with get_db_connection(db_path) as conn:
             conn.execute("""
-                INSERT INTO user_settings (user_id, save_inline_to_pm)
-                VALUES (?, ?)
+                INSERT INTO user_settings (user_id, inline_caption, save_inline_to_pm)
+                VALUES (?, 1, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     save_inline_to_pm = excluded.save_inline_to_pm,
                     updated_at = CURRENT_TIMESTAMP

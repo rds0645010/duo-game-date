@@ -14,7 +14,7 @@ import http_pool
 logger = logging.getLogger("tiktok_service")
 
 # Regex для распознавания ссылок TikTok
-TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
+TIKTOK_REGEX = re.compile(r'https?://(?:(?:www|m|lite|v[mt])\.)?tiktok\.com/[^\s]+')
 
 # Зеркала и эндпоинты API TikWM
 TIKWM_ENDPOINTS = [
@@ -418,6 +418,10 @@ async def download_file_stream(
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status} while downloading TikTok stream")
 
+                ct = (resp.headers.get("Content-Type") or "").lower()
+                if any(bad in ct for bad in ("text/html", "application/json", "text/xml", "application/xml")):
+                    raise Exception(f"Unexpected Content-Type {ct} from TikTok stream")
+
                 content_length = resp.headers.get("Content-Length")
                 total = int(content_length) if content_length and content_length.isdigit() else 0
                 if total > max_size_bytes:
@@ -501,17 +505,78 @@ async def download_tiktok(
         filesize = tikwm_data.get("size", 0)
 
         if download_locally:
-            try:
-                await download_file_stream(video_url, dest_file, proxy=proxy_url, progress_callback=progress_callback)
-                filesize = os.path.getsize(dest_file) if os.path.exists(dest_file) else filesize
-            except Exception as dl_err:
-                logger.warning(f"TikTok local stream download failed: {dl_err}")
-                if os.path.exists(dest_file):
+            downloaded_ok = False
+            last_dl_err = None
+
+            if video_url:
+                try:
+                    await download_file_stream(video_url, dest_file, proxy=proxy_url, progress_callback=progress_callback)
+                    if not is_valid_mp4_file(dest_file, allow_audio=False):
+                        raise Exception("invalid_mp4_stream")
+                    downloaded_ok = True
+                except Exception as dl_err:
+                    last_dl_err = dl_err
+                    logger.warning(f"TikTok local stream download failed ({video_url[:80]}): {dl_err}")
+                    if os.path.exists(dest_file):
+                        try:
+                            os.remove(dest_file)
+                        except OSError:
+                            pass
+
+            if not downloaded_ok:
+                v_lower = (video_url or "").lower()
+                alt_parsers = []
+                if "tikcdn.io" not in v_lower and "ssstik" not in v_lower:
+                    alt_parsers.append(("SSSTik", _parse_ssstik))
+                if "tikmate" not in v_lower:
+                    alt_parsers.append(("Tikmate", _parse_tikmate))
+
+                for p_name, p_fn in alt_parsers:
                     try:
-                        os.remove(dest_file)
-                    except OSError:
-                        pass
-                raise dl_err
+                        alt_res = await p_fn(clean_url, proxy=proxy_url)
+                        alt_url = alt_res.get("video_url") if alt_res else None
+                        if not alt_url:
+                            continue
+                        await download_file_stream(alt_url, dest_file, proxy=proxy_url, progress_callback=progress_callback)
+                        if is_valid_mp4_file(dest_file, allow_audio=False):
+                            video_url = alt_url
+                            downloaded_ok = True
+                            logger.info(f"✅ [TikTok] Видео восстановлено через fallback {p_name}")
+                            break
+                        if os.path.exists(dest_file):
+                            os.remove(dest_file)
+                    except Exception as alt_err:
+                        last_dl_err = alt_err
+                        logger.debug(f"TikTok fallback {p_name} failed: {alt_err}")
+                        if os.path.exists(dest_file):
+                            try:
+                                os.remove(dest_file)
+                            except OSError:
+                                pass
+
+            if not downloaded_ok:
+                try:
+                    import downloader
+                    yt_res = await asyncio.to_thread(
+                        downloader._download_ytdlp_sync,
+                        clean_url,
+                        output_prefix,
+                        720,
+                        platform="tiktok",
+                        proxy_url=proxy_url,
+                    )
+                    if yt_res and yt_res.get("file_path") and is_valid_mp4_file(yt_res["file_path"], allow_audio=False):
+                        yt_res["platform"] = "tiktok"
+                        logger.info("✅ [TikTok] Видео восстановлено через yt-dlp fallback")
+                        return yt_res
+                except Exception as yt_fb_err:
+                    last_dl_err = yt_fb_err
+                    logger.debug(f"TikTok yt-dlp fallback failed: {yt_fb_err}")
+
+            if not downloaded_ok:
+                raise last_dl_err or Exception("tiktok_stream_failed")
+
+            filesize = os.path.getsize(dest_file) if os.path.exists(dest_file) else filesize
 
         return {
             "file_path": dest_file if download_locally else None,

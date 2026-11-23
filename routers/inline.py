@@ -1,6 +1,6 @@
 """
 Инлайн-режим (@duo_play_date_bot <ссылка>):
-мгновенная отдача из кэша / TikTok CDN или двухфазная подмена через edit_message_media,
+мгновенная отдача из кэша или надёжная двухфазная подмена через edit_message_media,
 включая Fast-Track старт фото/видео слайдшоу.
 """
 
@@ -15,10 +15,10 @@ from typing import Optional
 from aiogram import Router, F
 from aiogram.types import (
     InlineQuery,
-    InlineQueryResultVideo,
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
     InlineQueryResultCachedPhoto,
+    InlineQueryResultCachedAudio,
     InputTextMessageContent,
     InputMediaPhoto,
     InputMediaVideo,
@@ -27,7 +27,6 @@ from aiogram.types import (
     InlineKeyboardButton,
     ChosenInlineResult,
     CallbackQuery,
-    FSInputFile,
 )
 
 from downloader import (
@@ -35,7 +34,7 @@ from downloader import (
     detect_content_info,
     extract_url,
     download_video,
-    parse_tiktok_tikwm,
+    is_valid_mp4_file,
 )
 from . import app as _app
 from .slideshow import make_slide_caption, build_slideshow_keyboard, preupload_slideshow_file_ids
@@ -133,6 +132,8 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=results, cache_time=10, is_personal=True)
         return
 
+    logging.info(f"🔎 [INLINE] user={user_id} platform={platform} url={clean_url}")
+
     c_info = detect_content_info(clean_url)
     p_noun = c_info.get("label", "медиа")
     p_icon = c_info.get("icon", "🎬")
@@ -156,6 +157,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         cached = None
     if cached and cached.get("file_id"):
         m_type = cached.get("media_type", "video")
+        logging.info(f"⚡ [INLINE] Cache hit ({m_type}) for {clean_url}")
         cap = make_inline_caption(
             title=cached.get("title") or "",
             platform=cached.get("platform") or plat_source,
@@ -174,6 +176,13 @@ async def inline_query_handler(inline_query: InlineQuery):
                 caption=cap,
                 parse_mode="HTML" if cap else None,
             )
+        elif m_type == "audio":
+            single_result = InlineQueryResultCachedAudio(
+                id=f"c_a_{abs(hash(cached['file_id']))}",
+                audio_file_id=cached["file_id"],
+                caption=cap,
+                parse_mode="HTML" if cap else None,
+            )
         else:
             single_result = InlineQueryResultCachedVideo(
                 id=f"c_v_{abs(hash(cached['file_id']))}",
@@ -185,43 +194,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         await inline_query.answer(results=[single_result], cache_time=300, is_personal=True)
         return
 
-    # 2. Быстрый прямой поток для TikTok видео
-    direct_video_url = None
-    direct_title = None
-    direct_info = None
-
-    if platform == "tiktok":
-        try:
-            direct_info = await asyncio.wait_for(parse_tiktok_tikwm(clean_url), timeout=4.0)
-            if direct_info and (direct_info.get("video_url") or direct_info.get("is_video")):
-                direct_video_url = direct_info.get("video_url")
-                direct_title = direct_info.get("title")
-        except Exception as e:
-            logging.debug(f"TikTok direct parse failed: {e}")
-
-    if direct_video_url:
-        cap = make_inline_caption(
-            title=direct_title or "",
-            platform="TikTok",
-            author=(direct_info or {}).get("author") or "",
-            music_info=(direct_info or {}).get("music_info"),
-            music=(direct_info or {}).get("music"),
-            is_photo=False,
-            caption_enabled=caption_enabled,
-        )
-        single_result = InlineQueryResultVideo(
-            id=f"dir_tt_{abs(hash(clean_url))}",
-            video_url=direct_video_url,
-            mime_type="video/mp4",
-            thumbnail_url=plat_icon,
-            title=inline_title,
-            caption=cap,
-            parse_mode="HTML" if cap else None,
-        )
-        await inline_query.answer(results=[single_result], cache_time=30, is_personal=True)
-        return
-
-    # 3. Двухфазная подмена
+    # 2. Надёжная двухфазная подмена для всех некэшированных ссылок (включая TikTok)
     token = a.save_dl_token(clean_url)
     fresh_id = f"art_v4_{token}_{uuid.uuid4().hex[:6]}"
     loading_kb = InlineKeyboardMarkup(
@@ -284,6 +257,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
         file_id = cached.get("file_id") if cached else None
         is_photo = (cached.get("media_type") == "photo") if cached else False
         is_audio = (cached.get("media_type") == "audio") if cached else False
+        stream_fallback_url = None
         res = None
 
         if not file_id:
@@ -349,37 +323,51 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     first_u = photo_urls[0] if photo_urls else None
                     is_vid_first = bool(first_file and first_file.lower().endswith((".mp4", ".mov", ".m4v")))
                     first_fid = await a.upload_media_to_telegram(
-                        first_file, is_photo=not is_vid_first, target_user_id=user_id
+                        first_file, is_photo=not is_vid_first, target_user_id=user_id, force_ephemeral=True
                     ) if first_file else None
                     if first_fid:
                         a._slideshow_cache[sid]["file_ids"][0] = first_fid
                         a.save_slideshow_session_db(sid, a._slideshow_cache[sid])
 
-                    media_target = first_fid or first_u or (FSInputFile(first_file) if first_file else None)
+                    media_target = first_fid or first_u
+                    if not media_target:
+                        err_kb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🤖 Запустить бота (@duo_play_date_bot)", url="https://t.me/duo_play_date_bot?start=1")],
+                            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")],
+                        ])
+                        await a.safe_edit_status(
+                            inline_message_id=inline_message_id,
+                            text=(
+                                "⚠️ <b>Не удалось загрузить слайд в Telegram.</b>\n\n"
+                                "Нажмите <b>«Запустить бота»</b> (/start) один раз, затем нажмите «Попробовать снова» 👇"
+                            ),
+                            reply_markup=err_kb,
+                        )
+                        return
+
                     caption = make_slide_caption(a._slideshow_cache[sid], 0, total_slides)
                     kb = build_slideshow_keyboard(sid, 0, total_slides, a._slideshow_cache[sid], is_inline=True)
                     is_vid = is_vid_first or str(media_target).lower().endswith((".mp4", ".mov", ".m4v"))
                     media_cls = InputMediaVideo if is_vid else InputMediaPhoto
-                    if media_target:
-                        try:
+                    try:
+                        await a.bot.edit_message_media(
+                            inline_message_id=inline_message_id,
+                            media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
+                            reply_markup=kb,
+                        )
+                    except Exception as emm_err:
+                        if hasattr(emm_err, "retry_after"):
+                            await asyncio.sleep(getattr(emm_err, "retry_after") + 0.2)
                             await a.bot.edit_message_media(
                                 inline_message_id=inline_message_id,
                                 media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
                                 reply_markup=kb,
                             )
-                        except Exception as emm_err:
-                            if hasattr(emm_err, "retry_after"):
-                                await asyncio.sleep(getattr(emm_err, "retry_after") + 0.2)
-                                await a.bot.edit_message_media(
-                                    inline_message_id=inline_message_id,
-                                    media=media_cls(media=media_target, caption=caption, parse_mode="HTML"),
-                                    reply_markup=kb,
-                                )
-                            else:
-                                raise emm_err
+                        else:
+                            raise emm_err
                     a._stream_files.pop(token, None)
                     if total_slides > 1:
-                        asyncio.create_task(preupload_slideshow_file_ids(sid))
+                        a.track_background_task(preupload_slideshow_file_ids(sid))
                     return
 
                 if res and isinstance(res, dict) and res.get("file_path"):
@@ -394,6 +382,11 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
 
                     is_photo = bool(res.get("is_photo"))
                     is_audio = bool(res.get("is_audio"))
+                    if not is_audio and is_valid_mp4_file(res["file_path"], allow_audio=False):
+                        is_photo = False
+                    if is_photo and a.is_instagram_reel_url(url):
+                        raise Exception("instagram_video_unavailable")
+
                     file_id = await a.upload_media_to_telegram(
                         res["file_path"],
                         is_photo=is_photo,
@@ -416,12 +409,42 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                             music=res.get("music"),
                             music_info=res.get("music_info"),
                         )
-                    try:
-                        if os.path.exists(res["file_path"]):
-                            os.remove(res["file_path"])
-                    except Exception:
-                        pass
-                    a._stream_files.pop(token, None)
+                        try:
+                            if os.path.exists(res["file_path"]):
+                                os.remove(res["file_path"])
+                        except Exception:
+                            pass
+                        a._stream_files.pop(token, None)
+                    else:
+                        f_path = res["file_path"]
+                        f_sz = os.path.getsize(f_path) if os.path.exists(f_path) else 0
+                        max_stream_sz = 5 * 1024 * 1024 if is_photo else 20 * 1024 * 1024
+                        if (not is_audio) and a.RENDER_EXTERNAL_URL and 0 < f_sz <= max_stream_sz:
+                            a._stream_files[token] = f_path
+                            a.update_dl_token_file(token, f_path)
+                            a.track_background_task(a._expire_stream_file(token, f_path, delay=300))
+                            ext = "jpg" if is_photo else "mp4"
+                            stream_fallback_url = f"{a.RENDER_EXTERNAL_URL}/stream/{token}.{ext}"
+                            logging.info(f"Using stream fallback URL for inline delivery: {stream_fallback_url}")
+                        else:
+                            try:
+                                if os.path.exists(f_path):
+                                    os.remove(f_path)
+                            except Exception:
+                                pass
+                            bot_kb = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🤖 Запустить бота (@duo_play_date_bot)", url="https://t.me/duo_play_date_bot?start=1")],
+                                [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")],
+                            ])
+                            await a.safe_edit_status(
+                                inline_message_id=inline_message_id,
+                                text=(
+                                    "⚠️ <b>Для отправки видео в этот чат нужно один раз активировать бота.</b>\n\n"
+                                    "Нажмите <b>«Запустить бота»</b> (/start) и вернитесь в чат — затем нажмите «Попробовать снова» 👇"
+                                ),
+                                reply_markup=bot_kb,
+                            )
+                            return
                 else:
                     raise Exception("download_failed")
             except Exception as e:
@@ -442,7 +465,8 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                     pass
                 return
 
-        if file_id:
+        media_src = file_id or stream_fallback_url
+        if media_src:
             caption_enabled = a.get_user_inline_caption(user_id)
             title = ""
             author = ""
@@ -476,7 +500,7 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
             try:
                 if is_audio:
                     media_obj = InputMediaAudio(
-                        media=file_id,
+                        media=media_src,
                         caption=caption,
                         parse_mode="HTML" if caption else None,
                         title=(res.get("title") if res else (cached.get("title") if cached else "")),
@@ -484,10 +508,10 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                         duration=int(res.get("duration", 0)) if res else 0,
                     )
                 elif is_photo:
-                    media_obj = InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML" if caption else None)
+                    media_obj = InputMediaPhoto(media=media_src, caption=caption, parse_mode="HTML" if caption else None)
                 else:
                     media_obj = InputMediaVideo(
-                        media=file_id,
+                        media=media_src,
                         caption=caption,
                         parse_mode="HTML" if caption else None,
                         supports_streaming=True,
@@ -511,12 +535,28 @@ async def execute_inline_delivery(inline_message_id: str, token: str, user_id: i
                 logging.info(f"Successfully replaced inline message {inline_message_id} with media!")
             except Exception as edit_err:
                 logging.error(f"Failed to edit_message_media: {edit_err}")
+                err_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🤖 Открыть бота", url="https://t.me/duo_play_date_bot?start=1")],
+                    [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"retry_dl:{token}")],
+                ])
+                try:
+                    await a.bot.edit_message_text(
+                        inline_message_id=inline_message_id,
+                        text="❌ <b>Не удалось прикрепить медиа в инлайн-сообщение.</b>\n\nПопробуйте ещё раз или отправьте ссылку напрямую боту 👇",
+                        parse_mode="HTML",
+                        reply_markup=err_kb,
+                    )
+                except Exception:
+                    pass
     finally:
         _active_inline_jobs.discard(job_key)
 
 
 @router.chosen_inline_result()
 async def handle_chosen_inline_result(chosen: ChosenInlineResult):
+    logging.info(
+        f"🎯 [INLINE CHOSEN] user={chosen.from_user.id} result_id={chosen.result_id} inline_msg={chosen.inline_message_id}"
+    )
     if not chosen.inline_message_id:
         return
     rid = chosen.result_id

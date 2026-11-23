@@ -58,9 +58,11 @@ async def expire_slideshow_session(sid: str, delay_seconds: int = 3600):
 async def preupload_slideshow_file_ids(sid: str):
     """
     Фоновая предзагрузка слайдов в Telegram (включая ожидание Fast-Track фоновой докачки).
-    Ускоряет перелистывание и исключает 403 при смене слайдов.
+    Работает только при наличии выделенного STORAGE_CHANNEL_ID, чтобы не засорять ЛС пользователя.
     """
     a = _app()
+    if not a.get_storage_channel_id():
+        return
     data = a._slideshow_cache.get(sid)
     if not data or not data.get("photos"):
         return
@@ -85,7 +87,7 @@ async def preupload_slideshow_file_ids(sid: str):
         if data["file_ids"][idx] is None and p_path and os.path.exists(p_path):
             try:
                 is_vid = _is_video_slide(p_path)
-                fid = await a.upload_media_to_telegram(p_path, is_photo=not is_vid)
+                fid = await a.upload_media_to_telegram(p_path, is_photo=not is_vid, force_ephemeral=True)
                 if fid and sid in a._slideshow_cache:
                     a._slideshow_cache[sid]["file_ids"][idx] = fid
                     a.save_slideshow_session_db(sid, a._slideshow_cache[sid])
@@ -270,6 +272,7 @@ async def handle_slide_switch_callback(callback: CallbackQuery):
                 target_user_id=uid,
                 title=data.get("title", ""),
                 platform=data.get("platform", ""),
+                force_ephemeral=True,
             )
             if cached_fid:
                 data["file_ids"][new_idx] = cached_fid

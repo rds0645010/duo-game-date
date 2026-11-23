@@ -160,6 +160,24 @@ async def process_video_download(message: types.Message, url: str):
                 return
             except Exception as e:
                 logging.warning(f"Failed to send cached photo file_id {f_id}: {e}")
+        elif m_type == "audio":
+            a_lines = []
+            desc_line = a.format_description_line(cached.get("title") or "", is_photo=False, is_audio=True)
+            if desc_line:
+                a_lines.append(desc_line)
+            a_lines.append(f"📱 <b>Источник:</b> {plat_esc}\n✨ <i>Скачано через @duo_play_date_bot (мгновенно из кэша ⚡)</i>")
+            try:
+                await message.answer_audio(
+                    audio=f_id,
+                    title=(cached.get("title") or "Трек")[:80],
+                    performer=(cached.get("author") or "Исполнитель")[:50],
+                    caption="\n\n".join(a_lines),
+                    reply_markup=None,
+                    parse_mode="HTML",
+                )
+                return
+            except Exception as e:
+                logging.warning(f"Failed to send cached audio file_id {f_id}: {e}")
         else:
             v_lines = []
             desc_line = a.format_description_line(cached.get("title") or "", is_photo=False)
@@ -293,7 +311,7 @@ async def process_video_download(message: types.Message, url: str):
             except Exception:
                 pass
             if total_slides > 1:
-                asyncio.create_task(preupload_slideshow_file_ids(sid))
+                a.track_background_task(preupload_slideshow_file_ids(sid))
             return
 
         file_path = res.get("file_path")
@@ -377,10 +395,12 @@ async def process_video_download(message: types.Message, url: str):
                 pass
             return
 
-        # Валидация по сигнатурам: не даём видео уйти как photo
+        # Валидация по сигнатурам: не даём видео уйти как photo, а Reels — как картинка
         if is_valid_mp4_file(file_path, allow_audio=False):
             res["is_photo"] = False
             res["is_video"] = True
+        elif res.get("is_photo") and a.is_instagram_reel_url(clean_url):
+            raise Exception("instagram_video_unavailable")
 
         # 3. Одиночное фото
         if res.get("is_photo"):
@@ -461,25 +481,23 @@ async def process_video_download(message: types.Message, url: str):
             v_lines.append("<i>(ℹ️ Качество сжато до 360p, так как исходное видео превышало лимиты)</i>")
         caption = "\n\n".join(v_lines)
 
-        sent = None
-        if target_platform == "tiktok" and res.get("direct_url") and not res.get("is_photo") and not res.get("is_album"):
-            try:
-                sent = await message.answer_video(video=res["direct_url"], caption=caption, reply_markup=None, parse_mode="HTML")
-            except Exception as direct_send_err:
-                logging.info(f"TikTok direct URL send bypassed ({direct_send_err}), sending local file...")
-                sent = None
-
-        if not sent:
-            video_input = FSInputFile(file_path)
-            try:
-                sent = await message.answer_video(video=video_input, caption=caption, reply_markup=None, parse_mode="HTML")
-            except Exception as html_send_err:
-                logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
-                sent = await message.answer_video(
-                    video=video_input,
-                    caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
-                    reply_markup=None,
-                )
+        video_input = FSInputFile(file_path)
+        try:
+            sent = await message.answer_video(
+                video=video_input,
+                caption=caption,
+                reply_markup=None,
+                parse_mode="HTML",
+                supports_streaming=True,
+            )
+        except Exception as html_send_err:
+            logging.warning(f"HTML caption send error: {html_send_err}, sending plain caption...")
+            sent = await message.answer_video(
+                video=video_input,
+                caption=f"🎬 {title_raw[:100]}\n✨ Скачано через @duo_play_date_bot",
+                reply_markup=None,
+                supports_streaming=True,
+            )
 
         if sent and sent.video and sent.video.file_id:
             v_id = sent.video.file_id
@@ -523,6 +541,12 @@ async def handle_text_messages(message: types.Message):
     user_id = message.from_user.id if message.from_user else 0
     u_name = (message.from_user.username or message.from_user.first_name or "no_user") if message.from_user else "unknown"
     logging.info(f"📩 [ЛС от {user_id} (@{u_name})]: {raw_text[:120]}")
+    if message.chat and message.chat.type == "private" and message.from_user:
+        a.save_user(
+            user_id=user_id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
 
     now = time.time()
     media_urls = extract_all_media_urls(raw_text)

@@ -112,12 +112,14 @@ except Exception as _js_e:
     logger.debug(f"JS runtime init notice: {_js_e}")
 
 # Regex patterns for supported platforms
-TIKTOK_REGEX = re.compile(r'https?://(?:www\.|v[mt]\.)?tiktok\.com/[^\s]+')
+TIKTOK_REGEX = re.compile(r'https?://(?:(?:www|m|lite|v[mt])\.)?tiktok\.com/[^\s]+')
 YOUTUBE_REGEX = re.compile(
     r'https?://(?:www\.|m\.|music\.)?'
     r'(?:youtube\.com/(?:watch\?[^\s#]*v=|shorts/|live/|embed/|v/)|youtu\.be/)[^\s]+'
 )
-INSTAGRAM_REGEX = re.compile(r'https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/(?:reel|reels|p|tv|share/(?:reel|p))/[^\s]+')
+INSTAGRAM_REGEX = re.compile(
+    r'https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/(?:(?:[A-Za-z0-9._]+/)?(?:reel|reels|p|tv)|share(?:/(?:reel|p))?)/[^\s]+'
+)
 SPOTIFY_REGEX = re.compile(
     r'https?://(?:open\.)?spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/[a-zA-Z0-9]+',
     re.IGNORECASE
@@ -166,7 +168,7 @@ def detect_content_info(url: str) -> Dict[str, str]:
             "label": "видео из TikTok",
             "icon": "🎬",
         }
-    if "instagram.com" in u_lower:
+    if "instagram.com" in u_lower or "instagr.am" in u_lower:
         if "/p/" in u_lower:
             return {
                 "platform": "instagram",
@@ -599,11 +601,21 @@ def _download_ytdlp_sync(
             "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
         )
     elif plat == "instagram":
-        format_spec = (
-            f"best[height<={height_limit}][ext=mp4]/"
-            f"best[ext=mp4]/"
-            f"best"
-        )
+        if has_ffmpeg:
+            format_spec = (
+                f"best[height<={height_limit}][ext=mp4][vcodec!=none][acodec!=none]/"
+                f"bestvideo[height<={height_limit}][ext=mp4]+bestaudio[ext=m4a]/"
+                f"bestvideo[height<={height_limit}]+bestaudio/"
+                f"best[height<={height_limit}][ext=mp4]/"
+                f"best[ext=mp4]/"
+                f"best"
+            )
+        else:
+            format_spec = (
+                f"best[height<={height_limit}][ext=mp4]/"
+                f"best[ext=mp4]/"
+                f"best"
+            )
         if socket_timeout == 25:
             socket_timeout = 10
     elif has_ffmpeg:

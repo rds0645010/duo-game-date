@@ -32,3 +32,7 @@ services:
       # Ключ для /api/logs?key=... и /api/test_dl?key=... (без него они закрыты).
       - key: DEBUG_API_KEY
         sync: false
+      # Необязательно: ID приватного Telegram-канала (бот должен быть админом) для невидимого
+      # получения file_id в инлайне и фоновой предзагрузки слайдов без касания ЛС.
+      - key: STORAGE_CHANNEL_ID
+        sync: false

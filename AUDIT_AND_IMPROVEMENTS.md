@@ -247,3 +247,20 @@ flowchart TD
    - Если в одном сообщении прислали 2–3 ссылки (или плейлист Spotify/альбом), запускать в очереди с общим статус-сообщением и кэшировать канонические ключи.
 5. **Оптимизация под лимит Render 512 МБ RAM:**
    - Единый общий `aiohttp.ClientSession` вместо создания новой сессии на каждый запрос; `gc.collect()` после тяжелых операций FFmpeg и выделенный ограниченный воркер.
+
+
+---
+
+## Фаза 3 — Исправление багов от 23.11.2026 (Инлайн TikTok, Instagram Reels, утечка в ЛС)
+
+1. **`INL-2` (TikTok в инлайн-режиме — 0-секундная заглушка / `!`):**
+   - Убран прямой `InlineQueryResultVideo(video_url=...)` из `routers/inline.py` (серверы Telegram не могли скачать защищённый CDN-поток напрямую). Все некэшированные ссылки теперь идут через надёжную двухфазную подмену (`InlineQueryResultArticle` → скачивание с нужным `Referer`/прокси → `upload_media_to_telegram` → `edit_message_media`).
+   - Добавлена проверка `is_valid_mp4_file` и `Content-Type` в `tiktok_service.py` с каскадным fallback на SSSTik, Tikmate и `yt-dlp`, а также `/stream/{token}` fallback и понятная кнопка `/start`, если `file_id` не получен.
+2. **`IG-4` (Instagram Reels приходили картинкой / битым альбомом):**
+   - В `instagram_service.py` строго запрещён фото-фоллбэк для Reels (`allow_photo=not is_reel`, убран фото-фоллбэк при ошибках `yt-dlp` на `/reel/`).
+   - Исправлено декодирование экранированного JSON (`\"video_url\":\"https:\\\/\\\/...\"`) в embed-парсере, убран сбор аватарок (`t51.2885-19`, `s150x150`), добавлена проверка muxed-аудио и DASH-слияния в `downloader.py`, разворот `/share/...` ссылок и анонимный retry при протухших cookies.
+   - `bot.py:save_cached_media` больше не кэширует `photo` для Reel URL.
+3. **`PM-1` (Утечка медиа в ЛС при выключенном «Архив в ЛС»):**
+   - `routers/slideshow.py:preupload_slideshow_file_ids` теперь запускается только при наличии `STORAGE_CHANNEL_ID` и всегда с `force_ephemeral=True`.
+   - В `bot.py:upload_media_to_telegram` при выключенном архиве в ЛС первым используется `STORAGE_CHANNEL_ID`, а при его отсутствии сообщение в ЛС удаляется немедленно (`await _delete_message_reliably` с повтором при `RetryAfter`) ещё до возврата `file_id`.
+   - Исправлен `DEFAULT 1` для `inline_caption` в `db.py`, чтобы переключение `save_inline_to_pm` не сбрасывало подписи.

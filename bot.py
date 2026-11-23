@@ -179,12 +179,15 @@ def get_cached_video(url: str):
     return db.get_cached_media(url, db_path=DB_PATH)
 
 
-def save_cached_media(url: str, file_id: str, media_type: str, title: str, platform: str, author: str = "", music: str = None, music_info: dict = None):
-    db.save_cached_media(url, file_id, media_type, title, platform, author, music=music, music_info=music_info, db_path=DB_PATH)
-
-
 def is_instagram_reel_url(url: str) -> bool:
-    return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
+    return bool(re.search(r'(?:instagram\.com|instagr\.am)/(?:[A-Za-z0-9._]+/)?(?:reel|reels|tv|share/reel)/', url or "", re.IGNORECASE))
+
+
+def save_cached_media(url: str, file_id: str, media_type: str, title: str, platform: str, author: str = "", music: str = None, music_info: dict = None):
+    if media_type == "photo" and is_instagram_reel_url(url):
+        logging.warning(f"Refusing to cache photo for Instagram Reel URL: {url}")
+        return
+    db.save_cached_media(url, file_id, media_type, title, platform, author, music=music, music_info=music_info, db_path=DB_PATH)
 
 
 def delete_cached_media(url: str):
@@ -279,12 +282,54 @@ def get_app_url():
     return base
 
 
-async def _delayed_delete_message(chat_id: int, message_id: int, delay_seconds: int = 60):
+_bg_tasks = set()
+
+
+def track_background_task(coro):
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
+def get_storage_channel_id() -> Optional[int]:
+    raw = (STORAGE_CHANNEL_ID or os.getenv("STORAGE_CHANNEL_ID", "") or get_bot_setting("storage_channel_id", "")).strip()
+    if not raw:
+        return None
     try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+async def _delete_message_reliably(
+    chat_id: int,
+    message_id: int,
+    delay_seconds: float = 0.0,
+    max_attempts: int = 4,
+) -> bool:
+    if delay_seconds > 0:
         await asyncio.sleep(delay_seconds)
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            return True
+        except Exception as e:
+            err_l = str(e).lower()
+            if "message to delete not found" in err_l or "message can't be deleted" in err_l:
+                return True
+            if hasattr(e, "retry_after"):
+                await asyncio.sleep(float(getattr(e, "retry_after")) + 0.3)
+                continue
+            logging.warning(
+                f"delete_message failed (attempt {attempt}/{max_attempts}) chat={chat_id} msg={message_id}: {e}"
+            )
+            await asyncio.sleep(0.5 * attempt)
+    return False
+
+
+async def _delayed_delete_message(chat_id: int, message_id: int, delay_seconds: int = 60):
+    await _delete_message_reliably(chat_id, message_id, delay_seconds=delay_seconds)
 
 
 async def upload_media_to_telegram(
@@ -296,6 +341,7 @@ async def upload_media_to_telegram(
     platform: str = "",
     performer: str = "",
     duration: int = 0,
+    force_ephemeral: bool = False,
 ):
     """Загружает файл в Telegram для получения постоянного CDN file_id."""
     if not file_path or not os.path.exists(file_path):
@@ -311,87 +357,93 @@ async def upload_media_to_telegram(
             f"✨ <i>Сохранено при отправке через @duo_play_date_bot</i>"
         )
 
-    should_save_in_pm = get_user_save_to_pm(target_user_id) if target_user_id else False
+    should_save_in_pm = (not force_ephemeral) and bool(target_user_id and get_user_save_to_pm(target_user_id))
+    storage_id = get_storage_channel_id()
 
-    if target_user_id:
+    owner_id = None
+    if OWNER_USER_ID:
+        owner_id = OWNER_USER_ID
+
+    fb_chat = get_fallback_upload_chat()
+
+    candidates = []
+    seen_chats = set()
+
+    def _add_candidate(cid: Optional[int], keep: bool):
+        if cid is None or cid in seen_chats:
+            return
+        seen_chats.add(cid)
+        candidates.append((cid, keep))
+
+    if should_save_in_pm:
+        _add_candidate(target_user_id, True)
+        _add_candidate(storage_id, True)
+        _add_candidate(owner_id, False)
+        _add_candidate(fb_chat, False)
+    else:
+        _add_candidate(storage_id, True)
+        _add_candidate(target_user_id, False)
+        _add_candidate(owner_id, False)
+        _add_candidate(fb_chat, False)
+
+    for chat_id, keep_message in candidates:
         try:
+            use_caption = caption_text if (keep_message and chat_id == target_user_id and should_save_in_pm) else None
+            parse_mode = "HTML" if use_caption else None
+            sent = None
+            f_id = None
+
             if is_audio:
                 sent = await bot.send_audio(
-                    chat_id=target_user_id, audio=FSInputFile(file_path), performer=performer, title=title,
-                    duration=duration, caption=caption_text if should_save_in_pm else None,
-                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None, disable_notification=True,
+                    chat_id=chat_id,
+                    audio=FSInputFile(file_path),
+                    performer=performer,
+                    title=title,
+                    duration=duration,
+                    caption=use_caption,
+                    parse_mode=parse_mode,
+                    disable_notification=True,
                 )
                 if sent and sent.audio:
                     f_id = sent.audio.file_id
-                    if not should_save_in_pm:
-                        asyncio.create_task(_delayed_delete_message(target_user_id, sent.message_id, 2))
-                    return f_id
             elif is_photo:
                 sent = await bot.send_photo(
-                    chat_id=target_user_id, photo=FSInputFile(file_path),
-                    caption=caption_text if should_save_in_pm else None,
-                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None, disable_notification=True,
+                    chat_id=chat_id,
+                    photo=FSInputFile(file_path),
+                    caption=use_caption,
+                    parse_mode=parse_mode,
+                    disable_notification=True,
                 )
                 if sent and sent.photo:
                     f_id = sent.photo[-1].file_id
-                    if not should_save_in_pm:
-                        asyncio.create_task(_delayed_delete_message(target_user_id, sent.message_id, 2))
-                    return f_id
             else:
                 sent = await bot.send_video(
-                    chat_id=target_user_id, video=FSInputFile(file_path),
-                    caption=caption_text if should_save_in_pm else None,
-                    parse_mode="HTML" if (caption_text and should_save_in_pm) else None,
-                    supports_streaming=True, disable_notification=True,
+                    chat_id=chat_id,
+                    video=FSInputFile(file_path),
+                    caption=use_caption,
+                    parse_mode=parse_mode,
+                    supports_streaming=True,
+                    disable_notification=True,
                 )
                 if sent and sent.video:
                     f_id = sent.video.file_id
-                    if not should_save_in_pm:
-                        asyncio.create_task(_delayed_delete_message(target_user_id, sent.message_id, 2))
-                    return f_id
+
+            if f_id:
+                if not keep_message and chat_id > 0:
+                    deleted = await _delete_message_reliably(
+                        chat_id, sent.message_id, delay_seconds=0.0, max_attempts=3
+                    )
+                    if not deleted:
+                        track_background_task(
+                            _delete_message_reliably(chat_id, sent.message_id, delay_seconds=3.0, max_attempts=3)
+                        )
+                return f_id
         except Exception as u_err:
-            logging.info(f"Target user {target_user_id} upload failed ({u_err}), trying silent fallback...")
+            logging.info(f"Upload to chat {chat_id} failed: {u_err}")
 
-    fallbacks = []
-    if OWNER_USER_ID and OWNER_USER_ID != target_user_id:
-        fallbacks.append(OWNER_USER_ID)
-    if STORAGE_CHANNEL_ID:
-        try:
-            fallbacks.append(int(STORAGE_CHANNEL_ID))
-        except Exception:
-            pass
-    fb_chat = get_fallback_upload_chat()
-    if fb_chat and fb_chat not in fallbacks and fb_chat != target_user_id:
-        fallbacks.append(fb_chat)
-
-    for chat_id in fallbacks:
-        try:
-            if is_audio:
-                sent = await bot.send_audio(
-                    chat_id=chat_id, audio=FSInputFile(file_path), performer=performer,
-                    title=title, duration=duration, disable_notification=True,
-                )
-                if sent and sent.audio:
-                    if chat_id > 0:
-                        asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
-                    return sent.audio.file_id
-            elif is_photo:
-                sent = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(file_path), disable_notification=True)
-                if sent and sent.photo:
-                    if chat_id > 0:
-                        asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
-                    return sent.photo[-1].file_id
-            else:
-                sent = await bot.send_video(
-                    chat_id=chat_id, video=FSInputFile(file_path), supports_streaming=True, disable_notification=True,
-                )
-                if sent and sent.video:
-                    if chat_id > 0:
-                        asyncio.create_task(_delayed_delete_message(chat_id, sent.message_id, 60))
-                    return sent.video.file_id
-        except Exception as fb_err:
-            logging.debug(f"Fallback upload chat {chat_id} error: {fb_err}")
-
+    logging.warning(
+        f"upload_media_to_telegram exhausted all upload chats (target={target_user_id}, storage={storage_id})"
+    )
     return None
 
 
