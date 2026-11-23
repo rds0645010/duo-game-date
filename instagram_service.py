@@ -659,13 +659,8 @@ async def download_instagram(
         output_prefix = os.path.join(tempfile.gettempdir(), f"ig_{uuid.uuid4().hex[:8]}")
     loop = asyncio.get_running_loop()
 
-    warp_proxy_url = None
-    if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
-        try:
-            if await warp_proxy_module.warp.ensure_ready() and warp_proxy_module.warp.proxy_url:
-                warp_proxy_url = warp_proxy_module.warp.proxy_url
-        except Exception as e:
-            logger.warning(f"Instagram WARP init error: {e}")
+    # Instagram идёт напрямую; WARP используем только как запасной вариант, если он уже запущен (не ждём его старта)
+    warp_proxy_url = warp_proxy_module.warp.proxy_url if (warp_proxy_module and hasattr(warp_proxy_module, "warp")) else None
 
     # 0. Разворачиваем /share/... ссылки до канонического /reel/ или /p/
     clean_url = await _resolve_instagram_share_url(clean_url, proxy=warp_proxy_url)
@@ -678,10 +673,9 @@ async def download_instagram(
     except Exception:
         pass
 
-    strategies = []
+    strategies = [("direct", "")]
     if warp_proxy_url:
         strategies.append(("warp", warp_proxy_url))
-    strategies.append(("direct", ""))
 
     last_error = None
     no_video = False
@@ -788,17 +782,12 @@ async def download_instagram(
     if yt_res:
         return yt_res
 
-    # 2b. Если протухшие/ограниченные cookies вызвали ошибку авторизации — пробуем анонимно без cookies
-    if cookie_file and last_error:
-        err_l = str(last_error).lower()
-        if any(k in err_l for k in (
-            "empty media response", "checkpoint_required", "login", "logged-in",
-            "401", "403", "not granting access", "rate-limit", "rate limit", "restricted video"
-        )):
-            logger.info("[Instagram] Повторяю yt-dlp без cookies (анонимный Polaris + curl_cffi)...")
-            yt_anon_res = await _run_ytdlp_pass(False)
-            if yt_anon_res:
-                return yt_anon_res
+    # 2b. Если cookies вызвали ошибку (в т.ч. HTTP 400 Bad Request, протухшая сессия или блок) — пробуем анонимно без cookies
+    if cookie_file:
+        logger.info("[Instagram] Повторная попытка yt-dlp без cookies (анонимный Polaris + curl_cffi)...")
+        yt_anon_res = await _run_ytdlp_pass(False)
+        if yt_anon_res:
+            return yt_anon_res
 
     # 3. Если это НЕ Reel (обычный пост /p/) — пробуем метаданные для фото/карусели
     if not is_reel:
@@ -855,6 +844,25 @@ async def download_instagram(
     ]):
         raise Exception("instagram_age_restricted")
     raise Exception(f"instagram_video_unavailable: {last_error}")
+
+
+def _fetch_embed_html_cffi(embed_url: str, proxy_url: Optional[str] = None) -> Optional[str]:
+    """Запасной запрос embed-страницы через curl_cffi с TLS-отпечатком Chrome."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        resp = cffi_requests.get(
+            embed_url,
+            headers=EMBED_HEADERS,
+            impersonate="chrome",
+            proxies=proxies,
+            timeout=6,
+        )
+        if resp.status_code == 200 and resp.text:
+            return resp.text
+    except Exception as e:
+        logger.debug(f"curl_cffi embed fetch error for {embed_url}: {e}")
+    return None
 
 
 async def _try_download_instagram_embed_media(
@@ -935,6 +943,18 @@ async def _try_download_instagram_embed_media(
                                 break
                 except Exception as e:
                     logger.debug(f"Embed HTML fetch error for {embed_url} (proxy={cur_proxy}): {e}")
+            if not direct_video_urls:
+                cffi_html = await asyncio.to_thread(_fetch_embed_html_cffi, embed_url, proxy_url)
+                if cffi_html:
+                    if _embed_html_looks_like_video(cffi_html):
+                        detected_video_post = True
+                    for cleaned in _extract_embed_video_urls(cffi_html):
+                        if cleaned not in direct_video_urls:
+                            direct_video_urls.append(cleaned)
+                    for cleaned in _extract_embed_image_urls(cffi_html):
+                        base = cleaned.split("?")[0]
+                        if base not in [x.split("?")[0] for x in img_urls]:
+                            img_urls.append(cleaned)
             if direct_video_urls:
                 break
 

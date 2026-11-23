@@ -259,27 +259,24 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
     # Очищаем трекинговые параметры (_r, u_code, sharer_language), которые ломают парсинг в облаке
     target_url = resolved_url.split("?")[0] if ("/photo/" in resolved_url or "/video/" in resolved_url) else resolved_url
 
-    # Формируем цепочку стратегий: прямой доступ ПЕРВЫМ (мгновенно и без блокировок), затем WARP / proxy
+    # Формируем цепочку стратегий: прямой доступ ПЕРВЫМ (мгновенно), затем уже поднятый WARP / proxy (не ждём старта WARP)
     strategies = [("direct", None)]
-    if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
-        try:
-            if await warp_proxy_module.warp.ensure_ready() and warp_proxy_module.warp.proxy_url:
-                strategies.append(("warp", warp_proxy_module.warp.proxy_url))
-        except Exception as we:
-            logger.debug(f"TikTok WARP not ready: {we}")
+    existing_warp = warp_proxy_module.warp.proxy_url if (warp_proxy_module and hasattr(warp_proxy_module, "warp")) else None
+    if existing_warp:
+        strategies.append(("warp", existing_warp))
     if proxy and ("proxy", proxy) not in strategies and ("warp", proxy) not in strategies:
         strategies.append(("proxy", proxy))
 
     is_photo_post = "/photo/" in url or "/photo/" in target_url or "/photo/" in resolved_url
 
     for strat_name, strat_proxy in strategies:
-        # 1. Пробуем TikWM (он идеально и мгновенно отдает и видео, и оригинальные фото-слайды с метаданными)
+        # 1. Пробуем TikWM (быстрый таймаут 2.5с, чтобы при сбое не задерживать переход на SSSTik)
         urls_to_try = [target_url]
         if target_url != url:
             urls_to_try.append(url)
 
         for u_candidate in urls_to_try:
-            for endpoint in TIKWM_ENDPOINTS:
+            for endpoint in TIKWM_ENDPOINTS[:1]:
                 try:
                     session = await http_pool.get_http_session()
                     async with session.post(
@@ -287,7 +284,7 @@ async def parse_tiktok(url: str, proxy: Optional[str] = None, warp_proxy_module 
                         data={"url": u_candidate, "hd": "1"},
                         headers=DEFAULT_HEADERS,
                         proxy=strat_proxy,
-                        timeout=aiohttp.ClientTimeout(total=4.5)
+                        timeout=aiohttp.ClientTimeout(total=2.5)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -477,13 +474,8 @@ async def download_tiktok(
     if not output_prefix:
         output_prefix = os.path.join(tempfile.gettempdir(), f"tt_{uuid.uuid4().hex[:8]}")
 
-    proxy_url = None
-    if warp_proxy_module and warp_proxy_module.warp.enabled and warp_proxy_module.warp.supported:
-        try:
-            if await warp_proxy_module.warp.ensure_ready():
-                proxy_url = warp_proxy_module.warp.proxy_url
-        except Exception:
-            pass
+    # TikTok работает напрямую; используем WARP только если он уже поднят (никогда не блокируемся на его запуске)
+    proxy_url = warp_proxy_module.warp.proxy_url if (warp_proxy_module and hasattr(warp_proxy_module, "warp")) else None
 
     tikwm_data = await parse_tiktok(clean_url, proxy=proxy_url, warp_proxy_module=warp_proxy_module)
     if not tikwm_data:
