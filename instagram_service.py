@@ -680,11 +680,11 @@ async def download_instagram(
     last_error = None
     no_video = False
 
-    # 1. Для обычных постов /p/ (не Reels) пробуем сначала быстро извлечь метаданные и фото/карусель
+    # 1. Для обычных постов /p/ (не Reels) пробуем сначала анонимно извлечь метаданные и фото/карусель (не тратим куки)
     if not is_reel:
         for strategy_name, strategy_proxy in strategies:
             try:
-                info = await asyncio.to_thread(_extract_instagram_metadata_sync, clean_url, strategy_proxy, cookie_file)
+                info = await asyncio.to_thread(_extract_instagram_metadata_sync, clean_url, strategy_proxy, None)
                 if info:
                     media_res = await _download_from_instagram_meta(
                         info,
@@ -777,17 +777,22 @@ async def download_instagram(
             return res
         return None
 
-    # 2. Выполняем попытку yt-dlp для видео (сначала с cookies, если они есть)
-    yt_res = await _run_ytdlp_pass(bool(cookie_file))
+    # 2. Сначала пробуем yt-dlp анонимно (без cookies), чтобы публичные ролики не нагружали сессию и не вызывали checkpoint
+    yt_res = await _run_ytdlp_pass(False)
     if yt_res:
         return yt_res
 
-    # 2b. Если cookies вызвали ошибку (в т.ч. HTTP 400 Bad Request, протухшая сессия или блок) — пробуем анонимно без cookies
-    if cookie_file:
-        logger.info("[Instagram] Повторная попытка yt-dlp без cookies (анонимный Polaris + curl_cffi)...")
-        yt_anon_res = await _run_ytdlp_pass(False)
-        if yt_anon_res:
-            return yt_anon_res
+    anon_error = last_error
+
+    # 2b. Если анонимно не отдали (18+, login wall, закрытый пост) и есть cookies — пробуем с cookies
+    if cookie_file and not no_video:
+        logger.info("[Instagram] Анонимно не удалось, пробую yt-dlp с cookies (для 18+/закрытых постов)...")
+        yt_cookie_res = await _run_ytdlp_pass(True)
+        if yt_cookie_res:
+            return yt_cookie_res
+        if anon_error and last_error and "400" in str(last_error).lower() and "bad request" in str(last_error).lower():
+            # Сохраняем исходную причину (например 18+ / login_required), если cookies протухли с HTTP 400
+            last_error = anon_error
 
     # 3. Если это НЕ Reel (обычный пост /p/) — пробуем метаданные для фото/карусели
     if not is_reel:
